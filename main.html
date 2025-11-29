@@ -1,0 +1,55 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<script src="mindc.js">
+	
+	</script>
+	<script>
+	
+	function do_compile() {
+		var txt = document.getElementById('txt').value;
+		// debug..
+		
+		var lex = new Lexer(txt);
+		//lex.tokenize();
+		//console.log(lex);
+		var prs = new Parser(lex);
+		var result = prs.parse();
+		console.log(prs.lexer);
+		console.log(result);
+		if (result.success) {
+		/*
+			var further = new SemanticAnalyzer();
+			further.analyze(result.ast);
+			console.log(further);
+			if (further.success) {
+				var optimizer = new Optimizer();
+				optimizer.optimize()
+			}
+		*/
+		
+			var optimizer = new Optimizer();
+			var opt = optimizer.optimize(result.ast);
+			console.log(opt);
+			if (opt.success) {
+				var further = new SemanticAnalyzer();
+				further.analyze(opt.ast);
+				console.log(further);
+			}
+		
+		}
+	}
+	
+	</script>
+</head>
+<body>
+	<textarea id="txt">
+	
+	</textarea>
+	<button onclick="do_compile();">Compile</button>
+	<textarea id="result">
+	
+	</textarea>
+</body>
+</html>
