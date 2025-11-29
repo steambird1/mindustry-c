@@ -1516,6 +1516,8 @@ class Parser {
             case TokenType.ASM:
                 return this.parseAsmStatement();
             
+			case TokenType.CONST:
+			case TokenType.VOLATILE:
             case TokenType.INT:
             case TokenType.CHAR:
             case TokenType.FLOAT:
