@@ -93,6 +93,20 @@ const ASTNodeType = {
     // 声明
     VARIABLE_DECLARATION: 'VariableDeclaration',
     VARIABLE_DECLARATOR: 'VariableDeclarator',
+	
+	// 类型定义相关
+    TYPEDEF_DECLARATION: 'TypedefDeclaration',
+    STRUCT_DEFINITION: 'StructDefinition',
+    UNION_DEFINITION: 'UnionDefinition',
+    STRUCT_MEMBER: 'StructMember',
+    UNION_MEMBER: 'UnionMember',
+    
+    // 类型限定符
+    TYPE_QUALIFIER: 'TypeQualifier',
+	
+	// 指针类型相关
+    POINTER_TYPE: 'PointerType',
+    DECLARATOR: 'Declarator',
     
     // 表达式
     BINARY_EXPRESSION: 'BinaryExpression',
@@ -231,11 +245,15 @@ class VariableDeclarationNode extends ASTNode {
     }
 }
 
+// 修改VariableDeclaratorNode以支持指针信息
 class VariableDeclaratorNode extends ASTNode {
     constructor(name) {
         super(ASTNodeType.VARIABLE_DECLARATOR);
         this.name = name;
         this.initializer = null;
+        this.pointerDepth = 0; // 指针深度
+        this.pointerQualifiers = []; // 指针限定符数组，每个元素对应一级指针
+        this.arrayDimensions = []; // 数组维度
     }
 }
 
@@ -364,10 +382,60 @@ class NullLiteralNode extends ASTNode {
     }
 }
 
+// 修改TypeSpecifierNode以存储限定符信息
 class TypeSpecifierNode extends ASTNode {
     constructor(typeName) {
         super(ASTNodeType.TYPE_SPECIFIER);
         this.typeName = typeName;
+        this.qualifiers = []; // 类型限定符（const, volatile）
+        this.pointerDepth = 0; // 指针深度（向后兼容）
+        this.pointerQualifiers = []; // 指针限定符（向后兼容）
+    }
+}
+
+// 添加新的AST节点类
+class TypedefDeclarationNode extends ASTNode {
+    constructor(type, declarators) {
+        super(ASTNodeType.TYPEDEF_DECLARATION);
+        this.type = type; // 基础类型
+        this.declarators = declarators || []; // 类型别名列表
+        this.isStruct = false;
+        this.isUnion = false;
+        this.structDefinition = null; // 如果是结构体/联合体类型定义
+    }
+}
+
+class StructDefinitionNode extends ASTNode {
+    constructor(name) {
+        super(ASTNodeType.STRUCT_DEFINITION);
+        this.name = name;
+        this.members = [];
+        this.isDefinition = false; // 是否完整定义（有成员列表）
+    }
+}
+
+class UnionDefinitionNode extends ASTNode {
+    constructor(name) {
+        super(ASTNodeType.UNION_DEFINITION);
+        this.name = name;
+        this.members = [];
+        this.isDefinition = false; // 是否完整定义（有成员列表）
+    }
+}
+
+class StructMemberNode extends ASTNode {
+    constructor(type, name) {
+        super(ASTNodeType.STRUCT_MEMBER);
+        this.type = type;
+        this.name = name;
+        this.bitField = null; // 位域大小（如果有）
+    }
+}
+
+class TypeQualifierNode extends ASTNode {
+    constructor(qualifier) {
+        super(ASTNodeType.TYPE_QUALIFIER);
+        this.qualifier = qualifier; // 'const' 或 'volatile'
     }
 }
 
@@ -375,6 +443,27 @@ class AsmStatementNode extends ASTNode {
     constructor(code) {
         super(ASTNodeType.ASM_STATEMENT);
         this.code = code;
+    }
+}
+
+class PointerTypeNode extends ASTNode {
+    constructor(baseType, qualifiers = [], pointerDepth = 1) {
+        super(ASTNodeType.POINTER_TYPE);
+        this.baseType = baseType; // 指向的类型
+        this.qualifiers = qualifiers; // 指针本身的限定符
+        this.pointerDepth = pointerDepth; // 指针深度（1表示单级指针）
+        this.innerPointer = null; // 内层指针（用于多级指针）
+    }
+}
+
+class DeclaratorNode extends ASTNode {
+    constructor(name) {
+        super(ASTNodeType.DECLARATOR);
+        this.name = name; // 变量名
+        this.pointerDepth = 0; // 指针深度
+        this.pointerQualifiers = []; // 指针限定符数组，每个元素对应一级指针
+        this.arrayDimensions = []; // 数组维度
+        this.functionParams = null; // 函数参数（用于函数指针）
     }
 }
 
@@ -467,7 +556,35 @@ class ASTBuilder {
     static typeSpecifier(typeName) {
         return new TypeSpecifierNode(typeName);
     }
+	
+	static typedefDeclaration(type, declarators) {
+        return new TypedefDeclarationNode(type, declarators);
+    }
     
+    static structDefinition(name) {
+        return new StructDefinitionNode(name);
+    }
+    
+    static unionDefinition(name) {
+        return new UnionDefinitionNode(name);
+    }
+    
+    static structMember(type, name) {
+        return new StructMemberNode(type, name);
+    }
+    
+    static typeQualifier(qualifier) {
+        return new TypeQualifierNode(qualifier);
+    }
+    
+	static pointerType(baseType, qualifiers = [], pointerDepth = 1) {
+        return new PointerTypeNode(baseType, qualifiers, pointerDepth);
+    }
+    
+    static declarator(name) {
+        return new DeclaratorNode(name);
+    }
+	
     static asmStatement(code) {
         return new AsmStatementNode(code);
     }
@@ -783,8 +900,16 @@ const OPERATORS = {
     '*=': TokenType.MULTIPLY_ASSIGN,
     '/=': TokenType.DIVIDE_ASSIGN,
     '%=': TokenType.MODULO_ASSIGN,
+	'<<=': TokenType.LEFT_SHIFT_ASSIGN,
+    '>>=': TokenType.RIGHT_SHIFT_ASSIGN,
+    '&=': TokenType.BITWISE_AND_ASSIGN,
+    '|=': TokenType.BITWISE_OR_ASSIGN,
+    '^=': TokenType.BITWISE_XOR_ASSIGN,
     '++': TokenType.INCREMENT,
-    '--': TokenType.DECREMENT
+    '--': TokenType.DECREMENT,
+	// 成员访问运算符
+    '.': TokenType.DOT,
+    '->': TokenType.ARROW
 };
 
 // 标点符号映射
@@ -1158,6 +1283,12 @@ class Parser {
         this.currentTokenIndex = 0;
         this.errors = [];
         this.currentScope = null;
+		
+		// 添加已知类型集合
+        this.knownTypeNames = new Set([
+            'int', 'char', 'float', 'void', 'double', 'long', 'short',
+            'signed', 'unsigned', 'device', 'null_t'
+        ]);
     }
 
     parse() {
@@ -1200,10 +1331,11 @@ class Parser {
     }
 
     consumeToken() {
+		const gotToken = this.getCurrentToken();
         if (this.currentTokenIndex < this.tokens.length) {
             this.currentTokenIndex++;
         }
-        return this.getCurrentToken();
+        return gotToken;	// This should be the logic...
     }
 
     matchToken(expectedType, expectedValue = null) {
@@ -1242,11 +1374,85 @@ class Parser {
     parseProgram() {
         const program = ASTBuilder.program();
         const startLocation = this.getCurrentToken().location;
+		
+		// 第一遍：收集类型定义
+        const typeDefinitions = [];
+        const savedIndex = this.currentTokenIndex;
+        
+        while (!this.matchToken(TokenType.EOF)) {
+            if (this.matchToken(TokenType.SEMICOLON)) {
+                this.consumeToken(); // 跳过空语句
+                continue;
+            }
+
+            // 尝试解析类型定义（typedef）
+            if (this.matchToken(TokenType.TYPEDEF)) {
+                const typedefDecl = this.parseTypedefDeclaration();
+                if (typedefDecl) {
+                    typeDefinitions.push(typedefDecl);
+                    // 记录类型名
+                    typedefDecl.declarators.forEach(d => {
+                        if (d.name) {
+                            this.addTypeName(d.name);
+                        }
+                    });
+                    continue;
+                }
+            }
+
+            // 尝试解析结构体/联合体定义
+            if (this.matchToken(TokenType.STRUCT) || this.matchToken(TokenType.UNION)) {
+                const startIdx = this.currentTokenIndex;
+                const typeDef = this.parseStructOrUnionDefinition();
+                if (typeDef && typeDef.isDefinition) {
+                    typeDefinitions.push(typeDef);
+                    // 记录类型名
+                    if (typeDef.name) {
+                        this.addTypeName(typeDef.name);
+                    }
+                    continue;
+                } else {
+                    this.currentTokenIndex = startIdx;
+                }
+            }
+
+            // 跳过其他token
+            this.consumeToken();
+        }
+
+        // 重置位置进行第二遍解析
+        this.currentTokenIndex = savedIndex;
 
         while (!this.matchToken(TokenType.EOF)) {
             if (this.matchToken(TokenType.SEMICOLON)) {
                 this.consumeToken(); // 跳过空语句
                 continue;
+            }
+			
+			// 尝试解析类型定义（typedef）
+            if (this.matchToken(TokenType.TYPEDEF)) {
+                const typedefDecl = this.parseTypedefDeclaration();
+                if (typedefDecl) {
+                    program.typeDefinitions = program.typeDefinitions || [];
+                    program.typeDefinitions.push(typedefDecl);
+                    continue;
+                }
+            }
+
+            // 尝试解析结构体/联合体定义（没有变量声明）
+            if (this.matchToken(TokenType.STRUCT) || this.matchToken(TokenType.UNION)) {
+                // 先查看后面是否是定义
+                const startIndex = this.currentTokenIndex;
+                const typeDef = this.parseStructOrUnionDefinition();
+                if (typeDef && typeDef.isDefinition) {
+                    // 这是一个完整的结构体/联合体定义
+                    program.typeDefinitions = program.typeDefinitions || [];
+                    program.typeDefinitions.push(typeDef);
+                    continue;
+                } else {
+                    // 回退，可能是结构体/联合体变量声明
+                    this.currentTokenIndex = startIndex;
+                }
             }
 
             // 解析全局声明或函数定义
@@ -1261,134 +1467,684 @@ class Parser {
                 // 跳过无法解析的token
                 this.consumeToken();
             }
+			
+			// A meaningless makeup:
+			/*
+			const declaration = this.parseDeclaration();
+            if (declaration) {
+                if (declaration.type === 'FunctionDeclaration') {
+                    program.functions.push(declaration);
+                } else if (declaration.type === 'TypedefDeclaration' || 
+                          declaration.type === 'StructDefinition' || 
+                          declaration.type === 'UnionDefinition') {
+                    // 这些应该已经在第一遍处理了，但以防万一
+                    program.typeDefinitions = program.typeDefinitions || [];
+                    program.typeDefinitions.push(declaration);
+                } else {
+                    program.globalDeclarations.push(declaration);
+                }
+            } else {
+                // 跳过无法解析的token
+                this.consumeToken();
+            }
+			*/
         }
 
         program.location = startLocation;
         return program;
     }
-
-    parseDeclaration() {
-        // 检查是否为函数声明
-        const lookahead = this.lookaheadForFunction();
-        if (lookahead.isFunction) {
-            return this.parseFunctionDeclaration();
-        } else {
-            return this.parseVariableDeclaration();
-        }
-    }
-
-    lookaheadForFunction() {
-        let startIndex = this.currentTokenIndex;
-        let isFunction = false;
-
-        // 跳过类型说明符
-        while (this.matchTokenTypeAt(startIndex, [
-            TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID,
-            TokenType.DOUBLE, TokenType.LONG, TokenType.SHORT, TokenType.SIGNED, TokenType.UNSIGNED
-        ])) {
-            startIndex++;
-        }
-
-        // 接下来应该是标识符
-        if (this.matchTokenTypeAt(startIndex, [TokenType.IDENTIFIER])) {
-            // 再接下来是 '(' 说明是函数
-            if (this.matchTokenTypeAt(startIndex + 1, [TokenType.LEFT_PAREN])) {
-                isFunction = true;
-            }
-        }
-
-        return { isFunction };
-    }
-
-    matchTokenTypeAt(index, types) {
+	
+	matchTokenTypeAt(index, types) {
         if (index >= this.tokens.length) return false;
         const token = this.tokens[index];
         return types.includes(token.type);
     }
+	
+	parseTypedefDeclaration() {
+        const typedefToken = this.expectToken(TokenType.TYPEDEF);
+        if (!typedefToken) return null;
 
+        // 解析类型说明符
+        const baseType = this.parseTypeSpecifier();
+        if (!baseType) {
+            this.addError('Expected type specifier after typedef');
+            return null;
+        }
+
+        // 解析声明符（类型别名），可以有多个
+        const declarators = [];
+        do {
+            const declarator = this.parseDeclarator(false);
+            if (declarator && declarator.name) {
+				// Manually merged !!
+				this.addTypeName(declarator.name);
+                // 创建类型别名声明符
+                const typeDeclarator = ASTBuilder.variableDeclarator(declarator.name);
+                typeDeclarator.location = declarator.location;
+                typeDeclarator.pointerDepth = declarator.pointerDepth;
+                typeDeclarator.pointerQualifiers = declarator.pointerQualifiers;
+                typeDeclarator.arrayDimensions = declarator.arrayDimensions;
+                declarators.push(typeDeclarator);
+            }
+        } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
+
+        this.expectToken(TokenType.SEMICOLON);
+
+        const typedefDecl = ASTBuilder.typedefDeclaration(baseType, declarators);
+        typedefDecl.location = typedefToken.location;
+        
+        // 如果声明符有指针信息，需要创建对应的指针类型定义
+        if (declarators.some(d => d.pointerDepth > 0)) {
+            typedefDecl.hasPointerTypes = true;
+        }
+        
+        return typedefDecl;
+    }
+
+    parseTypedefDeclarator() {
+        // 简单的类型别名（不支持复杂的声明符如指针、数组等）
+        const nameToken = this.expectToken(TokenType.IDENTIFIER);
+        if (!nameToken) return null;
+
+        // 创建一个简单的声明符节点
+        const declarator = ASTBuilder.variableDeclarator(nameToken.value);
+        declarator.location = nameToken.location;
+        return declarator;
+    }
+
+    parseStructOrUnionDefinition() {
+        const isUnion = this.matchToken(TokenType.UNION);
+        const structOrUnionToken = this.consumeToken(); // 消耗 'struct' 或 'union'
+        
+        // 解析结构体/联合体名称（可选）
+        let name = null;
+        if (this.matchToken(TokenType.IDENTIFIER)) {
+            const nameToken = this.consumeToken();
+            name = nameToken.value;
+        }
+
+        // 检查是否有成员定义
+        let members = [];
+        let isDefinition = false;
+        
+        if (this.matchToken(TokenType.LEFT_BRACE)) {
+            isDefinition = true;
+            this.consumeToken(); // 跳过 '{'
+            
+            // 解析成员列表
+            while (!this.matchToken(TokenType.RIGHT_BRACE) && !this.matchToken(TokenType.EOF)) {
+                const member = this.parseStructMember();
+                if (member) {
+                    members.push(member);
+                } else {
+                    break;
+                }
+            }
+            
+            this.expectToken(TokenType.RIGHT_BRACE);
+        }
+
+        // 创建结构体/联合体定义节点
+        let typeDef;
+        if (isUnion) {
+            typeDef = ASTBuilder.unionDefinition(name);
+            typeDef.type = 'union';
+        } else {
+            typeDef = ASTBuilder.structDefinition(name);
+            typeDef.type = 'struct';
+        }
+        
+        typeDef.members = members;
+        typeDef.isDefinition = isDefinition;
+        typeDef.location = structOrUnionToken.location;
+        
+		if (name) {
+            this.addTypeName(name);
+        }
+		
+        // 检查是否有变量声明部分（如 struct S { ... } var1, var2;）
+        // 如果有，需要特殊处理（这里我们暂时不支持）
+		// !! Notice this unsupported feature !!
+        
+        return typeDef;
+    }
+
+    // 修改struct/union成员解析，支持指针成员
+    parseStructMember() {
+        // 解析类型说明符
+        const memberType = this.parseTypeSpecifier();
+        if (!memberType) return null;
+
+        // 解析成员声明符
+        const declarator = this.parseDeclarator(false);
+        if (!declarator || !declarator.name) {
+            this.addError('Expected member name in struct/union');
+            return null;
+        }
+
+        // 检查是否有位域
+		// TODO: Honestly speaking, I don't think I will remember implementing this at all...
+		// (Yes, it's of great importance for Mindustry, if possible.)
+        let bitField = null;
+        if (this.matchToken(TokenType.COLON)) {
+            this.consumeToken(); // 跳过 ':'
+            const bitFieldExpr = this.parseExpression();
+            if (bitFieldExpr) {
+                bitField = bitFieldExpr;
+            }
+        }
+
+        this.expectToken(TokenType.SEMICOLON);
+
+        const member = ASTBuilder.structMember(memberType, declarator.name);
+        member.bitField = bitField;
+        member.location = declarator.location;
+        member.pointerDepth = declarator.pointerDepth;
+        member.pointerQualifiers = declarator.pointerQualifiers;
+        member.arrayDimensions = declarator.arrayDimensions;
+        return member;
+    }
+
+	// (This function has manual changes!!!)
+    parseTypeSpecifier() {
+        // 解析类型限定符（const, volatile）
+        const qualifiers = this.parseTypeQualifiers();
+        /*
+        // 检查基本类型
+        const typeTokens = [
+            TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID,
+            TokenType.DOUBLE, TokenType.LONG, TokenType.SHORT, 
+            TokenType.SIGNED, TokenType.UNSIGNED
+        ];
+		
+        for (const typeToken of typeTokens) {
+            if (this.matchToken(typeToken)) {
+				// 此处应该取当前 token 而不是下一个 token
+				// Change withdrawn with changes in consumeToken
+                const token = this.consumeToken();
+                const typeNode = ASTBuilder.typeSpecifier(token.value);
+                typeNode.setAttribute('location', token.location);
+                typeNode.setAttribute('qualifiers', qualifiers);
+                return typeNode;
+            }
+        }
+
+        // 检查结构体/联合体类型
+        if (this.matchToken(TokenType.STRUCT) || this.matchToken(TokenType.UNION)) {
+            return this.parseStructOrUnionTypeSpecifier(qualifiers);
+        }
+		
+        // 检查枚举类型（简单实现）
+        if (this.matchToken(TokenType.ENUM)) {
+            const enumToken = this.consumeToken();
+            const typeNode = ASTBuilder.typeSpecifier('enum');
+            typeNode.setAttribute('location', enumToken.location);
+            typeNode.setAttribute('qualifiers', qualifiers);
+            // 可以进一步解析枚举定义
+            return typeNode;
+        }
+		*/
+		
+		const typeTokens = [
+            TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID,
+            TokenType.DOUBLE, TokenType.LONG, TokenType.SHORT, TokenType.SIGNED, TokenType.UNSIGNED,
+            TokenType.STRUCT, TokenType.UNION, TokenType.ENUM
+        ];
+
+        for (const typeToken of typeTokens) {
+            if (this.matchToken(typeToken)) {
+                const token = this.consumeToken();
+                const typeNode = ASTBuilder.typeSpecifier(token.value);
+                typeNode.setAttribute('location', token.location);
+                typeNode.setAttribute('qualifiers', qualifiers);
+                
+                // 处理struct/union/enum类型
+                if (token.type === TokenType.STRUCT || token.type === TokenType.UNION) {
+                    this.parseStructOrUnionType(typeNode);
+                } else if (token.type === TokenType.ENUM) {
+                    this.parseEnumType(typeNode);
+                }
+                
+                return typeNode;
+            }
+        }
+
+        // 特殊类型：device 和 null_t
+        if (this.matchToken(TokenType.IDENTIFIER)) {
+            const token = this.getCurrentToken();
+            if (token.value === 'device' || token.value === 'null_t') {
+                this.consumeToken();
+                const typeNode = ASTBuilder.typeSpecifier(token.value);
+                typeNode.setAttribute('location', token.location);
+                typeNode.setAttribute('qualifiers', qualifiers);
+                return typeNode;
+            }
+            
+            // 可能是通过typedef定义的类型别名
+            const typeNode = ASTBuilder.typeSpecifier(token.value);
+            typeNode.setAttribute('location', token.location);
+            typeNode.setAttribute('qualifiers', qualifiers);
+            typeNode.setAttribute('isTypedef', true);
+			typeNode.setAttribute('isCustomType', true);
+            this.consumeToken();
+            return typeNode;
+        }
+
+        this.addError('Expected type specifier');
+        return null;
+    }
+
+	// 修改函数参数解析
+    parseParameter() {
+        // 解析类型说明符
+        const paramType = this.parseTypeSpecifier();
+        if (!paramType) return null;
+        
+        // 解析声明符
+        const declarator = this.parseDeclarator(true);
+        if (!declarator) return null;
+        
+        return {
+            type: paramType,
+            name: declarator.name,
+            pointerDepth: declarator.pointerDepth,
+            pointerQualifiers: declarator.pointerQualifiers,
+            arrayDimensions: declarator.arrayDimensions,
+            location: declarator.location || paramType.location
+        };
+    }
+
+	parseDeclarator(isFunctionParam = false) {
+        let declarator = null;
+        
+        // 解析指针部分
+        const pointerQualifiers = [];
+        let pointerDepth = 0;
+        
+        while (this.matchToken(TokenType.MULTIPLY)) {
+            this.consumeToken(); // 跳过 '*'
+            pointerDepth++;
+            
+            // 解析指针限定符
+            const qualifiers = this.parseTypeQualifiers();
+            pointerQualifiers.push(qualifiers);
+        }
+        
+        // 解析直接声明符
+        if (this.matchToken(TokenType.LEFT_PAREN)) {
+            // 处理括号声明符，如：int (*a);
+            this.consumeToken(); // 跳过 '('
+            declarator = this.parseDeclarator(isFunctionParam);
+            this.expectToken(TokenType.RIGHT_PAREN);
+        } else {
+            // 解析标识符
+            const nameToken = this.expectToken(TokenType.IDENTIFIER);
+            if (!nameToken) {
+                // 如果是函数参数且没有名称（如：void func(int))
+                if (isFunctionParam) {
+                    return ASTBuilder.declarator(null);
+                }
+                return null;
+            }
+            
+            declarator = ASTBuilder.declarator(nameToken.value);
+            declarator.location = nameToken.location;
+        }
+        
+        // 解析数组和函数后缀
+        while (true) {
+            // 数组维度
+            if (this.matchToken(TokenType.LEFT_BRACKET)) {
+                this.consumeToken(); // 跳过 '['
+                let dimension = null;
+                if (!this.matchToken(TokenType.RIGHT_BRACKET)) {
+                    dimension = this.parseExpression();
+                }
+                this.expectToken(TokenType.RIGHT_BRACKET);
+                declarator.arrayDimensions.push(dimension);
+            }
+            // 函数参数列表
+            else if (this.matchToken(TokenType.LEFT_PAREN)) {
+                this.consumeToken(); // 跳过 '('
+                const params = [];
+                if (!this.matchToken(TokenType.RIGHT_PAREN)) {
+                    do {
+                        const param = this.parseParameter();
+                        if (param) {
+                            params.push(param);
+                        }
+                    } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
+                }
+                this.expectToken(TokenType.RIGHT_PAREN);
+                declarator.functionParams = params;
+            }
+            else {
+                break;
+            }
+        }
+        
+        // 设置指针信息
+        declarator.pointerDepth = pointerDepth;
+        declarator.pointerQualifiers = pointerQualifiers;
+        
+        return declarator;
+    }
+
+    parseTypeQualifiers() {
+        const qualifiers = [];
+        while (this.matchToken(TokenType.CONST) || this.matchToken(TokenType.VOLATILE)) {
+            const qualifierToken = this.consumeToken();
+            qualifiers.push(qualifierToken.value);
+        }
+        return qualifiers;
+    }
+
+	// ****
+	// THIS FUNCTION HAS A MANUAL CHANGE
+	// ****
+    parseStructOrUnionTypeSpecifier(qualifiers) {
+        const isUnion = this.matchToken(TokenType.UNION);
+		// Withdrawn
+        const structOrUnionToken = this.consumeToken();
+        
+        let name = null;
+        if (this.matchToken(TokenType.IDENTIFIER)) {
+			// Withdrawn
+            const nameToken = this.consumeToken();
+            name = nameToken.value;
+        }
+
+        // 创建类型说明符节点
+        const typeNode = ASTBuilder.typeSpecifier(isUnion ? 'union' : 'struct');
+        typeNode.setAttribute('location', structOrUnionToken.location);
+        typeNode.setAttribute('qualifiers', qualifiers);
+        typeNode.setAttribute('structOrUnionName', name);
+        
+        return typeNode;
+    }
+	
+	// Is this really useful:
+	// 添加解析struct/union类型的方法
+    parseStructOrUnionType(structNode) {
+        // 检查是否有结构体/联合体名称
+        if (this.matchToken(TokenType.IDENTIFIER)) {
+            const nameToken = this.consumeToken();
+            structNode.setAttribute('structOrUnionName', nameToken.value);
+        }
+
+        // 检查是否有结构体体（可选）
+        if (this.matchToken(TokenType.LEFT_BRACE)) {
+            this.consumeToken(); // 跳过 '{'
+            
+            while (!this.matchToken(TokenType.RIGHT_BRACE) && !this.matchToken(TokenType.EOF)) {
+                // 跳过成员定义（在类型说明符中不解析成员）
+                if (this.matchToken(TokenType.SEMICOLON)) {
+                    this.consumeToken();
+                } else {
+                    this.consumeToken();
+                }
+            }
+            
+            if (this.matchToken(TokenType.RIGHT_BRACE)) {
+                this.consumeToken(); // 跳过 '}'
+            }
+        }
+        
+        return structNode;
+    }
+
+    // 添加解析enum类型的方法
+    parseEnumType(enumNode) {
+        // 检查是否有枚举名称
+        if (this.matchToken(TokenType.IDENTIFIER)) {
+            const nameToken = this.consumeToken();
+            enumNode.setAttribute('enumName', nameToken.value);
+        }
+
+        // 检查是否有枚举体（可选）
+        if (this.matchToken(TokenType.LEFT_BRACE)) {
+            this.consumeToken(); // 跳过 '{'
+            
+            while (!this.matchToken(TokenType.RIGHT_BRACE) && !this.matchToken(TokenType.EOF)) {
+                // 跳过枚举值定义
+                if (this.matchToken(TokenType.SEMICOLON)) {
+                    this.consumeToken();
+                } else {
+                    this.consumeToken();
+                }
+            }
+            
+            if (this.matchToken(TokenType.RIGHT_BRACE)) {
+                this.consumeToken(); // 跳过 '}'
+            }
+        }
+        
+        return enumNode;
+    }
+
+    // 修改lookaheadForFunction方法以考虑类型定义
+	// ****
+	// THIS FUNCTION HAS A MANUAL CHANGE
+	// ****
+    lookaheadForFunction() {
+        let startIndex = this.currentTokenIndex;
+        let currentIndex = startIndex;
+        
+        // 跳过类型限定符和存储类说明符
+        while (this.matchTokenTypeAt(currentIndex, [
+            TokenType.CONST, TokenType.VOLATILE,
+            TokenType.STATIC, TokenType.EXTERN, TokenType.AUTO, TokenType.REGISTER
+        ])) {
+            currentIndex++;
+        }
+
+		// (手动编写)
+		// 注意：如果最后一个是 Identifier，是函数名！
+		let endedAsIdentifier = false;
+
+        // 跳过类型说明符
+        while (this.matchTokenTypeAt(currentIndex, [
+            TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID,
+            TokenType.DOUBLE, TokenType.LONG, TokenType.SHORT, TokenType.SIGNED, TokenType.UNSIGNED,
+            TokenType.STRUCT, TokenType.UNION, TokenType.ENUM,
+            TokenType.IDENTIFIER // typedef定义的类型
+        ])) {
+			endedAsIdentifier = this.matchTokenTypeAt(currentIndex, [TokenType.IDENTIFIER]);
+            currentIndex++;
+        }
+		
+		// 最后一个是函数名称
+		if (endedAsIdentifier) currentIndex--;
+        
+        // 跳过指针（可能有多个）
+        while (this.matchTokenTypeAt(currentIndex, [TokenType.MULTIPLY])) {
+            currentIndex++;
+            // 跳过指针限定符
+            while (this.matchTokenTypeAt(currentIndex, [TokenType.CONST, TokenType.VOLATILE])) {
+                currentIndex++;
+            }
+        }
+		
+        // 接下来应该是标识符
+        if (this.matchTokenTypeAt(currentIndex, [TokenType.IDENTIFIER])) {
+            // 再接下来是 '(' 说明是函数
+            if (this.matchTokenTypeAt(currentIndex + 1, [TokenType.LEFT_PAREN])) {
+                return { isFunction: true };
+            }
+        }
+
+        return { isFunction: false };
+    }
+
+    // 修改parseDeclaration以处理结构体/联合体变量声明
+    parseDeclaration() {
+		/*
+        // 检查是否是结构体/联合体变量声明
+        const lookahead = this.lookaheadForStructOrUnionVariable();
+        if (lookahead.isStructOrUnionVar) {
+            return this.parseStructOrUnionVariableDeclaration();
+        }
+
+        // 检查是否为函数声明
+        const funcLookahead = this.lookaheadForFunction();
+        if (funcLookahead.isFunction) {
+            return this.parseFunctionDeclaration();
+        } else {
+            return this.parseVariableDeclaration();
+        }
+		*/
+		// 检查是否为函数声明
+        const lookahead = this.lookaheadForFunction();
+        if (lookahead.isFunction) {
+            return this.parseFunctionDeclaration();
+        }
+        
+        // 尝试解析变量声明
+        const startIndex = this.currentTokenIndex;
+        const varDecl = this.parseVariableDeclaration();
+        if (varDecl) {
+            return varDecl;
+        }
+        
+        // 回退并尝试解析typedef或结构体定义
+        this.currentTokenIndex = startIndex;
+        
+        // 检查是否为typedef
+        if (this.matchToken(TokenType.TYPEDEF)) {
+            return this.parseTypedefDeclaration();
+        }
+        
+        // 检查是否为结构体/联合体定义
+        if (this.matchToken(TokenType.STRUCT) || this.matchToken(TokenType.UNION)) {
+            const startIndex2 = this.currentTokenIndex;
+            const typeDef = this.parseStructOrUnionDefinition();
+            if (typeDef && typeDef.isDefinition) {
+                // 这是一个完整的结构体/联合体定义
+                return typeDef;
+            } else {
+                // 回退，可能是结构体/联合体变量声明
+                this.currentTokenIndex = startIndex2;
+                const varDecl2 = this.parseVariableDeclaration();
+                if (varDecl2) {
+                    return varDecl2;
+                }
+            }
+        }
+        
+        return null;
+    }
+
+    lookaheadForStructOrUnionVariable() {
+        const startIndex = this.currentTokenIndex;
+        let currentIndex = startIndex;
+        let isStructOrUnionVar = false;
+
+        // 检查是否是struct或union
+        if (this.matchTokenTypeAt(currentIndex, [TokenType.STRUCT, TokenType.UNION])) {
+            // 跳过struct/union和可能的名称
+            currentIndex++;
+            if (this.matchTokenTypeAt(currentIndex, [TokenType.IDENTIFIER])) {
+                currentIndex++;
+            }
+            
+            // 检查是否有左花括号（定义）
+            if (this.matchTokenTypeAt(currentIndex, [TokenType.LEFT_BRACE])) {
+                // 跳过成员定义
+                currentIndex++;
+                let braceCount = 1;
+                while (braceCount > 0 && currentIndex < this.tokens.length) {
+                    if (this.tokens[currentIndex].type === TokenType.LEFT_BRACE) braceCount++;
+                    if (this.tokens[currentIndex].type === TokenType.RIGHT_BRACE) braceCount--;
+                    currentIndex++;
+                }
+            }
+            
+            // 跳过可能的指针
+            while (this.matchTokenTypeAt(currentIndex, [TokenType.MULTIPLY])) {
+                currentIndex++;
+                // 跳过指针限定符
+                while (this.matchTokenTypeAt(currentIndex, [TokenType.CONST, TokenType.VOLATILE])) {
+                    currentIndex++;
+                }
+            }
+            
+            // 检查后面是否有标识符（变量名）
+            if (this.matchTokenTypeAt(currentIndex, [TokenType.IDENTIFIER])) {
+                isStructOrUnionVar = true;
+            }
+        }
+
+        return { isStructOrUnionVar };
+    }
+
+    parseStructOrUnionVariableDeclaration() {
+        const type = this.parseTypeSpecifier();
+        if (!type) return null;
+
+        const declarators = [];
+        do {
+            const declarator = this.parseVariableDeclarator();
+            if (declarator) {
+                declarators.push(declarator);
+            }
+        } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
+
+        this.expectToken(TokenType.SEMICOLON);
+
+        const varDecl = ASTBuilder.variableDeclaration(type, declarators);
+        varDecl.location = type.location;
+        varDecl.isStructOrUnion = true;
+        return varDecl;
+    }
+
+    // 更新isBuiltinFunction方法，添加更多内建函数
+    isBuiltinFunction(name) {
+        const builtins = [
+            'draw', 'print', 'drawflush', 'printflush', 'getlink',
+            'control', 'radar', 'sensor', 'set', 'op', 'lookup',
+            'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm'
+        ];
+        return builtins.includes(name);
+    }
+
+    // 修改函数声明解析中的参数列表处理
     parseFunctionDeclaration() {
         const returnType = this.parseTypeSpecifier();
         if (!returnType) return null;
 
-        const nameToken = this.expectToken(TokenType.IDENTIFIER);
-        if (!nameToken) return null;
-
-        this.expectToken(TokenType.LEFT_PAREN);
-
-        const functionDecl = ASTBuilder.functionDeclaration(nameToken.value, returnType);
-        functionDecl.location = returnType.location;
-
-        // 解析参数
-        if (!this.matchToken(TokenType.RIGHT_PAREN)) {
-            do {
-                const paramType = this.parseTypeSpecifier();
-                if (!paramType) break;
-
-                const paramName = this.expectToken(TokenType.IDENTIFIER);
-                if (paramName) {
-                    functionDecl.parameters.push({
-                        type: paramType,
-                        name: paramName.value,
-                        location: paramType.location
-                    });
-                }
-            } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
+        // 解析函数名
+        const declarator = this.parseDeclarator(false);
+        if (!declarator || !declarator.name) {
+            this.addError('Expected function name');
+            return null;
         }
 
-        this.expectToken(TokenType.RIGHT_PAREN);
-        functionDecl.body = this.parseCompoundStatement();
+        // 函数不能有数组维度
+        if (declarator.arrayDimensions.length > 0) {
+            this.addError('Function cannot have array dimensions');
+        }
+
+        const functionDecl = ASTBuilder.functionDeclaration(declarator.name, returnType);
+        functionDecl.location = returnType.location;
+        
+        // 解析函数参数
+        if (declarator.functionParams) {
+            functionDecl.parameters = declarator.functionParams;
+        } else {
+            // 没有参数列表，使用空的参数
+            functionDecl.parameters = [];
+        }
+
+        // 解析函数体
+        if (this.matchToken(TokenType.SEMICOLON)) {
+            // 函数声明，没有函数体
+            this.consumeToken();
+        } else {
+            // 函数定义，有函数体
+            functionDecl.body = this.parseCompoundStatement();
+        }
 
         return functionDecl;
-    }
-
-    parseTypeSpecifier() {
-		// Added in the 2nd correction conversation
-		let qualifiers = [];
-    
-		// 解析类型限定符(const, volatile)
-		while (this.matchToken(TokenType.CONST) || this.matchToken(TokenType.VOLATILE)) {
-			const qualifierToken = this.consumeToken();
-			qualifiers.push(qualifierToken.value);
-		}
-		
-        const typeTokens = [
-			TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID,
-			TokenType.DOUBLE, TokenType.LONG, TokenType.SHORT, TokenType.SIGNED, TokenType.UNSIGNED,
-			TokenType.STRUCT, TokenType.UNION, TokenType.ENUM
-		];
-
-		for (const typeToken of typeTokens) {
-			if (this.matchToken(typeToken)) {
-				const token = this.getCurrentToken();
-				this.consumeToken();
-				const typeNode = ASTBuilder.typeSpecifier(token.value);
-				typeNode.setAttribute('location', token.location);
-				typeNode.setAttribute('qualifiers', qualifiers);
-				
-				// 处理struct类型
-				// It does remind me of CSP-S 2023
-				if (token.type === TokenType.STRUCT) {
-					this.parseStructDefinition(typeNode);
-				}
-				
-				return typeNode;
-			}
-		}
-
-        // 特殊类型：device 和 null_t
-        if (this.matchToken(TokenType.IDENTIFIER)) {
-			const token = this.getCurrentToken();
-			if (token.value === 'device' || token.value === 'null_t') {
-				this.consumeToken();
-				const typeNode = ASTBuilder.typeSpecifier(token.value);
-				typeNode.setAttribute('location', token.location);
-				typeNode.setAttribute('qualifiers', qualifiers);
-				return typeNode;
-			}
-		}
-
-        this.addError('Expected type specifier');
-        return null;
     }
 
 	// 添加struct定义解析
@@ -1427,23 +2183,36 @@ class Parser {
 		return structNode;
 	}
 
+	// It used to have a label/bookmark here...
     parseVariableDeclaration() {
         const type = this.parseTypeSpecifier();
         if (!type) return null;
 
         const declarators = [];
         do {
-            const declarator = this.parseVariableDeclarator();
-            if (declarator) {
-				const qualifiers = type.getAttribute('qualifiers') || [];
-				if (qualifiers.includes('const')) {
-					declarator.setAttribute('isConst', true);
-				}
-				if (qualifiers.includes('volatile')) {
-					declarator.setAttribute('isVolatile', true);
-				}
-                declarators.push(declarator);
+            const declarator = this.parseDeclarator(false);
+            if (!declarator || !declarator.name) {
+				/*
+                this.addError('Expected variable name in declaration');
+                break;
+				*/
+				return null;
             }
+            
+            // 创建变量声明符节点
+            const varDeclarator = ASTBuilder.variableDeclarator(declarator.name);
+            varDeclarator.location = declarator.location;
+            varDeclarator.pointerDepth = declarator.pointerDepth;
+            varDeclarator.pointerQualifiers = declarator.pointerQualifiers;
+            varDeclarator.arrayDimensions = declarator.arrayDimensions;
+            
+            // 处理初始化
+            if (this.matchToken(TokenType.ASSIGN)) {
+                this.consumeToken();
+                varDeclarator.initializer = this.parseExpression();
+            }
+            
+            declarators.push(varDeclarator);
         } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
 
         this.expectToken(TokenType.SEMICOLON);
@@ -1538,8 +2307,154 @@ class Parser {
             }
             
             default:
+                // 检查是否为已知类型名（包括自定义类型）
+                if (this.isTypeName(token.value)) {
+                    // 尝试解析为变量声明
+                    const savedIndex = this.currentTokenIndex;
+                    const savedErrorsLength = this.errors.length;
+                    
+                    // 尝试解析为变量声明
+                    const declaration = this.tryParseVariableDeclaration();
+                    if (declaration) {
+                        return declaration;
+                    }
+                    
+                    // 解析失败，恢复状态
+                    this.currentTokenIndex = savedIndex;
+                    // 移除尝试解析期间产生的错误
+                    if (this.errors.length > savedErrorsLength) {
+                        this.errors.splice(savedErrorsLength);
+                    }
+                }
                 return this.parseExpressionStatement();
         }
+    }
+	
+	// 添加尝试解析变量声明的方法，不产生永久性错误
+    tryParseVariableDeclaration() {
+        // 临时禁用错误报告
+        const originalAddError = this.addError;
+        let hadError = false;
+        
+        // 临时替换addError方法，只标记错误而不记录
+        this.addError = (message, location) => {
+            hadError = true;
+        };
+        
+        try {
+            // 尝试解析变量声明
+            const type = this.parseTypeSpecifier();
+            if (!type || hadError) {
+                return null;
+            }
+            
+            // 保存当前位置，因为parseDeclarator可能会失败
+            const savedIndex = this.currentTokenIndex;
+            
+            const declarators = [];
+            let firstDeclarator = null;
+            
+            // 尝试解析第一个声明符
+            firstDeclarator = this.parseDeclarator(false);
+            if (!firstDeclarator || !firstDeclarator.name || hadError) {
+                // 解析失败，恢复位置
+                this.currentTokenIndex = savedIndex;
+                return null;
+            }
+            
+            declarators.push(firstDeclarator);
+            
+            // 检查是否有更多声明符
+            while (this.matchToken(TokenType.COMMA) && !hadError) {
+                this.consumeToken();
+                const declarator = this.parseDeclarator(false);
+                if (!declarator || !declarator.name) {
+                    break;
+                }
+                declarators.push(declarator);
+            }
+            
+            // 检查分号
+            if (!this.matchToken(TokenType.SEMICOLON) || hadError) {
+                return null;
+            }
+            
+            // 成功解析，创建变量声明节点
+            const varDecl = ASTBuilder.variableDeclaration(type, declarators);
+            varDecl.location = type.location;
+            
+            // 解析分号
+            this.consumeToken();
+            
+            return varDecl;
+        } finally {
+            // 恢复原始的错误报告方法
+            this.addError = originalAddError;
+        }
+    }
+	
+	// 添加辅助方法判断是否为类型名
+	// In short, this is a function that currently always
+	// returning true
+    isTypeName(name) {
+        // 检查是否为已知的内置类型
+        const builtinTypes = [
+            'int', 'char', 'float', 'void', 'double', 'long', 'short',
+            'signed', 'unsigned', 'device', 'null_t'
+        ];
+        
+        if (builtinTypes.includes(name)) {
+            return true;
+        }
+        
+        // 检查是否为已知的结构体/联合体名称
+        // 注意：这里我们无法在解析时知道所有自定义类型，
+        // 但我们可以通过解析过程中收集的类型名来判断
+        
+        // 对于struct/union/enum类型，它们已经通过关键字处理了
+        // 这里主要处理typedef定义的类型名
+        
+        // 在完整实现中，应该维护一个类型名符号表
+        // 检查是否已经在已知类型名集合中
+        if (this.knownTypeNames.has(name)) {
+            return true;
+        }
+        
+        // 对于未知的标识符，我们需要检查它是否可能是类型名
+        // 这里我们采用一个简单的启发式方法：检查后面的token模式
+        
+        const savedIndex = this.currentTokenIndex;
+        let isLikelyType = false;
+        
+        // 跳过当前标识符
+        this.consumeToken();
+        
+        // 检查常见的类型名后跟的模式
+        if (this.matchToken(TokenType.IDENTIFIER)) {
+            // 类型名后跟标识符（变量名） - 很可能是变量声明
+            isLikelyType = true;
+        } else if (this.matchToken(TokenType.MULTIPLY)) {
+            // 类型名后跟*（指针） - 很可能是变量声明
+            isLikelyType = true;
+        } else if (this.matchToken(TokenType.LEFT_PAREN)) {
+            // 类型名后跟( - 可能是函数声明或强制类型转换
+            // 我们需要进一步检查
+            const afterParen = this.tokens[this.currentTokenIndex + 1];
+            if (afterParen && afterParen.type === TokenType.IDENTIFIER) {
+                // (后跟标识符 - 可能是强制类型转换
+                isLikelyType = true;
+            }
+        }
+        
+        // 恢复位置
+        this.currentTokenIndex = savedIndex;
+        
+        return isLikelyType;
+    }
+
+	// 添加方法来记录已知类型名
+    addTypeName(typeName) {
+        this.knownTypeNames.add(typeName);
     }
 
     parseIfStatement() {
@@ -1700,7 +2615,9 @@ class Parser {
         const token = this.getCurrentToken();
         return [
             TokenType.ASSIGN, TokenType.PLUS_ASSIGN, TokenType.MINUS_ASSIGN,
-            TokenType.MULTIPLY_ASSIGN, TokenType.DIVIDE_ASSIGN, TokenType.MODULO_ASSIGN
+            TokenType.MULTIPLY_ASSIGN, TokenType.DIVIDE_ASSIGN, TokenType.MODULO_ASSIGN,
+            TokenType.LEFT_SHIFT_ASSIGN, TokenType.RIGHT_SHIFT_ASSIGN,
+            TokenType.BITWISE_AND_ASSIGN, TokenType.BITWISE_OR_ASSIGN, TokenType.BITWISE_XOR_ASSIGN
         ].includes(token.type);
     }
 
@@ -1856,6 +2773,49 @@ class Parser {
 
         return left;
     }
+	
+	// 添加parseCastExpression方法处理类型转换
+    parseCastExpression() {
+        // 检查是否可能是类型转换
+        if (this.matchToken(TokenType.LEFT_PAREN)) {
+            const startIndex = this.currentTokenIndex;
+            
+            // 尝试解析类型说明符
+            this.consumeToken(); // 跳过 '('
+            const type = this.parseTypeSpecifier();
+            
+            if (type) {
+                // 检查是否有指针声明符
+                let pointerDepth = 0;
+                while (this.matchToken(TokenType.MULTIPLY)) {
+                    this.consumeToken();
+                    pointerDepth++;
+                }
+                
+                // 检查是否有右括号
+                if (this.matchToken(TokenType.RIGHT_PAREN)) {
+                    this.consumeToken(); // 跳过 ')'
+                    
+                    // 解析被转换的表达式
+                    const expression = this.parseCastExpression();
+                    if (expression) {
+                        // 创建类型转换节点
+                        const castExpr = new ASTNode('CastExpression');
+                        castExpr.addChild(type);
+                        castExpr.setAttribute('pointerDepth', pointerDepth);
+                        castExpr.addChild(expression);
+                        castExpr.location = type.location;
+                        return castExpr;
+                    }
+                }
+            }
+            
+            // 不是类型转换，回退
+            this.currentTokenIndex = startIndex;
+        }
+        
+        return this.parseUnaryExpression();
+    }
 
     parseUnaryExpression() {
         // 检查一元操作符
@@ -1867,7 +2827,7 @@ class Parser {
         for (const opType of unaryOperators) {
             if (this.matchToken(opType)) {
                 const operatorToken = this.consumeToken();
-                const argument = this.parseUnaryExpression();
+                const argument = this.parseCastExpression();
                 
                 if (!argument) {
                     this.addError('Expected expression after unary operator');
@@ -1932,6 +2892,42 @@ class Parser {
                 memberExpr.addChild(expression);
                 memberExpr.addChild(index);
                 memberExpr.setAttribute('computed', true);
+                memberExpr.location = expression.location;
+                expression = memberExpr;
+            }
+			// 结构体成员访问（点操作符）
+            else if (this.matchToken(TokenType.DOT)) {
+                this.consumeToken();
+                const memberName = this.expectToken(TokenType.IDENTIFIER);
+                
+                if (!memberName) {
+                    this.addError('Expected member name after . operator');
+                    return expression;
+                }
+                
+                const memberExpr = new ASTNode('MemberExpression');
+                memberExpr.addChild(expression);
+                memberExpr.addChild(ASTBuilder.identifier(memberName.value));
+                memberExpr.setAttribute('computed', false);
+                memberExpr.setAttribute('operator', '.');
+                memberExpr.location = expression.location;
+                expression = memberExpr;
+            }
+            // 结构体指针成员访问（箭头操作符）
+            else if (this.matchToken(TokenType.ARROW)) {
+                this.consumeToken();
+                const memberName = this.expectToken(TokenType.IDENTIFIER);
+                
+                if (!memberName) {
+                    this.addError('Expected member name after -> operator');
+                    return expression;
+                }
+                
+                const memberExpr = new ASTNode('MemberExpression');
+                memberExpr.addChild(expression);
+                memberExpr.addChild(ASTBuilder.identifier(memberName.value));
+                memberExpr.setAttribute('computed', false);
+                memberExpr.setAttribute('operator', '->');
                 memberExpr.location = expression.location;
                 expression = memberExpr;
             }
@@ -2068,18 +3064,19 @@ class Parser {
 	}
 }
 
-
-// 符号表条目
+// 7th conv.
+// 修改SymbolEntry类以存储更详细的类型信息
 class SymbolEntry {
     constructor(name, type, scope, kind, location = null) {
         this.name = name;
-        this.type = type; // 类型信息
-        this.scope = scope; // 作用域
-        this.kind = kind; // 'variable', 'function', 'parameter'
-        this.location = location; // 声明位置
+        this.type = type; // 类型信息（现在是TypeInfo对象）
+        this.scope = scope;
+        this.kind = kind; // 'variable', 'function', 'parameter', 'type'
+        this.location = location;
         this.initialized = false;
         this.used = false;
-        this.memoryLocation = null; // 内存位置分配
+        this.memoryLocation = null;
+        this.isGlobal = false;
     }
 }
 
@@ -2105,6 +3102,45 @@ class Scope {
     }
 }
 
+// 首先，添加一些辅助类
+class TypeInfo {
+    constructor(name, kind, size = 1, members = null) {
+        this.name = name; // 类型名称
+        this.kind = kind; // 'basic', 'struct', 'union', 'pointer', 'array', 'function', 'device', 'null'
+        this.size = size; // 类型大小（按1字节对齐）
+        this.members = members || []; // 结构体/联合体成员
+        this.pointerTo = null; // 对于指针类型，指向的类型
+        this.arraySize = null; // 对于数组类型，数组大小
+        this.qualifiers = []; // 类型限定符（const, volatile）
+    }
+    
+    isConst() {
+        return this.qualifiers.includes('const');
+    }
+    
+    isVolatile() {
+        return this.qualifiers.includes('volatile');
+    }
+    
+    toString() {
+        let result = this.qualifiers.length > 0 ? this.qualifiers.join(' ') + ' ' : '';
+        result += this.name;
+        if (this.kind === 'pointer' && this.pointerTo) {
+            result = this.pointerTo.toString() + '*';
+        }
+        return result;
+    }
+}
+
+class MemberInfo {
+    constructor(name, type, offset, bitField = null) {
+        this.name = name;
+        this.type = type;
+        this.offset = offset; // 成员偏移量
+        this.bitField = bitField; // 位域信息
+    }
+}
+
 class SemanticAnalyzer extends ASTVisitor {
     constructor() {
         super();
@@ -2112,9 +3148,12 @@ class SemanticAnalyzer extends ASTVisitor {
         this.warnings = [];
         this.currentScope = null;
         this.currentFunction = null;
-        this.symbolTable = new Map(); // 全局符号表
-        this.typeTable = new Map(); // 类型表
+        this.symbolTable = new Map();
+        this.typeTable = new Map();
+        this.structTable = new Map(); // 专门存储结构体/联合体定义
+        this.typedefTable = new Map(); // 存储typedef定义的类型别名
         
+		// Cannot do initialization in construction !!!
     }
 
     analyze(ast) {
@@ -2122,10 +3161,13 @@ class SemanticAnalyzer extends ASTVisitor {
         this.warnings = [];
         this.currentScope = new Scope(null, 'global');
         this.currentFunction = null;
-
+		
 		// 初始化内建类型
         this.initializeBuiltinTypes();
         this.initializeBuiltinFunctions();
+		
+		// 第一遍：收集类型定义（typedef, struct, union）
+        this.collectTypeDefinitions(ast);
 
         this.visit(ast);
 
@@ -2137,32 +3179,60 @@ class SemanticAnalyzer extends ASTVisitor {
             symbolTable: this.symbolTable
         };
     }
+	
+	// !! MANUAL CHANGES HERE !!
+	collectTypeDefinitions(node) {
+        if (!node) return;
+        
+        // 收集程序中的类型定义
+        if (node.type === 'Program') {
+            // 收集typedef定义
+			// Modified here
+            if (node.typeDefinitions) {
+                node.typeDefinitions.forEach(def => {
+                    if (def.type === 'struct' || def.type === 'union') {
+                        this.processStructOrUnionDefinition(def);
+                    } else {
+						if ((!def.isStruct) && (!def.isUnion)) {
+							this.processTypedefDeclaration(def);
+						}
+						else {
+							this.addError(`Internal error: Unknown parsed structure`, node.location);
+						}
+					}
+                });
+            }
+            
+            // 收集全局结构体/联合体定义
+            node.globalDeclarations.forEach(decl => {
+                if (decl.type === 'VariableDeclaration' && decl.isStructOrUnion) {
+                    // 处理结构体/联合体变量声明中的类型定义
+                    //this.processTypeFromDeclaration(decl.type);
+					// 检查是否是结构体/联合体类型
+					const typeName = this.getTypeNameFromTypeNode(decl.type);
+					if (typeName === 'struct' || typeName === 'union') {
+						this.processTypeFromDeclaration(decl.type);
+					}
+				}
+            });
+        }
+    }
 
     initializeBuiltinTypes() {
         // 基本类型
         const basicTypes = ['int', 'char', 'float', 'double', 'void', 'long', 'short', 'signed', 'unsigned'];
         basicTypes.forEach(type => {
-            this.typeTable.set(type, {
-                name: type,
-                size: 1, // 在目标机器中，所有基本类型都占用1个内存单元
-                kind: 'basic'
-            });
+            this.typeTable.set(type, new TypeInfo(type, 'basic', 1));
         });
 
         // 特殊类型
-        this.typeTable.set('device', {
-            name: 'device',
-            size: 1,
-            kind: 'device'
-        });
-
-        this.typeTable.set('null_t', {
-            name: 'null_t',
-            size: 1,
-            kind: 'null'
-        });
-		
-		// TODO: According to Deepseek, structural types must be added here dynamically (according to the result of parser)
+        this.typeTable.set('device', new TypeInfo('device', 'device', 1));
+        this.typeTable.set('null_t', new TypeInfo('null_t', 'null', 1));
+        
+        // 指针类型的基础（void*）
+        const voidPtrType = new TypeInfo('void*', 'pointer', 1);
+        voidPtrType.pointerTo = this.typeTable.get('void');
+        this.typeTable.set('void*', voidPtrType);
     }
 
     initializeBuiltinFunctions() {
@@ -2197,6 +3267,235 @@ class SemanticAnalyzer extends ASTVisitor {
             );
             this.currentScope.addSymbol(symbol);
         });
+    }
+
+	// Deepseek has some branches here
+	// ! There has some manual changes !
+	processTypedefDeclaration(typedefNode) {
+		// Deepseek says yes
+		// 临时解决方案：检查节点是否具有declarators属性
+		if (!typedefNode.declarators) {
+			this.addError(`Internal Error: Invalid typedef declaration`, typedefNode.location);
+			return;
+		}
+		
+		// I say no
+        let baseTypeName = this.getTypeNameFromTypeNode(typedefNode.type);
+        let baseType = this.getTypeInfo(baseTypeName);
+		
+        if (!baseType) {
+            this.addError(`Unknown base type '${baseTypeName}' in typedef`, typedefNode.location);
+            return;
+        }
+		
+        typedefNode.declarators.forEach(declarator => {
+            const aliasName = declarator.name;
+            const aliasType = this.createAliasType(baseType, declarator);
+            
+            // 添加到类型表和typedef表
+            this.typeTable.set(aliasName, aliasType);
+            this.typedefTable.set(aliasName, {
+                originalType: baseType,
+                aliasType: aliasType,
+                location: declarator.location
+            });
+        });
+    }
+	
+	processStructOrUnionDefinition(defNode) {
+        const typeName = defNode.name || `anonymous_${defNode.type}_${Date.now()}`;
+        const isUnion = defNode.type === 'UnionDefinition';
+        const kind = isUnion ? 'union' : 'struct';
+        
+        // 创建结构体/联合体类型
+        const structType = new TypeInfo(typeName, kind, 0); // 初始大小为0
+        structType.members = [];
+        
+        // 处理成员
+        let currentOffset = 0;
+        let maxMemberSize = 0;
+        
+        if (defNode.members && defNode.members.length > 0) {
+            defNode.members.forEach(member => {
+                const memberTypeName = this.getTypeNameFromTypeNode(member.type);
+                const memberType = this.getTypeInfo(memberTypeName);
+                
+                if (!memberType) {
+                    this.addError(`Unknown member type '${memberTypeName}'`, member.location);
+                    return;
+                }
+                
+                // 计算成员大小（所有基本类型大小为1）
+                const memberSize = this.calculateTypeSize(memberType);
+                
+                // 对于结构体，累加偏移量；对于联合体，取最大成员大小
+                if (isUnion) {
+                    maxMemberSize = Math.max(maxMemberSize, memberSize);
+                } else {
+                    // 结构体成员：按1字节对齐
+                    const memberInfo = new MemberInfo(
+                        member.name,
+                        memberType,
+                        currentOffset,
+                        member.bitField
+                    );
+                    structType.members.push(memberInfo);
+                    currentOffset += memberSize;
+                }
+            });
+            
+            // 计算最终大小
+            if (isUnion) {
+                structType.size = maxMemberSize;
+                // 联合体所有成员偏移量都是0
+                defNode.members.forEach((member, index) => {
+                    const memberTypeName = this.getTypeNameFromTypeNode(member.type);
+                    const memberType = this.getTypeInfo(memberTypeName);
+                    if (memberType) {
+                        const memberInfo = new MemberInfo(
+                            member.name,
+                            memberType,
+                            0, // 所有成员偏移量都是0
+                            member.bitField
+                        );
+                        structType.members.push(memberInfo);
+                    }
+                });
+            } else {
+                structType.size = currentOffset;
+            }
+        } else {
+            // 空结构体/联合体
+            structType.size = 0;
+        }
+        
+        // 存储到类型表
+        this.typeTable.set(typeName, structType);
+        this.structTable.set(typeName, structType);
+        
+        // 如果结构体有名称，添加到当前作用域
+        if (defNode.name) {
+            const structSymbol = new SymbolEntry(
+                defNode.name,
+                { type: structType },
+                this.currentScope,
+                'type'
+            );
+            this.currentScope.addSymbol(structSymbol);
+        }
+    }
+	
+	processTypeFromDeclaration(typeNode) {
+        // 从声明中提取类型信息
+        const typeName = this.getTypeNameFromTypeNode(typeNode);
+        if (!this.typeTable.has(typeName)) {
+            const typeInfo = this.createTypeInfoFromNode(typeNode);
+            if (typeInfo) {
+                this.typeTable.set(typeName, typeInfo);
+            }
+        }
+    }
+	
+	createTypeInfoFromNode(typeNode) {
+        const typeName = this.getTypeNameFromTypeNode(typeNode);
+        const qualifiers = typeNode.getAttribute('qualifiers') || [];
+        
+        // 检查是否是结构体/联合体类型
+        if (typeName === 'struct' || typeName === 'union') {
+            const structName = typeNode.getAttribute('structOrUnionName');
+            if (structName && this.structTable.has(structName)) {
+                const structType = this.structTable.get(structName);
+                const result = new TypeInfo(structName, typeName, structType.size, structType.members);
+                result.qualifiers = qualifiers;
+                return result;
+            } else {
+                // 匿名结构体/联合体
+                const anonymousType = new TypeInfo(`anonymous_${typeName}`, typeName, 1);
+                anonymousType.qualifiers = qualifiers;
+                return anonymousType;
+            }
+        }
+        
+        // 基本类型或typedef类型
+        const baseType = this.typeTable.get(typeName);
+        if (baseType) {
+            const result = new TypeInfo(typeName, baseType.kind, baseType.size);
+            result.qualifiers = qualifiers;
+            return result;
+        }
+        
+        return null;
+    }
+	
+	createAliasType(baseType, declarator) {
+        // 创建typedef别名类型
+        const aliasType = new TypeInfo(baseType.name, baseType.kind, baseType.size, [...baseType.members]);
+        aliasType.qualifiers = [...baseType.qualifiers];
+        
+        // 处理指针
+        if (declarator.pointerDepth > 0) {
+            let currentType = aliasType;
+            for (let i = 0; i < declarator.pointerDepth; i++) {
+                const ptrType = new TypeInfo('', 'pointer', 1);
+                ptrType.pointerTo = currentType;
+                ptrType.qualifiers = declarator.pointerQualifiers[i] || [];
+                currentType = ptrType;
+            }
+            return currentType;
+        }
+        
+        // 处理数组
+        if (declarator.arrayDimensions && declarator.arrayDimensions.length > 0) {
+            // 计算数组类型
+            let arrayType = aliasType;
+            for (const dim of declarator.arrayDimensions.reverse()) {
+                const arrType = new TypeInfo('', 'array', arrayType.size * (dim || 1));
+                arrType.arraySize = dim;
+                arrType.pointerTo = arrayType; // 使用pointerTo指向元素类型
+                arrayType = arrType;
+            }
+            return arrayType;
+        }
+        
+        return aliasType;
+    }
+	
+	getTypeInfo(typeName) {
+        // 从类型表获取类型信息
+        if (this.typeTable.has(typeName)) {
+            return this.typeTable.get(typeName);
+        }
+        
+        // 检查是否是结构体/联合体
+        if (this.structTable.has(typeName)) {
+            return this.structTable.get(typeName);
+        }
+        
+        return null;
+    }
+	
+	calculateTypeSize(typeInfo) {
+        if (!typeInfo) return 1; // 默认大小
+        
+        switch (typeInfo.kind) {
+            case 'basic':
+            case 'device':
+            case 'null':
+            case 'pointer':
+                return 1;
+            case 'struct':
+            case 'union':
+                return typeInfo.size || 1;
+            case 'array':
+                if (typeInfo.arraySize) {
+                    const elementSize = this.calculateTypeSize(typeInfo.pointerTo);
+                    return elementSize * typeInfo.arraySize;
+                }
+				// TODO: Might be adding warning
+                return 1; // 未知大小的数组
+            default:
+                return 1;
+        }
     }
 
     addError(message, location = null) {
@@ -2285,21 +3584,23 @@ class SemanticAnalyzer extends ASTVisitor {
         this.currentFunction = null;
     }
 
+	// Modified on 1 Dec, to be verified
     visitVariableDeclaration(node) {
-        const typeName = node.type.typeName;
+        const baseTypeName = this.getTypeNameFromTypeNode(node.type);
+        const qualifiers = node.type.getAttribute('qualifiers') || [];
         
-		// Manually merged in the 5th conversation
-		if (!this.getTypeNameFromTypeNode(node.type)) {
-			this.addError(`Invalid type in variable declaration`, node.type.location);
-			return;
-		}
-		
-        // 检查类型是否存在
-        if (!this.typeTable.has(typeName)) {
-            this.addError(`Unknown type '${typeName}'`, node.type.location);
+        // 获取基础类型信息
+        let baseType = this.getTypeInfo(baseTypeName);
+        if (!baseType) {
+            this.addError(`Unknown type '${baseTypeName}'`, node.type.location);
             return;
         }
-
+        
+        // 创建带有限定符的类型
+        //const varType = new TypeInfo(baseType.name, baseType.kind, baseType.size, (baseType.kind === 'struct' || baseType.kind === 'union') ? [...baseType.members] : []);
+		const varType = new TypeInfo(baseType.name, baseType.kind, baseType.size, [...baseType.members]);
+        varType.qualifiers = [...baseType.qualifiers, ...qualifiers];
+        
         node.declarators.forEach(declarator => {
             // 检查变量是否已声明
             const existingSymbol = this.currentScope.lookupCurrent(declarator.name);
@@ -2308,10 +3609,41 @@ class SemanticAnalyzer extends ASTVisitor {
                 return;
             }
 
+            // 创建变量类型（处理指针和数组）
+            let finalType = varType;
+            
+            // 处理指针
+            if (declarator.pointerDepth > 0) {
+                let currentType = finalType;
+                for (let i = 0; i < declarator.pointerDepth; i++) {
+                    const ptrType = new TypeInfo('', 'pointer', 1);
+                    ptrType.pointerTo = currentType;
+                    ptrType.qualifiers = declarator.pointerQualifiers[i] || [];
+                    currentType = ptrType;
+                }
+                finalType = currentType;
+            }
+            
+            // 处理数组
+            if (declarator.arrayDimensions && declarator.arrayDimensions.length > 0) {
+                let arrayType = finalType;
+                for (const dim of declarator.arrayDimensions.reverse()) {
+                    const arrType = new TypeInfo('', 'array', arrayType.size * (dim || 1));
+                    arrType.arraySize = dim;
+                    arrType.pointerTo = arrayType;
+                    arrayType = arrType;
+                }
+                finalType = arrayType;
+            }
+
             // 创建变量符号
             const varSymbol = new SymbolEntry(
                 declarator.name,
-                { type: typeName },
+                { 
+                    type: finalType,
+                    isConst: finalType.isConst(),
+                    isVolatile: finalType.isVolatile()
+                },
                 this.currentScope,
                 'variable',
                 declarator.location
@@ -2325,41 +3657,52 @@ class SemanticAnalyzer extends ASTVisitor {
                 
                 // 类型检查初始化表达式
                 const initType = this.getExpressionType(declarator.initializer);
-                if (initType && !this.isTypeCompatible(typeName, initType)) {
+                if (initType && !this.isTypeCompatible(finalType, initType)) {
                     this.addError(
-                        `Cannot initialize '${typeName}' with '${initType}'`,
+                        `Cannot initialize '${this.typeToString(finalType)}' with '${this.typeToString(initType)}'`,
                         declarator.initializer.location
                     );
                 }
 
+                // 检查const变量初始化
+                if (finalType.isConst() && !declarator.initializer) {
+                    this.addError(`Const variable '${declarator.name}' must be initialized`, declarator.location);
+                }
+
                 varSymbol.initialized = true;
+            } else if (finalType.isConst()) {
+                this.addError(`Const variable '${declarator.name}' must be initialized`, declarator.location);
             }
         });
     }
-	
+
 	// 5th conversation
 	// 新增辅助方法：从类型节点中提取类型名称
-	getTypeNameFromTypeNode(typeNode) {
-		if (!typeNode) return null;
+	// 7th (1 Dec)
+	// 修改getTypeNameFromTypeNode以处理指针和结构体
+	// Priority adjusted manually !!!
+    getTypeNameFromTypeNode(typeNode) {
+        if (!typeNode) return null;
+        
+		// 处理结构体/联合体类型
+        if (typeNode.type === 'TypeSpecifier' && 
+            (typeNode.typeName === 'struct' || typeNode.typeName === 'union')) {
+            const structName = typeNode.getAttribute('structOrUnionName');
+            return structName || typeNode.typeName;
+        }
 		
-		// 如果是TypeSpecifier节点
-		if (typeNode.typeName) {
-			return typeNode.typeName;
-		}
-		
-		// 如果是其他类型的类型节点（如指针类型等）
-		// 这里可以根据需要扩展处理更复杂的类型
-		if (typeNode.type === 'TypeSpecifier') {
-			return typeNode.typeName;
-		}
-		
-		// 如果是标识符节点（处理typedef定义的类型）
-		if (typeNode.type === 'Identifier') {
-			return typeNode.name;
-		}
-		
-		return null;
-	}
+        // 如果是TypeSpecifier节点
+        if (typeNode.typeName) {
+            return typeNode.typeName;
+        }
+        
+        // 如果是标识符节点（处理typedef定义的类型）
+        if (typeNode.type === 'Identifier') {
+            return typeNode.name;
+        }
+        
+        return null;
+    }
 
     visitIdentifier(node) {
         const symbol = this.currentScope.lookup(node.name);
@@ -2441,6 +3784,13 @@ class SemanticAnalyzer extends ASTVisitor {
             );
             return;
         }
+		
+		// TODO: Some issues about "const int*" / "int* const" might exist
+		
+		// 检查左值是否为const
+        if (leftType.isConst()) {
+            this.addError(`Cannot assign to const variable`, node.location);
+        }
 
         // 检查左值
         if (!this.isLValue(node.left)) {
@@ -2448,6 +3798,101 @@ class SemanticAnalyzer extends ASTVisitor {
         }
 
         node.dataType = leftType;
+    }
+	
+	// 添加成员访问支持
+    visitMemberExpression(node) {
+        const object = node.getChild(0);
+        const member = node.getChild(1);
+        const computed = node.getAttribute('computed');
+		const operator = node.getAttribute('operator'); // '.' 或 '->'
+        
+        this.visit(object);
+        const objectType = this.getExpressionType(object);
+        
+        if (!objectType) return;
+        
+        // 数组下标访问
+        if (computed) {
+            if (objectType.kind !== 'array' && objectType.kind !== 'pointer') {
+                this.addError(`Cannot use subscript on non-array type`, node.location);
+                return;
+            }
+            
+            this.visit(member);
+            const indexType = this.getExpressionType(member);
+            if (indexType && indexType.name !== 'int') {
+                this.addWarning(`Array index should be of type 'int'`, member.location);
+            }
+            
+            if (objectType.kind === 'array') {
+                node.dataType = objectType.pointerTo;
+            } else if (objectType.kind === 'pointer') {
+                node.dataType = objectType.pointerTo;
+            }
+            return;
+        }
+        
+		// 结构体/联合体成员访问
+		let targetType = objectType;
+		
+		// 处理指针操作符 '->'
+		if (operator === '->') {
+			if (objectType.kind !== 'pointer') {
+				this.addError(`'->' operator requires pointer to struct/union`, node.location);
+				return;
+			}
+			
+			if (!objectType.pointerTo) {
+				this.addError(`Cannot dereference incomplete pointer type`, node.location);
+				return;
+			}
+			
+			// 解引用指针，获取指向的类型
+			targetType = objectType.pointerTo;
+		}
+		// 处理点操作符 '.'
+		else if (operator === '.') {
+			// 点操作符要求对象是结构体/联合体类型，不能是指针
+			if (objectType.kind === 'pointer') {
+				this.addError(`Cannot use '.' operator on pointer type, use '->' instead`, node.location);
+				return;
+			}
+		}
+		
+		// 检查目标类型是否为结构体或联合体
+		if (targetType.kind !== 'struct' && targetType.kind !== 'union') {
+			this.addError(`Member access requires struct/union type, got '${this.typeToString(targetType)}'`, node.location);
+			return;
+		}
+		
+		
+		if (member.type !== 'Identifier') {
+			this.addError(`Member name must be an identifier`, member.location);
+			return;
+		}
+		
+		const memberName = member.name;
+		const memberInfo = targetType.members.find(m => m.name === memberName);
+		
+		if (!memberInfo) {
+			this.addError(`'${targetType.name}' has no member named '${memberName}'`, member.location);
+			return;
+		}
+		
+		// 记录成员信息
+		node.dataType = memberInfo.type;
+		node.memberInfo = memberInfo;
+		
+		// 设置节点属性，便于代码生成阶段使用
+		node.setAttribute('memberOffset', memberInfo.offset);
+		node.setAttribute('memberName', memberName);
+		
+		// 如果是通过指针访问，记录解引用信息
+		if (operator === '->') {
+			node.setAttribute('dereferenced', true);
+		}
+		
     }
 
     visitFunctionCall(node) {
@@ -2624,8 +4069,7 @@ class SemanticAnalyzer extends ASTVisitor {
     }
 
     // =============== 类型检查辅助方法 ===============
-
-    getExpressionType(node) {
+	getExpressionType(node) {
         if (!node) return null;
 
         // 如果节点已经有数据类型，直接返回
@@ -2635,68 +4079,178 @@ class SemanticAnalyzer extends ASTVisitor {
 
         // 根据节点类型推断类型
         switch (node.type) {
-            case ASTNodeType.IDENTIFIER:
+            case 'Identifier':
                 const symbol = this.currentScope.lookup(node.name);
-                return symbol ? symbol.type.type : null;
+                return symbol ? symbol.type : null;
 
-            case ASTNodeType.NUMERIC_LITERAL:
-                return 'int'; // 简化处理，所有数字字面量视为int
+            case 'MemberExpression':
+                return node.dataType;
 
-            case ASTNodeType.STRING_LITERAL:
-			// TODO: For the machine, this might need some changes!
-                return 'char*'; // 字符串字面量视为char*
+            case 'UnaryExpression':
+                if (node.operator === '*') {
+                    // 解引用操作
+                    const argType = this.getExpressionType(node.argument);
+                    if (argType && argType.kind === 'pointer') {
+                        return argType.pointerTo;
+                    }
+                    return null;
+                } else if (node.operator === '&') {
+                    // 取地址操作
+                    const argType = this.getExpressionType(node.argument);
+                    if (argType) {
+                        const ptrType = new TypeInfo('', 'pointer', 1);
+                        ptrType.pointerTo = argType;
+                        return ptrType;
+                    }
+                    return null;
+                }
+                // 其他一元操作符
+				/*
+				// 其他一元操作符
+				const argType = this.getExpressionType(node.argument);
+				if (argType) {
+					// 对于递增递减操作，返回与参数相同的类型
+					if (node.operator === '++' || node.operator === '--') {
+						return argType;
+					}
+					// 对于其他一元操作符，返回数值类型
+					return this.typeTable.get('int');
+				}
+				return null;
+				*/
+                return this.getExpressionType(node.argument);
 
-            case ASTNodeType.CHARACTER_LITERAL:
-                return 'char';
+            case 'BinaryExpression':
+                // 对于指针算术等操作，需要特殊处理
+                const leftType = this.getExpressionType(node.left);
+                const rightType = this.getExpressionType(node.right);
+                
+                if (node.operator === '+' || node.operator === '-') {
+                    // 指针算术
+                    if (leftType && leftType.kind === 'pointer') {
+                        return leftType;
+                    }
+                    if (rightType && rightType.kind === 'pointer') {
+                        return rightType;
+                    }
+                }
+                
+                // 默认返回左操作数类型
+                return leftType;
+				
+			case 'AssignmentExpression':
+				// 赋值表达式的类型是左操作数的类型
+				return this.getExpressionType(node.left);
+			
+			case 'CastExpression':
+				// 类型转换表达式的类型是转换后的类型
+				if (node.children && node.children[0]) {
+					const typeNode = node.children[0];
+					const typeName = this.getTypeNameFromTypeNode(typeNode);
+					let baseType = this.getTypeInfo(typeName);
+					
+					// 处理指针转换
+					const pointerDepth = node.getAttribute('pointerDepth') || 0;
+					if (pointerDepth > 0) {
+						let currentType = baseType;
+						for (let i = 0; i < pointerDepth; i++) {
+							const ptrType = new TypeInfo('', 'pointer', 1);
+							ptrType.pointerTo = currentType;
+							currentType = ptrType;
+						}
+						return currentType;
+					}
+					return baseType;
+				}
+				return null;
 
-            case ASTNodeType.NULL_LITERAL:
-                return 'null_t';
+            case 'NumericLiteral':
+                return this.typeTable.get('int');
 
-            case ASTNodeType.BINARY_EXPRESSION:
-            case ASTNodeType.UNARY_EXPRESSION:
-            case ASTNodeType.ASSIGNMENT_EXPRESSION:
-            case ASTNodeType.FUNCTION_CALL:
-            case ASTNodeType.BUILTIN_CALL:
-                // 这些节点应该在访问时已经设置了dataType
-                return node.dataType || null;
+            case 'StringLiteral':
+                const charPtrType = new TypeInfo('', 'pointer', 1);
+                charPtrType.pointerTo = this.typeTable.get('char');
+                return charPtrType;
+
+            case 'CharacterLiteral':
+                return this.typeTable.get('char');
+
+            case 'NullLiteral':
+                return this.typeTable.get('null_t');
 
             default:
                 return null;
         }
     }
 
+	// Currently unused
+	isValidMemberAccessOperator(operator) {
+		return operator === '.' || operator === '->';
+	}
+
+    // 修改类型兼容性检查以支持指针和结构体
     isTypeCompatible(targetType, sourceType) {
+        if (!targetType || !sourceType) return false;
+        
         // 相同类型总是兼容
-        if (targetType === sourceType) {
+        if (this.typeToString(targetType) === this.typeToString(sourceType)) {
             return true;
         }
-
-        // 数值类型之间的兼容性（简化处理）
-        const numericTypes = ['int', 'char', 'short', 'long', 'float', 'double'];
-        if (numericTypes.includes(targetType) && numericTypes.includes(sourceType)) {
+        
+        // void指针可以接受任何指针类型
+        if (targetType.kind === 'pointer' && sourceType.kind === 'pointer') {
+            if (targetType.pointerTo && targetType.pointerTo.name === 'void') {
+                return true;
+            }
+            if (sourceType.pointerTo && sourceType.pointerTo.name === 'void') {
+                return true;
+            }
+            // 指针类型兼容性检查
+            return this.isTypeCompatible(targetType.pointerTo, sourceType.pointerTo);
+        }
+        
+        // 数组到指针的转换
+        if (targetType.kind === 'pointer' && sourceType.kind === 'array') {
+            return this.isTypeCompatible(targetType.pointerTo, sourceType.pointerTo);
+        }
+        
+        // 数值类型之间的兼容性
+        const numericTypes = ['int', 'char', 'short', 'long', 'float', 'double', 'signed', 'unsigned'];
+        if (numericTypes.includes(targetType.name) && numericTypes.includes(sourceType.name)) {
             return true;
         }
-		/*
+        
         // null_t可以赋值给指针类型
-        if (sourceType === 'null_t' && targetType.endsWith('*')) {
+		// TODO: Let's regard this as a feature...
+        if (sourceType.name === 'null_t' && targetType.kind === 'pointer') {
             return true;
         }
-		*/	// This is actually prohibited, as pointer always refers to a real memory access
-		// (different from a variable.)
-
-        // device类型的特殊规则
-        if (targetType === 'device' && sourceType === 'device') {
-            return true;
+        
+        // 结构体/联合体类型兼容性
+        if (targetType.kind === 'struct' || targetType.kind === 'union') {
+            if (sourceType.kind === targetType.kind && targetType.name === sourceType.name) {
+                return true;
+            }
         }
-
+        
         return false;
     }
 
+	// ! Has manual content !
     isTypeCompatibleForOperator(operator, leftType, rightType) {
         const arithmeticOps = ['+', '-', '*', '/', '%'];
         const comparisonOps = ['==', '!=', '<', '<=', '>', '>='];
         const logicalOps = ['&&', '||'];
         const bitwiseOps = ['&', '|', '^', '<<', '>>'];
+
+		// No operator is allowed for struct / union
+		// (Manually written)
+		if (leftType === 'struct' || leftType === 'union')
+			return false;
+
+		if (rightType === 'struct' || rightType === 'union')
+			return false;
+		// (End)
 
         // 算术运算符要求数值类型
         if (arithmeticOps.includes(operator)) {
@@ -2719,6 +4273,26 @@ class SemanticAnalyzer extends ASTVisitor {
         }
 
         return true; // 其他操作符暂时宽松处理
+    }
+	
+	// 添加类型转字符串方法
+    typeToString(typeInfo) {
+        if (!typeInfo) return 'unknown';
+        
+        let result = '';
+        if (typeInfo.qualifiers && typeInfo.qualifiers.length > 0) {
+            result += typeInfo.qualifiers.join(' ') + ' ';
+        }
+        
+        if (typeInfo.kind === 'pointer') {
+            result += this.typeToString(typeInfo.pointerTo) + '*';
+        } else if (typeInfo.kind === 'array') {
+            result += this.typeToString(typeInfo.pointerTo) + `[${typeInfo.arraySize || ''}]`;
+        } else {
+            result += typeInfo.name;
+        }
+        
+        return result;
     }
 
     isTypeCompatibleForUnaryOperator(operator, argType) {
@@ -2761,14 +4335,25 @@ class SemanticAnalyzer extends ASTVisitor {
         return argType;
     }
 
+    // 修改isLValue以支持成员访问
     isLValue(node) {
         // 标识符是左值
-        if (node.type === ASTNodeType.IDENTIFIER) {
+        if (node.type === 'Identifier') {
+            return true;
+        }
+
+        // 成员访问是左值
+        if (node.type === 'MemberExpression') {
+            return true;
+        }
+
+        // 解引用是左值
+        if (node.type === 'UnaryExpression' && node.operator === '*') {
             return true;
         }
 
         // 数组下标是左值
-        if (node.type === ASTNodeType.MEMBER_EXPRESSION && node.getAttribute('computed')) {
+        if (node.type === 'MemberExpression' && node.getAttribute('computed')) {
             return true;
         }
 
@@ -3375,7 +4960,7 @@ class Optimizer extends ASTVisitor {
         switch (node.type) {
             case 'FunctionCall':
             case 'BuiltinCall':
-            case 'AssignmentExpression':
+            case 'AssignmentExpression':	/* TODO: SOMETHING IS TO BE DONE HERE */
             case 'AsmStatement':
                 return true;
 
@@ -3531,6 +5116,7 @@ class Compiler {
 
 // 导出主要接口
 // Not done now
+// NO LONGER USED (1 Dec)
 if (false) {
 	module.exports = {
 		Compiler,
