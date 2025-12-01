@@ -6,7 +6,8 @@
 
 Above all, please notice that: Mindustry-C is an **almost 100% AI** and partially-experimental project. The AI tool used in this project is DeepSeek (for individuals).
 
-> I have no time to code, though. I've written only prompts and exactly **6** lines of code for it. (Yet for sure, I have to do all bug-fixing.)
+> I have no time to code, though. I've written only prompts and a few lines of code for it. (Yet for sure, I have to do all bug-fixing.)
+> (AI is just no so realiable as I've expected)
 
 Mindustry-C aims to compile C code to Mindustry Assembly, a brain-racking language for most of us.
 
@@ -15,6 +16,8 @@ There have been many similar softwares aiming at using languages like C/C++ (ali
 ## Features about Mindustry-C (Envisioned)
 
 - Reserving most of C89 features
+  - Yes, you'll have struct, pointers, unions, and typedef!
+  - But you won't have `#pragma`
 
 - Adding special types for Mindustry:
   - `device` for device (conveyors, scatters, etc.)
