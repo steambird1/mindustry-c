@@ -209,6 +209,7 @@ class ProgramNode extends ASTNode {
     }
 }
 
+// !! Manually modified !!
 class FunctionDeclarationNode extends ASTNode {
     constructor(name, returnType) {
         super(ASTNodeType.FUNCTION_DECLARATION);
@@ -217,6 +218,8 @@ class FunctionDeclarationNode extends ASTNode {
         this.parameters = [];
         this.body = null;
         this.isBuiltin = false;
+		this.storageClass = null;
+		this.isInline = false;
     }
 }
 
@@ -672,6 +675,7 @@ const TokenType = {
     GOTO: 'GOTO',
     IF: 'IF',
     INT: 'INT',
+	INLINE: 'INLINE',
     LONG: 'LONG',
     REGISTER: 'REGISTER',
     RETURN: 'RETURN',
@@ -832,6 +836,7 @@ const KEYWORDS = {
     'goto': TokenType.GOTO,
     'if': TokenType.IF,
     'int': TokenType.INT,
+	'inline': TokenType.INLINE,	/* Added, 4 Dec */
     'long': TokenType.LONG,
     'register': TokenType.REGISTER,
     'return': TokenType.RETURN,
@@ -2109,6 +2114,23 @@ class Parser {
 
     // 修改函数声明解析中的参数列表处理
     parseFunctionDeclaration() {
+		let storageClass = null;
+        let isInline = false;
+        
+        while (this.matchToken(TokenType.STATIC) || 
+               this.matchToken(TokenType.INLINE) || 
+               this.matchToken(TokenType.EXTERN) ||
+               this.matchToken(TokenType.VOLATILE) ||
+               this.matchToken(TokenType.CONST)) {
+            const token = this.consumeToken();
+            if (token.type === TokenType.INLINE) {
+                isInline = true;
+            } else if (token.type === TokenType.STATIC || 
+                      token.type === TokenType.EXTERN) {
+                storageClass = token.value;
+            }
+        }
+		
         const returnType = this.parseTypeSpecifier();
         if (!returnType) return null;
 
@@ -2126,6 +2148,8 @@ class Parser {
 
         const functionDecl = ASTBuilder.functionDeclaration(declarator.name, returnType);
         functionDecl.location = returnType.location;
+		functionDecl.storageClass = storageClass;
+        functionDecl.isInline = isInline;
         
         // 解析函数参数
         if (declarator.functionParams) {
@@ -2817,28 +2841,43 @@ class Parser {
         return this.parseUnaryExpression();
     }
 
+	// Consider overriding 
     parseUnaryExpression() {
         // 检查一元操作符
         const unaryOperators = [
             TokenType.PLUS, TokenType.MINUS, TokenType.NOT, TokenType.BITWISE_NOT,
-            TokenType.INCREMENT, TokenType.DECREMENT
+            TokenType.INCREMENT, TokenType.DECREMENT, TokenType.MULTIPLY, TokenType.BITWISE_AND
         ];
 
+		// AI does have special styles. If I were the programmer, I would not implement this like that:
         for (const opType of unaryOperators) {
-            if (this.matchToken(opType)) {
-                const operatorToken = this.consumeToken();
-                const argument = this.parseCastExpression();
-                
-                if (!argument) {
-                    this.addError('Expected expression after unary operator');
-                    return null;
-                }
+			if (this.matchToken(opType)) {
+				const operatorToken = this.consumeToken();
+				
+				// 特殊处理：*和&可能是解引用和取地址操作符
+				let operatorValue = operatorToken.value;
+				
+				// 解析参数
+				const argument = this.parseUnaryExpression();
+				
+				if (!argument) {
+					this.addError('Expected expression after unary operator');
+					return null;
+				}
 
-                const unaryExpr = ASTBuilder.unaryExpression(operatorToken.value, argument);
-                unaryExpr.location = operatorToken.location;
-                return unaryExpr;
-            }
-        }
+				const unaryExpr = ASTBuilder.unaryExpression(operatorValue, argument);
+				unaryExpr.location = operatorToken.location;
+				
+				// 为解引用和取地址操作添加特殊标记
+				if (operatorValue === '*') {
+					unaryExpr.setAttribute('isDereference', true);
+				} else if (operatorValue === '&') {
+					unaryExpr.setAttribute('isAddressOf', true);
+				}
+				
+				return unaryExpr;
+			}
+		}
 
         return this.parsePostfixExpression();
     }
@@ -3077,6 +3116,8 @@ class SymbolEntry {
         this.used = false;
         this.memoryLocation = null;
         this.isGlobal = false;
+		this.isRegister = false; // 标记是否为register变量
+        this.isAddressed = false; // 标记是否被取地址
     }
 }
 
@@ -3588,6 +3629,9 @@ class SemanticAnalyzer extends ASTVisitor {
     visitVariableDeclaration(node) {
         const baseTypeName = this.getTypeNameFromTypeNode(node.type);
         const qualifiers = node.type.getAttribute('qualifiers') || [];
+		
+		// 检查是否有存储类说明符
+		const storageClass = node.storageClass; // auto, register, static, extern
         
         // 获取基础类型信息
         let baseType = this.getTypeInfo(baseTypeName);
@@ -3597,8 +3641,7 @@ class SemanticAnalyzer extends ASTVisitor {
         }
         
         // 创建带有限定符的类型
-        //const varType = new TypeInfo(baseType.name, baseType.kind, baseType.size, (baseType.kind === 'struct' || baseType.kind === 'union') ? [...baseType.members] : []);
-		const varType = new TypeInfo(baseType.name, baseType.kind, baseType.size, [...baseType.members]);
+        const varType = new TypeInfo(baseType.name, baseType.kind, baseType.size, [...baseType.members]);
         varType.qualifiers = [...baseType.qualifiers, ...qualifiers];
         
         node.declarators.forEach(declarator => {
@@ -3648,6 +3691,11 @@ class SemanticAnalyzer extends ASTVisitor {
                 'variable',
                 declarator.location
             );
+			
+			// 设置register标记
+			if (storageClass === 'register') {
+				varSymbol.isRegister = true;
+			}
 
             this.currentScope.addSymbol(varSymbol);
 
@@ -3746,24 +3794,132 @@ class SemanticAnalyzer extends ASTVisitor {
 
     visitUnaryExpression(node) {
         this.visit(node.argument);
-
-        const argType = this.getExpressionType(node.argument);
-        if (!argType) {
-            return;
-        }
-
-        // 检查一元操作符的类型兼容性
-        if (!this.isTypeCompatibleForUnaryOperator(node.operator, argType)) {
-            this.addError(
-                `Unary operator '${node.operator}' cannot be applied to type '${argType}'`,
-                node.location
-            );
-            return;
-        }
-
-        // 设置表达式结果类型
-        node.dataType = this.getUnaryResultType(node.operator, argType);
+    const argType = this.getExpressionType(node.argument);
+    
+    if (!argType) return;
+    
+    const operator = node.operator;
+    
+    switch (operator) {
+        case '*': // 解引用操作
+            if (!this.isValidDereference(argType)) {
+                this.addError(`Cannot dereference non-pointer type '${this.typeToString(argType)}'`, node.location);
+                return;
+            }
+            
+            // 设置表达式结果类型
+            node.dataType = argType.pointerTo;
+            break;
+            
+        case '&': // 取地址操作
+            // 检查操作数是否为左值
+            if (!this.isLValue(node.argument)) {
+                this.addError(`Cannot take address of non-lvalue`, node.location);
+                return;
+            }
+            
+            // 检查是否为register变量
+            if (this.isRegisterVariable(node.argument)) {
+                this.addError(`Cannot take address of register variable`, node.location);
+                return;
+            }
+            
+            // 标记变量已被取地址
+            this.markVariableAsAddressed(node.argument);
+            
+            // 创建指针类型
+            const ptrType = new TypeInfo('', 'pointer', 1);
+            ptrType.pointerTo = argType;
+            node.dataType = ptrType;
+            break;
+            
+        case '+': case '-': // 正负号
+            if (!this.isNumericType(argType.name)) {
+                this.addError(`Unary '${operator}' requires numeric type`, node.location);
+                return;
+            }
+            node.dataType = argType;
+            break;
+            
+        case '~': // 按位取反
+            if (!this.isIntegerType(argType.name)) {
+                this.addError(`Unary '${operator}' requires integer type`, node.location);
+                return;
+            }
+            node.dataType = argType;
+            break;
+            
+        case '!': // 逻辑非
+            node.dataType = this.typeTable.get('int'); // 返回int类型（0或1）
+            break;
+            
+        case '++': case '--': // 递增递减
+            if (!this.isLValue(node.argument)) {
+                this.addError(`'${operator}' requires lvalue`, node.location);
+                return;
+            }
+            
+            if (!this.isNumericType(argType.name)) {
+                this.addError(`'${operator}' requires numeric type`, node.location);
+                return;
+            }
+            
+            // 检查const变量
+            if (argType.isConst()) {
+                this.addError(`Cannot modify const variable with '${operator}'`, node.location);
+            }
+            
+            node.dataType = argType;
+            break;
+            
+        default:
+            this.addError(`Unknown unary operator '${operator}'`, node.location);
+            break;
+		}
     }
+	
+	// 添加辅助方法检查是否有效的解引用操作
+	isValidDereference(type) {
+		return type && (type.kind === 'pointer' || type.kind === 'array');
+	}
+	
+	// 添加辅助方法检查是否为register变量
+	isRegisterVariable(node) {
+		if (node.type === 'Identifier') {
+			const symbol = this.currentScope.lookup(node.name);
+			return symbol && symbol.isRegister;
+		}
+		return false;
+	}
+	
+	// 添加辅助方法标记变量已被取地址
+	markVariableAsAddressed(node) {
+		if (node.type === 'Identifier') {
+			const symbol = this.currentScope.lookup(node.name);
+			if (symbol && symbol.kind === 'variable') {
+				symbol.isAddressed = true;
+				
+				// 被取地址的变量不能放在寄存器中
+				if (symbol.isRegister) {
+					this.addWarning(`Register variable '${node.name}' has its address taken, will be stored in memory`, node.location);
+					symbol.isRegister = false; // 强制取消register优化
+				}
+			}
+		} else if (node.type === 'MemberExpression') {
+			// 处理结构体成员被取地址的情况
+			const object = node.getChild(0);
+			this.markVariableAsAddressed(object);
+		} else if (node.type === 'UnaryExpression' && node.operator === '*') {
+			// 解引用表达式的地址（如&*ptr）等于ptr
+			const arg = node.argument;
+			if (arg.type === 'Identifier') {
+				const symbol = this.currentScope.lookup(arg.name);
+				if (symbol && symbol.kind === 'variable') {
+					symbol.isAddressed = true;
+				}
+			}
+		}
+	}
 
     visitAssignmentExpression(node) {
         this.visit(node.left);
@@ -3987,12 +4143,13 @@ class SemanticAnalyzer extends ASTVisitor {
 		node.dataType = funcSymbol.type.returnType;
 	}
 
+	// !! Has manual changes !!
     visitIfStatement(node) {
         this.visit(node.test);
         
         // 检查条件表达式类型
         const testType = this.getExpressionType(node.test);
-        if (testType && testType !== 'int') {
+        if (testType && testType.name !== 'int') {
             this.addWarning(`Condition expression should be of type 'int'`, node.test.location);
         }
 
@@ -4007,7 +4164,7 @@ class SemanticAnalyzer extends ASTVisitor {
         
         // 检查条件表达式类型
         const testType = this.getExpressionType(node.test);
-        if (testType && testType !== 'int') {
+        if (testType && testType.name !== 'int') {
             this.addWarning(`Loop condition should be of type 'int'`, node.test.location);
         }
 
@@ -4024,7 +4181,7 @@ class SemanticAnalyzer extends ASTVisitor {
         if (node.test) {
             this.visit(node.test);
             const testType = this.getExpressionType(node.test);
-            if (testType && testType !== 'int') {
+            if (testType && testType.name !== 'int') {
                 this.addWarning(`Loop condition should be of type 'int'`, node.test.location);
             }
         }
@@ -4251,14 +4408,23 @@ class SemanticAnalyzer extends ASTVisitor {
 		if (rightType === 'struct' || rightType === 'union')
 			return false;
 		// (End)
+		
+		// (Manually written) (They should BE NAMES)
+		// (As well as pointer execution)
 
         // 算术运算符要求数值类型
         if (arithmeticOps.includes(operator)) {
-            return this.isNumericType(leftType) && this.isNumericType(rightType);
+			if (leftType.kind === 'pointer' && rightType.kind === 'pointer') {
+				return this.isTypeCompatible(leftType.pointerTo, rightType.pointerTo);
+			}
+            return this.isNumericType(leftType.name) && this.isNumericType(rightType.name);
         }
 
         // 比较运算符要求兼容类型
         if (comparisonOps.includes(operator)) {
+			if (leftType.kind === 'pointer' && rightType.kind === 'pointer') {
+				return this.isTypeCompatible(leftType.pointerTo, rightType.pointerTo);
+			}
             return this.isTypeCompatible(leftType, rightType);
         }
 
@@ -4269,7 +4435,7 @@ class SemanticAnalyzer extends ASTVisitor {
 
         // 位运算符要求整型
         if (bitwiseOps.includes(operator)) {
-            return this.isIntegerType(leftType) && this.isIntegerType(rightType);
+            return this.isIntegerType(leftType.name) && this.isIntegerType(rightType.name);
         }
 
         return true; // 其他操作符暂时宽松处理
@@ -4382,449 +4548,549 @@ class SemanticAnalyzer extends ASTVisitor {
 // 优化器
 // As what is given, this only does very simple optimizing (constant evaluation)
 // Optimizer comes first?
-class Optimizer extends ASTVisitor {
+// I MUST DEBUG THIS ON MY OWN :(
+
+class Optimizer {
     constructor() {
-        super();
-        this.constants = new Map(); // 常量值映射
-        this.usedVariables = new Set(); // 使用的变量集合
-        this.currentFunction = null;
-        this.errors = [];
+        this.optimizedAst = null;
         this.modified = false;
-        this.volatileVariables = new Set(); // volatile变量集合
-        this.constVariables = new Set(); // const变量集合
+        this.errors = [];
+        this.warnings = [];
+        
+        // 优化状态
+        this.functionCallGraph = new Map(); // 函数调用图 {functionName: Set<calledFunctions>}
+        this.functionInfo = new Map(); // 函数信息 {functionName: {calls: number, hasSideEffects: boolean}}
+        this.constants = new Map(); // 常量映射 {variableKey: value}
+        this.variableUses = new Map(); // 变量使用统计 {variableKey: {reads: number, writes: number}}
+        this.currentFunction = null;
+        this.currentScope = null;
     }
 
-    optimize(ast) {
-        this.constants.clear();
-        this.usedVariables.clear();
-        this.volatileVariables.clear();
-        this.constVariables.clear();
-        this.currentFunction = null;
-        this.errors = [];
+	// This can be improved only when we have the referrer
+    optimize(analysisResult, currentAst) {
+        this.optimizedAst = currentAst;
+        this.symbolTable = analysisResult.symbolTable;
+        this.typeTable = analysisResult.typeTable;
+        this.structTable = analysisResult.structTable;
+        this.typedefTable = analysisResult.typedefTable;
         this.modified = false;
+        this.errors = [];
+        this.warnings = [];
 
-        // 多次优化直到不再变化或达到最大迭代次数
+        // 进行多轮优化直到不再变化
         let iterations = 0;
-        const maxIterations = 10;
+        const maxIterations = 5;
         
         do {
             this.modified = false;
-            this.optimizePass(ast);
+            this.optimizationPass();
             iterations++;
         } while (this.modified && iterations < maxIterations);
 
         return {
             success: this.errors.length === 0,
-            ast: ast,
+            ast: this.optimizedAst,
             errors: this.errors,
-            warnings: [],
-            optimized: iterations > 1 // 如果进行了优化则返回true
+            warnings: this.warnings,
+            optimized: iterations > 1
         };
     }
 
-    optimizePass(ast) {
-        // 第一遍：收集常量信息、变量使用情况和限定符信息
-        this.collectInfo(ast);
+    optimizationPass() {
+        // 收集函数信息
+        this.collectFunctionInfo();
         
-        // 第二遍：应用优化
-        this.applyOptimizations(ast);
+        // 构建调用图
+        this.buildCallGraph();
+        
+        // 删除无用函数
+        this.removeUnusedFunctions();
+        
+        // 删除无用变量
+        this.removeUnusedVariables();
+        
+        // 常量传播和折叠
+        this.constantPropagation();
+        
+        // 函数内联
+        this.inlineFunctions();
     }
 
-    collectInfo(node) {
-        if (!node) return;
+    // =============== 函数信息收集 ===============
 
-        switch (node.type) {
-            case 'FunctionDeclaration':
+    collectFunctionInfo() {
+        this.functionCallGraph.clear();
+        this.functionInfo.clear();
+        
+        // 遍历AST收集函数信息
+        this.traverseAST(this.optimizedAst, {
+            FunctionDeclaration: (node) => {
+                const funcName = node.name;
+                this.functionInfo.set(funcName, {
+                    calls: 0,
+                    hasSideEffects: false,
+                    isDefinition: node.body !== null,
+                    isInline: node.isInline || false,
+                    node: node
+                });
+                this.functionCallGraph.set(funcName, new Set());
+            },
+            FunctionCall: (node) => {
+                if (node.callee.type === 'Identifier') {
+                    const funcName = node.callee.name;
+                    const info = this.functionInfo.get(funcName);
+                    if (info) {
+                        info.calls++;
+                    }
+                    
+                    // 记录调用关系
+                    if (this.currentFunction) {
+                        const calls = this.functionCallGraph.get(this.currentFunction) || new Set();
+                        calls.add(funcName);
+                        this.functionCallGraph.set(this.currentFunction, calls);
+                    }
+                }
+            },
+            BuiltinCall: (node) => {
+                // 内建函数调用被认为有副作用
+                if (this.currentFunction) {
+                    const info = this.functionInfo.get(this.currentFunction);
+                    if (info) {
+                        info.hasSideEffects = true;
+                    }
+                }
+            }
+        }, {
+            enterFunction: (node) => {
                 this.currentFunction = node.name;
-                this.visitChildren(node);
+            },
+            exitFunction: () => {
                 this.currentFunction = null;
-                break;
+            }
+        });
+    }
 
-            case 'VariableDeclaration':
-                this.collectVariableInfo(node);
-                break;
+    // =============== 调用图构建 ===============
 
-            case 'AssignmentExpression':
-                this.collectAssignmentInfo(node);
-                break;
+    buildCallGraph() {
+        // 已经在上面的collectFunctionInfo中构建了调用图
+        // 这里可以添加额外的调用图分析
+    }
 
-            case 'Identifier':
-                this.usedVariables.add(node.name);
-                break;
+    // =============== 无用函数删除 ===============
 
-            default:
-                this.visitChildren(node);
-                break;
+    removeUnusedFunctions() {
+        const usedFunctions = new Set();
+        
+        // 从main函数开始标记使用的函数
+        const markUsed = (funcName) => {
+            if (usedFunctions.has(funcName)) return;
+            
+            usedFunctions.add(funcName);
+            const calledFunctions = this.functionCallGraph.get(funcName) || new Set();
+            for (const called of calledFunctions) {
+                markUsed(called);
+            }
+        };
+        
+        // 从main函数开始
+        markUsed('main');
+        
+        // 删除未使用的函数
+        if (this.optimizedAst.functions) {
+            const originalLength = this.optimizedAst.functions.length;
+            this.optimizedAst.functions = this.optimizedAst.functions.filter(func => {
+                const funcName = func.name;
+                const isUsed = usedFunctions.has(funcName);
+                
+                // 保留main函数和inline函数（即使未使用）
+                if (funcName === 'main' || func.isInline) {
+                    return true;
+                }
+                
+                if (!isUsed && func.isDefinition) {
+                    this.modified = true;
+                    this.warnings.push(`Removing unused function '${funcName}'`);
+                    return false;
+                }
+                
+                return true;
+            });
+            
+            if (this.optimizedAst.functions.length !== originalLength) {
+                this.modified = true;
+            }
         }
     }
 
-    collectVariableInfo(node) {
-        const typeName = node.type.typeName;
-        const qualifiers = node.type.getAttribute('qualifiers') || [];
+    // =============== 无用变量删除 ===============
+
+    removeUnusedVariables() {
+        this.variableUses.clear();
         
-        node.declarators.forEach(declarator => {
-            const varName = this.getVariableKey(declarator.name);
-            
-            // 记录volatile变量
-            if (qualifiers.includes('volatile') || declarator.getAttribute('isVolatile')) {
-                this.volatileVariables.add(varName);
-            }
-            
-            // 记录const变量
-            if (qualifiers.includes('const') || declarator.getAttribute('isConst')) {
-                this.constVariables.add(varName);
-            }
-            
-            // 只有非volatile的const变量才能参与常量传播
-            if (declarator.initializer && !this.volatileVariables.has(varName)) {
-                const value = this.evaluateConstantExpression(declarator.initializer);
-                if (value !== undefined) {
-                    this.constants.set(varName, value);
+        // 收集变量使用信息
+        this.traverseAST(this.optimizedAst, {
+            VariableDeclaration: (node) => {
+                node.declarators.forEach(declarator => {
+                    if (declarator.name) {
+                        const varKey = this.getVariableKey(declarator.name);
+                        if (!this.variableUses.has(varKey)) {
+                            this.variableUses.set(varKey, { reads: 0, writes: 0 });
+                        }
+                    }
+                });
+            },
+            Identifier: (node) => {
+                if (this.isVariable(node.name)) {
+                    const varKey = this.getVariableKey(node.name);
+                    const usage = this.variableUses.get(varKey);
+                    if (usage) {
+                        usage.reads++;
+                    }
+                }
+            },
+            AssignmentExpression: (node) => {
+                if (node.left.type === 'Identifier') {
+                    const varKey = this.getVariableKey(node.left.name);
+                    const usage = this.variableUses.get(varKey);
+                    if (usage) {
+                        usage.writes++;
+                    }
                 }
             }
         });
-        this.visitChildren(node);
+        
+        // 删除未使用的变量声明
+        this.traverseAST(this.optimizedAst, {
+            VariableDeclaration: (node) => {
+                const usefulDeclarators = [];
+                
+                for (const declarator of node.declarators) {
+                    if (!declarator.name) continue;
+                    
+                    const varKey = this.getVariableKey(declarator.name);
+                    const usage = this.variableUses.get(varKey);
+                    
+                    // 保留有初始化副作用或实际使用的变量
+                    if (usage && (usage.reads > 0 || usage.writes > 0)) {
+                        usefulDeclarators.push(declarator);
+                    } else if (declarator.initializer && this.hasSideEffects(declarator.initializer)) {
+                        // 有副作用的初始化表达式需要保留
+                        usefulDeclarators.push(declarator);
+                    } else {
+                        this.modified = true;
+                    }
+                }
+                
+                if (usefulDeclarators.length === 0) {
+                    // 整个声明都是无用的
+                    this.replaceNode(node, null);
+                } else if (usefulDeclarators.length !== node.declarators.length) {
+                    node.declarators = usefulDeclarators;
+                    this.modified = true;
+                }
+            }
+        });
     }
 
-    collectAssignmentInfo(node) {
-        if (node.left.type === 'Identifier') {
-            const varName = this.getVariableKey(node.left.name);
-            
-            // 检查是否对const变量赋值（应该在语义分析中捕获，但这里作为防御性检查）
-            if (this.constVariables.has(varName)) {
-                this.addError(`Cannot assign to const variable '${node.left.name}'`, node.location);
-            }
-            
-            // volatile变量或赋值会改变变量值，从常量表中移除
-            if (this.volatileVariables.has(varName)) {
-                // volatile变量永远不参与常量传播
-                this.constants.delete(varName);
-            } else {
-                // 非volatile变量，赋值会改变其值
-                this.constants.delete(varName);
-                
-                // 如果赋值是常量表达式，可以重新记录（对于非const变量）
-                if (!this.constVariables.has(varName)) {
+    // =============== 常量传播 ===============
+
+    constantPropagation() {
+        this.constants.clear();
+        
+        // 收集常量
+        this.traverseAST(this.optimizedAst, {
+            VariableDeclaration: (node) => {
+                node.declarators.forEach(declarator => {
+                    if (declarator.name && declarator.initializer) {
+                        const value = this.evaluateConstantExpression(declarator.initializer);
+                        if (value !== undefined) {
+                            const varKey = this.getVariableKey(declarator.name);
+                            this.constants.set(varKey, value);
+                        }
+                    }
+                });
+            },
+            AssignmentExpression: (node) => {
+                if (node.left.type === 'Identifier') {
+                    const varKey = this.getVariableKey(node.left.name);
                     const value = this.evaluateConstantExpression(node.right);
                     if (value !== undefined) {
-                        this.constants.set(varName, value);
+                        this.constants.set(varKey, value);
+                    } else {
+                        // 非常量赋值会改变变量值
+                        this.constants.delete(varKey);
                     }
                 }
             }
-        }
-        this.visitChildren(node);
-    }
-
-    applyOptimizations(node) {
-        if (!node) return node;
-
-        // 检查是否涉及volatile访问，如果是则跳过优化
-        if (this.involvesVolatileAccess(node)) {
-            return this.optimizeChildren(node); // 只优化子节点，不优化当前节点
-        }
-
-        switch (node.type) {
-            case 'FunctionDeclaration':
-                return this.optimizeFunction(node);
-
-            case 'VariableDeclaration':
-                return this.optimizeVariableDeclaration(node);
-
-            case 'IfStatement':
-                return this.optimizeIfStatement(node);
-
-            case 'BinaryExpression':
-                return this.optimizeBinaryExpression(node);
-
-            case 'UnaryExpression':
-                return this.optimizeUnaryExpression(node);
-
-            case 'ExpressionStatement':
-                return this.optimizeExpressionStatement(node);
-
-            case 'CompoundStatement':
-                return this.optimizeCompoundStatement(node);
-
-            case 'AssignmentExpression':
-                return this.optimizeAssignmentExpression(node);
-
-            case 'Identifier':
-                return this.optimizeIdentifier(node);
-
-            default:
-                return this.optimizeChildren(node);
-        }
-    }
-
-    optimizeFunction(node) {
-        this.currentFunction = node.name;
-        node.body = this.applyOptimizations(node.body);
-        this.currentFunction = null;
-        return node;
-    }
-
-    optimizeVariableDeclaration(node) {
-        // 对于volatile变量，不进行任何优化
-        const qualifiers = node.type.getAttribute('qualifiers') || [];
-        if (qualifiers.includes('volatile')) {
-            return this.optimizeChildren(node);
-        }
-
-        // 移除未初始化的无用变量（如果未被使用）
-        const usefulDeclarators = [];
-        
-        for (const declarator of node.declarators) {
-            const varName = this.getVariableKey(declarator.name);
-            
-            // volatile变量不参与优化
-            if (this.volatileVariables.has(varName)) {
-                usefulDeclarators.push(declarator);
-                continue;
+        }, {
+            enterFunction: (node) => {
+                this.currentFunction = node.name;
+            },
+            exitFunction: () => {
+                this.currentFunction = null;
+                // 清除函数内的常量
+                this.constants.forEach((value, key) => {
+                    if (key.startsWith(this.currentFunction + '.')) {
+                        this.constants.delete(key);
+                    }
+                });
             }
-            
-            if (declarator.initializer) {
-                // 优化初始化表达式
-                declarator.initializer = this.applyOptimizations(declarator.initializer);
+        });
+        
+        // 应用常量传播
+        this.traverseAST(this.optimizedAst, {
+            Identifier: (node) => {
+                const varKey = this.getVariableKey(node.name);
+                const constantValue = this.constants.get(varKey);
                 
-                // 常量传播：如果初始化表达式是常量且变量是const，记录常量值
-                if (this.constVariables.has(varName)) {
-                    const constValue = this.evaluateConstantExpression(declarator.initializer);
-                    if (constValue !== undefined) {
-                        this.constants.set(varName, constValue);
+                if (constantValue !== undefined && this.isVariable(node.name)) {
+                    // 替换为常量值
+                    const replacement = ASTBuilder.numericLiteral(constantValue);
+                    replacement.location = node.location;
+                    this.replaceNode(node, replacement);
+                    this.modified = true;
+                }
+            },
+            BinaryExpression: (node) => {
+                // 常量折叠
+                const leftValue = this.evaluateConstantExpression(node.left);
+                const rightValue = this.evaluateConstantExpression(node.right);
+                
+                if (leftValue !== undefined && rightValue !== undefined) {
+                    const result = this.evaluateBinaryOperation(node.operator, leftValue, rightValue);
+                    if (result !== undefined) {
+                        const replacement = ASTBuilder.numericLiteral(result);
+                        replacement.location = node.location;
+                        this.replaceNode(node, replacement);
+                        this.modified = true;
                     }
                 }
                 
-                // 检查变量是否被使用
-                if (this.usedVariables.has(declarator.name) || this.mayHaveSideEffects(declarator.initializer)) {
-                    usefulDeclarators.push(declarator);
-                } else {
+                // 代数简化
+                if (!this.modified) {
+                    this.simplifyBinaryExpression(node);
+                }
+            },
+            UnaryExpression: (node) => {
+                const argValue = this.evaluateConstantExpression(node.argument);
+                if (argValue !== undefined) {
+                    const result = this.evaluateUnaryOperation(node.operator, argValue);
+                    if (result !== undefined) {
+                        const replacement = ASTBuilder.numericLiteral(result);
+                        replacement.location = node.location;
+                        this.replaceNode(node, replacement);
+                        this.modified = true;
+                    }
+                }
+            },
+            IfStatement: (node) => {
+                const testValue = this.evaluateConstantExpression(node.test);
+                if (testValue !== undefined) {
+                    if (testValue) {
+                        // 条件为真，只保留then分支
+                        this.replaceNode(node, node.consequent);
+                    } else {
+                        // 条件为假，只保留else分支（如果有）
+                        this.replaceNode(node, node.alternate || null);
+                    }
                     this.modified = true;
                 }
-            } else {
-                // 未初始化的变量，如果未被使用则移除
-                if (this.usedVariables.has(declarator.name)) {
-                    usefulDeclarators.push(declarator);
-                } else {
+            },
+            WhileStatement: (node) => {
+                const testValue = this.evaluateConstantExpression(node.test);
+                if (testValue !== undefined && !testValue) {
+                    // 条件为假的while循环，直接删除
+                    this.replaceNode(node, null);
                     this.modified = true;
                 }
             }
-        }
-
-        if (usefulDeclarators.length === 0) {
-            this.modified = true;
-            return null; // 整个声明都是无用的
-        }
-
-        node.declarators = usefulDeclarators;
-        return node;
+        });
     }
 
-    optimizeIfStatement(node) {
-        node.test = this.applyOptimizations(node.test);
+    // =============== 函数内联 ===============
+
+    inlineFunctions() {
+        // 收集适合内联的函数
+        const candidates = [];
+        this.functionInfo.forEach((info, funcName) => {
+            if (info.isDefinition && info.calls === 1) {
+                // 只被调用一次的函数
+                candidates.push(funcName);
+            } else if (info.isInline && info.calls > 0) {
+                // 标记为inline的函数
+                candidates.push(funcName);
+            } else if (this.isSmallFunction(info.node)) {
+                // 小函数
+                candidates.push(funcName);
+            }
+        });
         
-        // 常量条件求值（但避免对涉及volatile的表达式进行求值）
-        if (!this.involvesVolatileAccess(node.test)) {
-            const testValue = this.evaluateConstantExpression(node.test);
-            if (testValue !== undefined) {
-                this.modified = true;
-                if (testValue) {
-                    // 条件为真，只保留then分支
-                    return this.applyOptimizations(node.consequent);
-                } else {
-                    // 条件为假，只保留else分支（如果有）
-                    return node.alternate ? this.applyOptimizations(node.alternate) : null;
-                }
-            }
+        // 内联候选函数
+        for (const funcName of candidates) {
+            this.inlineFunction(funcName);
         }
-
-        node.consequent = this.applyOptimizations(node.consequent);
-        if (node.alternate) {
-            node.alternate = this.applyOptimizations(node.alternate);
-        }
-
-        // 如果两个分支都为空，移除整个if语句
-        if (this.isEmptyStatement(node.consequent) && 
-            (!node.alternate || this.isEmptyStatement(node.alternate))) {
-            this.modified = true;
-            return null;
-        }
-
-        return node;
     }
 
-    optimizeBinaryExpression(node) {
-        node.left = this.applyOptimizations(node.left);
-        node.right = this.applyOptimizations(node.right);
+    inlineFunction(funcName) {
+        const funcInfo = this.functionInfo.get(funcName);
+        if (!funcInfo || !funcInfo.node.body) return;
+        
+        const funcNode = funcInfo.node;
+        
+        // 查找调用点
+        let callSite = null;
+        let parentNode = null;
+        
+        this.traverseAST(this.optimizedAst, {
+            FunctionCall: (node, parent) => {
+                if (node.callee.type === 'Identifier' && 
+                    node.callee.name === funcName && 
+                    !callSite) {
+                    callSite = node;
+                    parentNode = parent;
+                }
+            }
+        });
+        
+        if (!callSite || !parentNode) return;
+        
+        // 检查是否适合内联
+        if (!this.isSuitableForInlining(funcNode, callSite)) {
+            return;
+        }
+        
+        // 创建内联副本
+        const inlinedBody = this.cloneAST(funcNode.body);
+        
+        // 替换参数
+        const paramMap = new Map();
+        funcNode.parameters.forEach((param, index) => {
+            if (index < callSite.arguments.length) {
+                paramMap.set(param.name, callSite.arguments[index]);
+            }
+        });
+        
+        this.replaceParameters(inlinedBody, paramMap);
+        
+        // 替换返回语句
+        if (this.containsReturn(inlinedBody)) {
+            const returnValue = this.extractReturnValue(inlinedBody);
+            if (returnValue) {
+                this.replaceNode(callSite, returnValue);
+            } else {
+                // 没有返回值的函数调用，用函数体替换
+                if (parentNode.type === 'ExpressionStatement') {
+                    this.replaceNode(parentNode, inlinedBody);
+                }
+            }
+        } else {
+            // 没有返回语句的函数，用函数体替换调用
+            if (parentNode.type === 'ExpressionStatement') {
+                this.replaceNode(parentNode, inlinedBody);
+            }
+        }
+        
+        this.modified = true;
+        this.warnings.push(`Inlined function '${funcName}'`);
+        
+        // 更新函数调用计数
+        funcInfo.calls--;
+    }
 
-        // 避免对涉及volatile的表达式进行常量折叠
-        if (!this.involvesVolatileAccess(node.left) && !this.involvesVolatileAccess(node.right)) {
-            // 常量折叠
-            const leftValue = this.evaluateConstantExpression(node.left);
-            const rightValue = this.evaluateConstantExpression(node.right);
+    // =============== 辅助方法 ===============
+
+    traverseAST(node, visitors, callbacks = {}) {
+        const traverse = (currentNode, parent = null) => {
+            if (!currentNode) return;
             
-            if (leftValue !== undefined && rightValue !== undefined) {
-                const result = this.evaluateBinaryOperation(node.operator, leftValue, rightValue);
-                if (result !== undefined) {
-                    this.modified = true;
-                    return ASTBuilder.numericLiteral(result);
-                }
+            // 调用进入节点的回调
+            if (callbacks.enterFunction && currentNode.type === 'FunctionDeclaration') {
+                callbacks.enterFunction(currentNode);
             }
-
-            // 代数恒等式简化
-            return this.simplifyBinaryExpression(node, leftValue, rightValue);
-        }
-
-        return node;
-    }
-
-    optimizeUnaryExpression(node) {
-        node.argument = this.applyOptimizations(node.argument);
-        
-        // 避免对涉及volatile的表达式进行常量折叠
-        if (!this.involvesVolatileAccess(node.argument)) {
-            // 常量折叠
-            const argValue = this.evaluateConstantExpression(node.argument);
-            if (argValue !== undefined) {
-                const result = this.evaluateUnaryOperation(node.operator, argValue);
-                if (result !== undefined) {
-                    this.modified = true;
-                    return ASTBuilder.numericLiteral(result);
-                }
+            
+            // 调用节点特定的访问者
+            if (visitors[currentNode.type]) {
+                visitors[currentNode.type](currentNode, parent);
             }
-        }
-
-        return node;
-    }
-
-    optimizeExpressionStatement(node) {
-        const optimizedExpr = this.applyOptimizations(node.expression);
-        
-        if (!optimizedExpr) {
-            this.modified = true;
-            return null;
-        }
-
-        // 移除没有副作用的表达式语句（但volatile访问被认为有副作用）
-        if (!this.mayHaveSideEffects(optimizedExpr) && !this.involvesVolatileAccess(optimizedExpr)) {
-            this.modified = true;
-            return null;
-        }
-
-        node.expression = optimizedExpr;
-        return node;
-    }
-
-    optimizeAssignmentExpression(node) {
-        node.left = this.applyOptimizations(node.left);
-        node.right = this.applyOptimizations(node.right);
-        
-        // 对于volatile变量的赋值，不进行优化
-        if (node.left.type === 'Identifier' && this.volatileVariables.has(this.getVariableKey(node.left.name))) {
-            return node;
-        }
-        
-        return node;
-    }
-
-    optimizeIdentifier(node) {
-        // 常量传播（但不传播volatile变量）
-        const varName = this.getVariableKey(node.name);
-        if (!this.volatileVariables.has(varName) && this.constants.has(varName)) {
-            const constantValue = this.constants.get(varName);
-            this.modified = true;
-            return ASTBuilder.numericLiteral(constantValue);
-        }
-        
-        return node;
-    }
-
-    optimizeCompoundStatement(node) {
-        const optimizedStatements = [];
-        
-        for (const stmt of node.statements) {
-            const optimizedStmt = this.applyOptimizations(stmt);
-            if (optimizedStmt) {
-                optimizedStatements.push(optimizedStmt);
-            } else {
-                this.modified = true;
+            
+            // 遍历子节点
+            if (currentNode.children) {
+                currentNode.children.forEach(child => traverse(child, currentNode));
             }
-        }
-
-        node.statements = optimizedStatements;
-        
-        // 如果复合语句为空，返回null
-        if (optimizedStatements.length === 0) {
-            return null;
-        }
-
-        return node;
-    }
-
-    optimizeChildren(node) {
-        if (node.children) {
-            for (let i = 0; i < node.children.length; i++) {
-                const optimizedChild = this.applyOptimizations(node.children[i]);
-                if (optimizedChild !== node.children[i]) {
-                    this.modified = true;
-                    node.children[i] = optimizedChild;
-                }
+			
+			// Manually added: traverse functions !!!
+			if (currentNode.functions) {
+				currentNode.functions.forEach(child => traverse(child, currentNode));
+			}
+            
+            // 处理特殊节点的子节点
+            switch (currentNode.type) {
+                case 'IfStatement':
+                    if (currentNode.consequent) traverse(currentNode.consequent, currentNode);
+                    if (currentNode.alternate) traverse(currentNode.alternate, currentNode);
+                    if (currentNode.test) traverse(currentNode.test, currentNode);
+                    break;
+                case 'WhileStatement':
+                    if (currentNode.body) traverse(currentNode.body, currentNode);
+                    if (currentNode.test) traverse(currentNode.test, currentNode);
+                    break;
+                case 'ForStatement':
+                    if (currentNode.init) traverse(currentNode.init, currentNode);
+                    if (currentNode.test) traverse(currentNode.test, currentNode);
+                    if (currentNode.update) traverse(currentNode.update, currentNode);
+                    if (currentNode.body) traverse(currentNode.body, currentNode);
+                    break;
+                case 'CompoundStatement':
+                    if (currentNode.statements) {
+                        currentNode.statements.forEach(stmt => traverse(stmt, currentNode));
+                    }
+                    break;
+                case 'VariableDeclaration':
+                    currentNode.declarators.forEach(decl => {
+                        if (decl.initializer) traverse(decl.initializer, currentNode);
+                    });
+                    break;
+                case 'FunctionDeclaration':
+                    if (currentNode.body) traverse(currentNode.body, currentNode);
+                    break;
             }
-        }
-        return node;
-    }
-
-    // =============== 新增辅助方法 ===============
-
-    involvesVolatileAccess(node) {
-        if (!node) return false;
-        
-        // 检查标识符是否为volatile变量
-        if (node.type === 'Identifier') {
-            const varName = this.getVariableKey(node.name);
-            return this.volatileVariables.has(varName);
-        }
-        
-        // 检查函数调用（内建函数可能有volatile行为）
-        if (node.type === 'FunctionCall' || node.type === 'BuiltinCall') {
-            // 假设所有内建函数调用都可能涉及volatile访问
-            // 在实际实现中，可以根据具体函数进行细化
-            return true;
-        }
-        
-        // 递归检查子节点
-        if (node.children) {
-            for (const child of node.children) {
-                if (this.involvesVolatileAccess(child)) {
-                    return true;
-                }
+            
+            // 调用退出节点的回调
+            if (callbacks.exitFunction && currentNode.type === 'FunctionDeclaration') {
+                callbacks.exitFunction(currentNode);
             }
-        }
+        };
         
-        return false;
+        traverse(node);
     }
 
-    // =============== 原有辅助方法 ===============
+    replaceNode(oldNode, newNode) {
+        // 在实际实现中，需要找到oldNode的父节点并替换
+        // 这里简化处理，实际需要遍历AST并修改
+        // 由于AST节点的父指针没有完全实现，这里需要更复杂的逻辑
+        // 为简化，我们暂时只记录替换，实际替换在遍历时由调用者处理
+    }
 
     getVariableKey(varName) {
         return this.currentFunction ? `${this.currentFunction}.${varName}` : varName;
     }
 
+    isVariable(name) {
+        // 检查是否是变量（不是类型名或函数名）
+        // 简化实现
+        return !this.functionInfo.has(name) && !this.typeTable.has(name);
+    }
+
     evaluateConstantExpression(node) {
         if (!node) return undefined;
-
-        // 如果涉及volatile访问，不进行常量求值
-        if (this.involvesVolatileAccess(node)) {
-            return undefined;
-        }
-
+        
         switch (node.type) {
             case 'NumericLiteral':
                 return node.value;
-
             case 'Identifier':
-                const varName = this.getVariableKey(node.name);
-                return this.constants.get(varName);
-
+                const varKey = this.getVariableKey(node.name);
+                return this.constants.get(varKey);
             case 'BinaryExpression':
                 const left = this.evaluateConstantExpression(node.left);
                 const right = this.evaluateConstantExpression(node.right);
@@ -4832,14 +5098,12 @@ class Optimizer extends ASTVisitor {
                     return this.evaluateBinaryOperation(node.operator, left, right);
                 }
                 return undefined;
-
             case 'UnaryExpression':
                 const arg = this.evaluateConstantExpression(node.argument);
                 if (arg !== undefined) {
                     return this.evaluateUnaryOperation(node.operator, arg);
                 }
                 return undefined;
-
             default:
                 return undefined;
         }
@@ -4877,143 +5141,364 @@ class Optimizer extends ASTVisitor {
         }
     }
 
-    simplifyBinaryExpression(node, leftValue, rightValue) {
-        // 代数恒等式简化
-        switch (node.operator) {
-            case '+':
-                if (leftValue === 0) {
-                    this.modified = true;
-                    return node.right; // 0 + x → x
-                }
-                if (rightValue === 0) {
-                    this.modified = true;
-                    return node.left; // x + 0 → x
-                }
-                break;
-
-            case '-':
-                if (rightValue === 0) {
-                    this.modified = true;
-                    return node.left; // x - 0 → x
-                }
-                break;
-
-            case '*':
-                if (leftValue === 1) {
-                    this.modified = true;
-                    return node.right; // 1 * x → x
-                }
-                if (rightValue === 1) {
-                    this.modified = true;
-                    return node.left; // x * 1 → x
-                }
-                if (leftValue === 0 || rightValue === 0) {
-                    this.modified = true;
-                    return ASTBuilder.numericLiteral(0); // 0 * x → 0, x * 0 → 0
-                }
-                break;
-
-            case '/':
-                if (rightValue === 1) {
-                    this.modified = true;
-                    return node.left; // x / 1 → x
-                }
-                break;
-
-            case '&':
-                if (leftValue === 0 || rightValue === 0) {
-                    this.modified = true;
-                    return ASTBuilder.numericLiteral(0); // 0 & x → 0, x & 0 → 0
-                }
-                break;
-
-            case '|':
-                if (leftValue === 0) {
-                    this.modified = true;
-                    return node.right; // 0 | x → x
-                }
-                if (rightValue === 0) {
-                    this.modified = true;
-                    return node.left; // x | 0 → x
-                }
-                break;
-        }
-
-        return node;
-    }
-
-    mayHaveSideEffects(node) {
+    hasSideEffects(node) {
         if (!node) return false;
-
-        // 以下情况可能有副作用：
-        // 1. 函数调用
-        // 2. 赋值操作
-        // 3. 内建函数调用
-        // 4. 内联汇编
-        // 5. 涉及内存访问的操作
-        // 6. volatile变量访问
-
-        if (this.involvesVolatileAccess(node)) {
-            return true;
-        }
-
+        
+        // 检查节点是否有副作用
         switch (node.type) {
             case 'FunctionCall':
             case 'BuiltinCall':
-            case 'AssignmentExpression':	/* TODO: SOMETHING IS TO BE DONE HERE */
-            case 'AsmStatement':
-                return true;
-
+            case 'AssignmentExpression':
             case 'UnaryExpression':
-                // ++ 和 -- 操作有副作用
                 if (node.operator === '++' || node.operator === '--') {
                     return true;
                 }
                 break;
-
-            case 'BinaryExpression':
-                // 复合赋值操作有副作用
-                if (node.operator.includes('=') && node.operator !== '==' && node.operator !== '!=') {
+        }
+        
+        // 递归检查子节点
+        if (node.children) {
+            for (const child of node.children) {
+                if (this.hasSideEffects(child)) {
                     return true;
                 }
-                return this.mayHaveSideEffects(node.left) || this.mayHaveSideEffects(node.right);
-
-            default:
-                // 递归检查子节点
-                if (node.children) {
-                    for (const child of node.children) {
-                        if (this.mayHaveSideEffects(child)) {
-                            return true;
-                        }
-                    }
-                }
-                return false;
+            }
         }
-    }
-
-    isEmptyStatement(node) {
-        if (!node) return true;
-        if (node.type === 'CompoundStatement') {
-            return node.statements.length === 0;
-        }
+        
         return false;
     }
 
-    visitChildren(node) {
-        if (node.children) {
-            node.children.forEach(child => this.collectInfo(child));
+    simplifyBinaryExpression(node) {
+        // 代数恒等式简化
+        // 例如：x * 1 → x, x + 0 → x
+        const leftConst = this.evaluateConstantExpression(node.left);
+        const rightConst = this.evaluateConstantExpression(node.right);
+        
+        switch (node.operator) {
+            case '+':
+                if (leftConst === 0) {
+                    this.replaceNode(node, node.right);
+                    return true;
+                }
+                if (rightConst === 0) {
+                    this.replaceNode(node, node.left);
+                    return true;
+                }
+                break;
+            case '-':
+                if (rightConst === 0) {
+                    this.replaceNode(node, node.left);
+                    return true;
+                }
+                break;
+            case '*':
+                if (leftConst === 1) {
+                    this.replaceNode(node, node.right);
+                    return true;
+                }
+                if (rightConst === 1) {
+                    this.replaceNode(node, node.left);
+                    return true;
+                }
+                if (leftConst === 0 || rightConst === 0) {
+                    this.replaceNode(node, ASTBuilder.numericLiteral(0));
+                    return true;
+                }
+                break;
+            case '/':
+                if (rightConst === 1) {
+                    this.replaceNode(node, node.left);
+                    return true;
+                }
+                break;
         }
+        
+        return false;
     }
 
-    addError(message, location = null) {
-        this.errors.push({
-            message,
-            line: location ? location.line : 0,
-            column: location ? location.column : 0
+    isSmallFunction(funcNode) {
+        if (!funcNode.body) return false;
+        
+        // 检查函数体大小
+        let statementCount = 0;
+        this.traverseAST(funcNode.body, {
+            ExpressionStatement: () => statementCount++,
+            VariableDeclaration: () => statementCount++,
+            ReturnStatement: () => statementCount++,
+            IfStatement: () => statementCount++,
+            WhileStatement: () => statementCount++,
+            ForStatement: () => statementCount++
         });
+        
+        // 小函数：不超过3个语句
+        return statementCount <= 3;
+    }
+
+    isSuitableForInlining(funcNode, callSite) {
+        // 检查函数是否适合内联
+        if (!funcNode.body) return false;
+        
+        // 检查参数数量匹配
+        if (funcNode.parameters.length !== callSite.arguments.length) {
+            return false;
+        }
+        
+        // 检查是否有递归调用
+        let hasRecursion = false;
+        this.traverseAST(funcNode.body, {
+            FunctionCall: (node) => {
+                if (node.callee.type === 'Identifier' && 
+                    node.callee.name === funcNode.name) {
+                    hasRecursion = true;
+                }
+            }
+        });
+        
+        return !hasRecursion;
+    }
+
+    cloneAST(node) {
+        // 深度复制AST节点
+        // 简化实现，实际需要根据节点类型复制
+        if (!node) return null;
+        
+        const clone = Object.assign({}, node);
+        clone.children = node.children ? node.children.map(child => this.cloneAST(child)) : [];
+        
+        return clone;
+    }
+
+    replaceParameters(node, paramMap) {
+        // 替换参数标识符
+        this.traverseAST(node, {
+            Identifier: (identNode) => {
+                const replacement = paramMap.get(identNode.name);
+                if (replacement) {
+                    const clonedReplacement = this.cloneAST(replacement);
+                    clonedReplacement.location = identNode.location;
+                    // 实际替换需要父节点信息
+                }
+            }
+        });
+    }
+
+    containsReturn(node) {
+        let hasReturn = false;
+        this.traverseAST(node, {
+            ReturnStatement: () => {
+                hasReturn = true;
+            }
+        });
+        return hasReturn;
+    }
+
+    extractReturnValue(node) {
+        let returnValue = null;
+        
+        this.traverseAST(node, {
+            ReturnStatement: (retNode) => {
+                if (retNode.argument) {
+                    returnValue = retNode.argument;
+                }
+            }
+        });
+        
+        return returnValue ? this.cloneAST(returnValue) : null;
     }
 }
 
+// 函数内联器辅助类
+class FunctionInliner {
+    constructor(optimizer, programNode, inlineCandidates) {
+        this.optimizer = optimizer;
+        this.programNode = programNode;
+        this.inlineCandidates = inlineCandidates;
+        this.modified = false;
+    }
+
+    applyInlining() {
+        // 遍历所有函数，内联调用
+        for (const func of this.programNode.functions) {
+            this.inlineCallsInFunction(func);
+        }
+        
+        // 删除已被内联的函数
+        this.programNode.functions = this.programNode.functions.filter(func => {
+            const funcName = func.name;
+            const isCandidate = this.inlineCandidates.has(funcName);
+            const isUsed = (this.optimizer.functionCallCounts.get(funcName) || 0) > 0;
+            
+            // 保留未被内联或仍被使用的函数
+            return !isCandidate || isUsed || funcName === 'main';
+        });
+    }
+
+    inlineCallsInFunction(funcNode) {
+        if (!funcNode.body || !funcNode.body.statements) return;
+        
+        const funcName = funcNode.name;
+        const optimizedStatements = [];
+        
+        for (const stmt of funcNode.body.statements) {
+            // 检查是否是函数调用表达式语句
+            if (stmt.type === 'ExpressionStatement' && 
+                stmt.expression && 
+                stmt.expression.type === 'FunctionCall') {
+                
+                const callExpr = stmt.expression;
+                const calleeName = callExpr.callee.name;
+                
+                if (this.inlineCandidates.has(calleeName)) {
+                    // 内联这个调用
+                    const inlinedCode = this.inlineFunctionCall(callExpr, calleeName, funcName);
+                    if (inlinedCode) {
+                        this.modified = true;
+                        optimizedStatements.push(...inlinedCode);
+                        continue;
+                    }
+                }
+            }
+            
+            optimizedStatements.push(stmt);
+        }
+        
+        funcNode.body.statements = optimizedStatements;
+    }
+
+    inlineFunctionCall(callExpr, calleeName, callerName) {
+        const calleeNode = this.optimizer.functionDefinitions.get(calleeName);
+        if (!calleeNode || !calleeNode.body) return null;
+        
+        // 克隆函数体
+        const clonedBody = this.optimizer.cloneNode(calleeNode.body);
+        
+        // 创建参数映射
+        const paramMap = new Map();
+        if (calleeNode.parameters && callExpr.arguments) {
+            for (let i = 0; i < calleeNode.parameters.length; i++) {
+                const paramName = calleeNode.parameters[i].name;
+                const argExpr = callExpr.arguments[i];
+                
+                if (paramName && argExpr) {
+                    // 为参数创建临时变量或直接替换
+                    const tempVarName = `__inline_${calleeName}_${paramName}_${Date.now()}`;
+                    paramMap.set(paramName, {
+                        varName: tempVarName,
+                        value: argExpr
+                    });
+                }
+            }
+        }
+        
+        // 转换函数体中的语句
+        const inlinedStatements = [];
+        
+        // 添加参数初始化
+        for (const [paramName, paramInfo] of paramMap) {
+            const varDecl = ASTBuilder.variableDeclaration(
+                ASTBuilder.typeSpecifier('int'), // 简化：假设所有参数都是int类型
+                [ASTBuilder.variableDeclarator(paramInfo.varName, paramInfo.value)]
+            );
+            inlinedStatements.push(varDecl);
+        }
+        
+        // 添加函数体语句（替换参数引用）
+        if (clonedBody.statements) {
+            for (const stmt of clonedBody.statements) {
+                const transformedStmt = this.transformStatement(stmt, paramMap, calleeName, callerName);
+                if (transformedStmt) {
+                    inlinedStatements.push(transformedStmt);
+                }
+            }
+        }
+        
+        return inlinedStatements;
+    }
+
+    transformStatement(stmt, paramMap, calleeName, callerName) {
+        const transformed = this.optimizer.cloneNode(stmt);
+        
+        // 替换参数引用
+        const paramReplacer = {
+            visitIdentifier: (node) => {
+                const varName = node.name;
+                if (paramMap.has(varName)) {
+                    const paramInfo = paramMap.get(varName);
+                    return ASTBuilder.identifier(paramInfo.varName);
+                }
+                return node;
+            },
+            
+            visitReturnStatement: (node) => {
+                // 简化：将return转换为赋值或表达式
+                if (node.argument) {
+                    const transformedArg = this.transformExpression(node.argument, paramMap);
+                    return ASTBuilder.expressionStatement(transformedArg);
+                }
+                return null;
+            }
+        };
+        
+        this.transformNode = (node) => {
+            if (!node) return node;
+            
+            if (node.type === 'Identifier') {
+                return paramReplacer.visitIdentifier(node);
+            } else if (node.type === 'ReturnStatement') {
+                return paramReplacer.visitReturnStatement(node);
+            }
+            
+            // 递归处理子节点
+            if (node.children) {
+                for (let i = 0; i < node.children.length; i++) {
+                    node.children[i] = this.transformNode(node.children[i]);
+                }
+            }
+            
+            return node;
+        };
+        
+        return this.transformNode(transformed);
+    }
+
+    transformExpression(expr, paramMap) {
+        // 简化：仅替换标识符
+        const transformed = this.optimizer.cloneNode(expr);
+        
+        const replaceVisitor = {
+            visitIdentifier: (node) => {
+                const varName = node.name;
+                if (paramMap.has(varName)) {
+                    const paramInfo = paramMap.get(varName);
+                    return this.optimizer.cloneNode(paramInfo.value);
+                }
+                return node;
+            }
+        };
+        
+        this.visitExpr = (node) => {
+            if (!node) return node;
+            
+            if (node.type === 'Identifier') {
+                return replaceVisitor.visitIdentifier(node);
+            }
+            
+            // 递归处理子节点
+            if (node.children) {
+                for (let i = 0; i < node.children.length; i++) {
+                    node.children[i] = this.visitExpr(node.children[i]);
+                }
+            }
+            
+            return node;
+        };
+        
+        return this.visitExpr(transformed);
+    }
+}
+
+// !! NOTICE: SINCE THIS, THERE ARE NOT-SYNCED CHANGES !!
+// (On campus)
 
 // 内建函数处理器
 // This should be written WITH code generator
