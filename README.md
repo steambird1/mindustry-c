@@ -16,12 +16,13 @@ There have been many similar softwares aiming at using languages like C/C++ (ali
 ## Features about Mindustry-C (Envisioned)
 
 - Reserving most of C89 features
-  - Yes, you'll have struct, pointers, unions, and typedef!
+  - Yes, you'll have structs, pointers, unions, and `typedef`!
   - But you won't have `#pragma`
+  - Also, support for function pointers might be limited
 
 - Adding special types for Mindustry:
   - `device` for device (conveyors, scatters, etc.)
-  - `null_t` for `null` in Mindustry (notice that it is **not** like `nullptr` or `(void*)0`)
+  - `null_t` for `null` in Mindustry (notice that it might **not** like `nullptr` or `(void*)0`)
 
 - Memory mapping (adjusted outside the code)
 
@@ -31,12 +32,15 @@ There have been many similar softwares aiming at using languages like C/C++ (ali
 
 - Direct "assembly" insertion
 
-- Compiler's constant optimizing
+- Compiler's optimizing
+  - Compile-time constant evaluation
+  - Removal of unused code/variable
+  - Inlining functions
 
 ## Notice
 
 Following functions **rely on** memory allocation:
 
-- Any variable that has address
-- Any `struct`
+- Any variable that has address (`&var`)
+- Any `struct` or `union`
 - Any array
