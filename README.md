@@ -4,7 +4,7 @@
 
 **NOTICE: Currently, works are still in progress.**
 
-Above all, please notice that: Mindustry-C is an **almost 100% AI** and partially-experimental project. The AI tool used in this project is DeepSeek (for individuals).
+Above all, please notice that: Mindustry-C is an **mainly AI-generated** and partially-experimental project. The AI tool used in this project is DeepSeek (for individuals).
 
 > I have no time to code, though. I've written only prompts and a few lines of code for it. (Yet for sure, I have to do all bug-fixing.)
 > (AI is just no so realiable as I've expected)
@@ -34,8 +34,11 @@ There have been many similar softwares aiming at using languages like C/C++ (ali
 
 - Compiler's optimizing
   - Compile-time constant evaluation
+    - Including those in `for` or `while` loop!
   - Removal of unused code/variable
+    - Including unused `if` branches or `while` loops
   - Inlining functions
+  - ~~Loop unrolling~~ (because instructions are expensive in Mindustry!)
 
 ## Notice
 
@@ -44,3 +47,5 @@ Following functions **rely on** memory allocation:
 - Any variable that has address (`&var`)
 - Any `struct` or `union`
 - Any array
+
+A pointer takes up 2 units of spaces, respectively storing the memory cell and address of the element it points to.
