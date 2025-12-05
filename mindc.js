@@ -110,6 +110,7 @@ const ASTNodeType = {
     
     // 表达式
     BINARY_EXPRESSION: 'BinaryExpression',
+	CAST_EXPRESSION: 'CastExpression',
     UNARY_EXPRESSION: 'UnaryExpression',
     ASSIGNMENT_EXPRESSION: 'AssignmentExpression',
     LOGICAL_EXPRESSION: 'LogicalExpression',
@@ -131,7 +132,10 @@ const ASTNodeType = {
     
     // 特殊
     ASM_STATEMENT: 'AsmStatement',
-    BUILTIN_CALL: 'BuiltinCall'
+    BUILTIN_CALL: 'BuiltinCall',
+	
+	// For optimizer
+	DELETED: 'DeletedStatement'
 };
 
 // AST节点基类
@@ -220,6 +224,10 @@ class FunctionDeclarationNode extends ASTNode {
         this.isBuiltin = false;
 		this.storageClass = null;
 		this.isInline = false;
+		// For function pointer!!!
+		this.isFunctionPointer = false;
+		this.pointerLayer = 0;
+		this.pointerQualifiers = [];
     }
 }
 
@@ -285,6 +293,14 @@ class AssignmentExpressionNode extends ASTNode {
         this.left = left;
         this.right = right;
     }
+}
+
+class CastExpression extends ASTNode {
+	constructor(typeNode, expression) {
+		super(ASTNodeType.CAST_EXPRESSION);
+		this.typeNode = typeNode;
+		this.expression = expression;
+	}
 }
 
 class LogicalExpressionNode extends ASTNode {
@@ -386,13 +402,16 @@ class NullLiteralNode extends ASTNode {
 }
 
 // 修改TypeSpecifierNode以存储限定符信息
+// ! Also modified for function pointer !
 class TypeSpecifierNode extends ASTNode {
     constructor(typeName) {
         super(ASTNodeType.TYPE_SPECIFIER);
         this.typeName = typeName;
         this.qualifiers = []; // 类型限定符（const, volatile）
-        this.pointerDepth = 0; // 指针深度（向后兼容）
-        this.pointerQualifiers = []; // 指针限定符（向后兼容）
+        this.pointerDepth = 0; // 指针深度
+        this.pointerQualifiers = []; // 指针限定符
+		this.isFunctionType = false;
+		this.correspondingFunction = null;	// With a FunctionDeclarationNode, if is a function type
     }
 }
 
@@ -404,7 +423,9 @@ class TypedefDeclarationNode extends ASTNode {
         this.declarators = declarators || []; // 类型别名列表
         this.isStruct = false;
         this.isUnion = false;
+		this.isFunction = false;
         this.structDefinition = null; // 如果是结构体/联合体类型定义
+		this.functionDefinition = null;	// Reserved for function pointer
     }
 }
 
@@ -467,6 +488,14 @@ class DeclaratorNode extends ASTNode {
         this.pointerQualifiers = []; // 指针限定符数组，每个元素对应一级指针
         this.arrayDimensions = []; // 数组维度
         this.functionParams = null; // 函数参数（用于函数指针）
+    }
+}
+
+// Added in 2-2
+// 在优化器类中添加一个内部标记节点类型
+class DeletedStatement extends ASTNode {
+    constructor() {
+        super('DeletedStatement');
     }
 }
 
@@ -1395,6 +1424,7 @@ class Parser {
                 const typedefDecl = this.parseTypedefDeclaration();
                 if (typedefDecl) {
                     typeDefinitions.push(typedefDecl);
+					typedefDecl.parent = program;
                     // 记录类型名
                     typedefDecl.declarators.forEach(d => {
                         if (d.name) {
@@ -1411,6 +1441,7 @@ class Parser {
                 const typeDef = this.parseStructOrUnionDefinition();
                 if (typeDef && typeDef.isDefinition) {
                     typeDefinitions.push(typeDef);
+					typeDef.parent = program;
                     // 记录类型名
                     if (typeDef.name) {
                         this.addTypeName(typeDef.name);
@@ -1438,6 +1469,7 @@ class Parser {
             if (this.matchToken(TokenType.TYPEDEF)) {
                 const typedefDecl = this.parseTypedefDeclaration();
                 if (typedefDecl) {
+					typedefDecl.parent = program;
                     program.typeDefinitions = program.typeDefinitions || [];
                     program.typeDefinitions.push(typedefDecl);
                     continue;
@@ -1451,6 +1483,7 @@ class Parser {
                 const typeDef = this.parseStructOrUnionDefinition();
                 if (typeDef && typeDef.isDefinition) {
                     // 这是一个完整的结构体/联合体定义
+					typeDef.parent = program;
                     program.typeDefinitions = program.typeDefinitions || [];
                     program.typeDefinitions.push(typeDef);
                     continue;
@@ -1468,6 +1501,7 @@ class Parser {
                 } else {
                     program.globalDeclarations.push(declaration);
                 }
+				declaration.parent = program;
             } else {
                 // 跳过无法解析的token
                 this.consumeToken();
@@ -1508,6 +1542,40 @@ class Parser {
 	parseTypedefDeclaration() {
         const typedefToken = this.expectToken(TokenType.TYPEDEF);
         if (!typedefToken) return null;
+		
+		const functionLookahead = this.lookaheadForFunction();
+		if (functionLookahead.isFunction) {
+			this.addError('Cannot declare function through typedef');
+			return null;
+		} else if (functionLookahead.isFunctionPointer) {
+			// TODO: Currently, only single name is implemented for function pointer:
+			const parsedFunction = this.parseFunctionDeclaration(true);
+			let typeSpecifier = new TypeSpecifierNode();
+			typeSpecifier.qualifiers = parsedFunction.storageClass;
+			typeSpecifier.pointerDepth = parsedFunction.pointerDepth; //functionLookahead.pointerDepth;
+			typeSpecifier.pointerQualifiers = parsedFunction.pointerQualifiers;
+			
+			typeSpecifier.isFunctionType = true;
+			typeSpecifier.correspondingFunction = parsedFunction;
+			const typeDeclarator = ASTBuilder.variableDeclarator(parsedFunction.name);
+			this.addTypeName(parsedFunction.name);
+			typeDeclarator.location = typedefToken.location;
+			typeDeclarator.pointerDepth = typeSpecifier.pointerDepth;
+			typeDeclarator.pointerQualifiers = typeSpecifier.pointerQualifiers;
+			// TODO: No array dimension so far
+			// I guess nobody wants that, as it's so complex!
+			const typedefDecl = ASTBuilder.typedefDeclaration(typeSpecifier, [typeDeclarator]);
+			typedefDecl.location = typedefToken.location;
+			typedefDecl.isFunction = true;
+			typedefDecl.functionDefinition = parsedFunction;
+			
+			typeSpecifier.parent = typeDeclarator;
+			typeDeclarator.parent = typedefDecl;
+			parsedFunction.parent = typedefDecl;
+			// Might be TODO: More pointer implementation ?
+			
+			return typedefDecl;
+		}
 
         // 解析类型说明符
         const baseType = this.parseTypeSpecifier();
@@ -1515,6 +1583,8 @@ class Parser {
             this.addError('Expected type specifier after typedef');
             return null;
         }
+		
+		const typedefDecl = ASTBuilder.typedefDeclaration(baseType, []);
 
         // 解析声明符（类型别名），可以有多个
         const declarators = [];
@@ -1529,13 +1599,15 @@ class Parser {
                 typeDeclarator.pointerDepth = declarator.pointerDepth;
                 typeDeclarator.pointerQualifiers = declarator.pointerQualifiers;
                 typeDeclarator.arrayDimensions = declarator.arrayDimensions;
+				declarator.parent = typeDeclarator;
+				typeDeclarator.parent = typedefDecl;
                 declarators.push(typeDeclarator);
             }
         } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
 
         this.expectToken(TokenType.SEMICOLON);
 
-        const typedefDecl = ASTBuilder.typedefDeclaration(baseType, declarators);
+        typedefDecl.declarators = declarators;
         typedefDecl.location = typedefToken.location;
         
         // 如果声明符有指针信息，需要创建对应的指针类型定义
@@ -1603,6 +1675,8 @@ class Parser {
         typeDef.isDefinition = isDefinition;
         typeDef.location = structOrUnionToken.location;
         
+		members.forEach(member => member.parent = typeDef);
+		
 		if (name) {
             this.addTypeName(name);
         }
@@ -1647,10 +1721,12 @@ class Parser {
         member.pointerDepth = declarator.pointerDepth;
         member.pointerQualifiers = declarator.pointerQualifiers;
         member.arrayDimensions = declarator.arrayDimensions;
+		declarator.parent = member;
         return member;
     }
 
 	// (This function has manual changes!!!)
+	// (Major manual change: support for pointer -- the former ones are really awful !!!)
     parseTypeSpecifier() {
         // 解析类型限定符（const, volatile）
         const qualifiers = this.parseTypeQualifiers();
@@ -1695,11 +1771,14 @@ class Parser {
             TokenType.DOUBLE, TokenType.LONG, TokenType.SHORT, TokenType.SIGNED, TokenType.UNSIGNED,
             TokenType.STRUCT, TokenType.UNION, TokenType.ENUM
         ];
+		
+		let checkSpecialTypes = true, doneTypeFetch = false;
+		let typeNode = null;
 
         for (const typeToken of typeTokens) {
             if (this.matchToken(typeToken)) {
                 const token = this.consumeToken();
-                const typeNode = ASTBuilder.typeSpecifier(token.value);
+                typeNode = ASTBuilder.typeSpecifier(token.value);
                 typeNode.setAttribute('location', token.location);
                 typeNode.setAttribute('qualifiers', qualifiers);
                 
@@ -1710,33 +1789,46 @@ class Parser {
                     this.parseEnumType(typeNode);
                 }
                 
-                return typeNode;
+				checkSpecialTypes = false;
+				doneTypeFetch = true;
+                //return typeNode;
             }
         }
 
         // 特殊类型：device 和 null_t
-        if (this.matchToken(TokenType.IDENTIFIER)) {
+        if (checkSpecialTypes && this.matchToken(TokenType.IDENTIFIER)) {
             const token = this.getCurrentToken();
             if (token.value === 'device' || token.value === 'null_t') {
                 this.consumeToken();
-                const typeNode = ASTBuilder.typeSpecifier(token.value);
+                typeNode = ASTBuilder.typeSpecifier(token.value);
                 typeNode.setAttribute('location', token.location);
                 typeNode.setAttribute('qualifiers', qualifiers);
                 return typeNode;
             }
             
             // 可能是通过typedef定义的类型别名
-            const typeNode = ASTBuilder.typeSpecifier(token.value);
+            typeNode = ASTBuilder.typeSpecifier(token.value);
             typeNode.setAttribute('location', token.location);
             typeNode.setAttribute('qualifiers', qualifiers);
             typeNode.setAttribute('isTypedef', true);
 			typeNode.setAttribute('isCustomType', true);
             this.consumeToken();
-            return typeNode;
+			doneTypeFetch = true;
         }
+		
+		if (!doneTypeFetch) {
+			this.addError('Expected type specifier');
+			return null;
+		}
+		
+		// Fetch pointers
+		while (this.matchToken(TokenType.MULTIPLY)) {
+			this.consumeToken();
+			typeNode.pointerQualifiers.push(this.parseTypeQualifiers());
+			typeNode.pointerDepth++;
+		}
 
-        this.addError('Expected type specifier');
-        return null;
+        return typeNode;
     }
 
 	// 修改函数参数解析
@@ -1746,12 +1838,13 @@ class Parser {
         if (!paramType) return null;
         
         // 解析声明符
+		let decName = null;
         const declarator = this.parseDeclarator(true);
-        if (!declarator) return null;
+        if (declarator) decName = declarator.name;	// Function declaration / function pointer has no name
         
         return {
             type: paramType,
-            name: declarator.name,
+            name: decName,
             pointerDepth: declarator.pointerDepth,
             pointerQualifiers: declarator.pointerQualifiers,
             arrayDimensions: declarator.arrayDimensions,
@@ -1783,8 +1876,9 @@ class Parser {
             this.expectToken(TokenType.RIGHT_PAREN);
         } else {
             // 解析标识符
-            const nameToken = this.expectToken(TokenType.IDENTIFIER);
-            if (!nameToken) {
+            const nameToken = this.getCurrentToken();
+			if (!isFunctionParam) this.expectToken(TokenType.IDENTIFIER);
+            if (nameToken.type != TokenType.IDENTIFIER) {
                 // 如果是函数参数且没有名称（如：void func(int))
                 if (isFunctionParam) {
                     return ASTBuilder.declarator(null);
@@ -1820,6 +1914,8 @@ class Parser {
                         }
                     } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
                 }
+				if (this.matchToken(TokenType.IDENTIFIER))
+					this.consumeToken();	// Last parameter identifier is to be consumed !!!
                 this.expectToken(TokenType.RIGHT_PAREN);
                 declarator.functionParams = params;
             }
@@ -1931,6 +2027,7 @@ class Parser {
 	// ****
 	// THIS FUNCTION HAS A MANUAL CHANGE
 	// ****
+	// This function now features function-pointer recognition!
     lookaheadForFunction() {
         let startIndex = this.currentTokenIndex;
         let currentIndex = startIndex;
@@ -1960,6 +2057,21 @@ class Parser {
 		
 		// 最后一个是函数名称
 		if (endedAsIdentifier) currentIndex--;
+		
+		// Might be a function pointer's type
+		if (this.matchTokenTypeAt(currentIndex, [TokenType.LEFT_PAREN])) {
+			currentIndex++;	// Simply skip it
+			let pointerLayer = 0;
+			while (this.matchTokenTypeAt(currentIndex + pointerLayer, [TokenType.MULTIPLY])) {
+				pointerLayer++;
+			}
+			if (this.matchTokenTypeAt(currentIndex + pointerLayer + 1, [TokenType.RIGHT_PAREN])) {
+				if (pointerLayer > 0) {
+					return { isFunction: false, isFunctionPointer: true, functionPointerLayer: pointerLayer };
+				}
+				currentIndex++;
+			}
+		}
         
         // 跳过指针（可能有多个）
         while (this.matchTokenTypeAt(currentIndex, [TokenType.MULTIPLY])) {
@@ -2087,18 +2199,21 @@ class Parser {
         if (!type) return null;
 
         const declarators = [];
+		const varDecl = ASTBuilder.variableDeclaration(type, []);
         do {
             const declarator = this.parseVariableDeclarator();
             if (declarator) {
+				declarator.parent = varDecl;
                 declarators.push(declarator);
             }
         } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
 
         this.expectToken(TokenType.SEMICOLON);
 
-        const varDecl = ASTBuilder.variableDeclaration(type, declarators);
         varDecl.location = type.location;
         varDecl.isStructOrUnion = true;
+		varDecl.declarators = declarators;
+		type.parent = varDecl;
         return varDecl;
     }
 
@@ -2113,7 +2228,9 @@ class Parser {
     }
 
     // 修改函数声明解析中的参数列表处理
-    parseFunctionDeclaration() {
+	// This is expected to work for function pointers as well
+	// Also, this function always return function declaration node, EVEN IF IT IS ACTUALLY A FUNCTION POINTER
+    parseFunctionDeclaration(allowFunctionPointer = false) {
 		let storageClass = null;
         let isInline = false;
         
@@ -2150,6 +2267,21 @@ class Parser {
         functionDecl.location = returnType.location;
 		functionDecl.storageClass = storageClass;
         functionDecl.isInline = isInline;
+		
+		returnType.parent = functionDecl;
+		declarator.parent = functionDecl;
+		
+		// Actually a function pointer
+		if (declarator.pointerDepth > 0) {
+			if (allowFunctionPointer) {
+				functionDecl.isFunctionPointer = true;
+				functionDecl.pointerLayer = declarator.pointerDepth;
+				functionDecl.pointerQualifiers = declarator.pointerQualifiers;
+			} else {
+				this.addError('Cannot use function pointer in function declaration or implementation');
+				return null;
+			}
+		}
         
         // 解析函数参数
         if (declarator.functionParams) {
@@ -2160,13 +2292,16 @@ class Parser {
         }
 
         // 解析函数体
-        if (this.matchToken(TokenType.SEMICOLON)) {
-            // 函数声明，没有函数体
-            this.consumeToken();
-        } else {
-            // 函数定义，有函数体
-            functionDecl.body = this.parseCompoundStatement();
-        }
+		if (!functionDecl.isFunctionPointer) {
+			if (this.matchToken(TokenType.SEMICOLON)) {
+				// 函数声明，没有函数体
+				this.consumeToken();
+			} else {
+				// 函数定义，有函数体
+				functionDecl.body = this.parseCompoundStatement();
+				functionDecl.body.parent = functionDecl;
+			}
+		}
 
         return functionDecl;
     }
@@ -2209,27 +2344,37 @@ class Parser {
 
 	// It used to have a label/bookmark here...
     parseVariableDeclaration() {
-        const type = this.parseTypeSpecifier();
+        let type = this.parseTypeSpecifier();
         if (!type) return null;
 
         const declarators = [];
+		const varDecl = ASTBuilder.variableDeclaration(type, []);
         do {
             const declarator = this.parseDeclarator(false);
+			
             if (!declarator || !declarator.name) {
-				/*
+				// Uncovered on 5 Dec
                 this.addError('Expected variable name in declaration');
                 break;
-				*/
-				return null;
+				//return null;
             }
-            
+            declarator.parent = varDecl;
             // 创建变量声明符节点
             const varDeclarator = ASTBuilder.variableDeclarator(declarator.name);
             varDeclarator.location = declarator.location;
             varDeclarator.pointerDepth = declarator.pointerDepth;
             varDeclarator.pointerQualifiers = declarator.pointerQualifiers;
             varDeclarator.arrayDimensions = declarator.arrayDimensions;
+			
+			if (type.pointerDepth > 0) {
+				// Only for the first
+				varDeclarator.pointerDepth += type.pointerDepth;
+				type.pointerDepth = 0;
+				varDeclarator.pointerQualifiers = varDeclarator.pointerQualifiers.concat(type.pointerQualifiers);
+				type.pointerQualifiers = [];
+			}
             
+			// This is a little bit different from pure C89
             // 处理初始化
             if (this.matchToken(TokenType.ASSIGN)) {
                 this.consumeToken();
@@ -2241,8 +2386,9 @@ class Parser {
 
         this.expectToken(TokenType.SEMICOLON);
 
-        const varDecl = ASTBuilder.variableDeclaration(type, declarators);
         varDecl.location = type.location;
+		varDecl.declarators = declarators;
+		type.parent = varDecl;
         return varDecl;
     }
 
@@ -2271,6 +2417,7 @@ class Parser {
         while (!this.matchToken(TokenType.RIGHT_BRACE) && !this.matchToken(TokenType.EOF)) {
             const statement = this.parseStatement();
             if (statement) {
+				statement.parent = compoundStmt;
                 compoundStmt.statements.push(statement);
             } else {
                 break;
@@ -2362,6 +2509,8 @@ class Parser {
         
         // 临时替换addError方法，只标记错误而不记录
         this.addError = (message, location) => {
+			// debugging:
+			//console.log(message, location);
             hadError = true;
         };
         
@@ -2387,6 +2536,10 @@ class Parser {
             }
             
             declarators.push(firstDeclarator);
+			const varDecl = ASTBuilder.variableDeclaration(type, []);
+			
+			firstDeclarator.parent = varDecl;
+			type.parent = varDecl;
             
             // 检查是否有更多声明符
             while (this.matchToken(TokenType.COMMA) && !hadError) {
@@ -2395,6 +2548,7 @@ class Parser {
                 if (!declarator || !declarator.name) {
                     break;
                 }
+				declarator.parent = varDecl;
                 declarators.push(declarator);
             }
             
@@ -2403,9 +2557,9 @@ class Parser {
                 return null;
             }
             
-            // 成功解析，创建变量声明节点
-            const varDecl = ASTBuilder.variableDeclaration(type, declarators);
             varDecl.location = type.location;
+			varDecl.declarators = declarators;
+			type.parent = varDecl;
             
             // 解析分号
             this.consumeToken();
@@ -2498,6 +2652,9 @@ class Parser {
         }
 
         const ifStmt = ASTBuilder.ifStatement(test, consequent, alternate);
+		test.parent = ifStmt;
+		consequent.parent = ifStmt;
+		if (alternate) alternate.parent = ifStmt;
         ifStmt.location = ifToken.location;
         return ifStmt;
     }
@@ -2514,6 +2671,8 @@ class Parser {
 
         const whileStmt = ASTBuilder.whileStatement(test, body);
         whileStmt.location = whileToken.location;
+		test.parent = whileStmt;
+		body.parent = whileStmt;
         return whileStmt;
     }
 
@@ -2541,6 +2700,9 @@ class Parser {
 
         const forStmt = ASTBuilder.forStatement(init, test, update, body);
         forStmt.location = forToken.location;
+		if (init) init.parent = forStmt;
+		if (test) test.parent = forStmt;
+		if (update) update.parent = forStmt;
         return forStmt;
     }
 
@@ -2557,6 +2719,7 @@ class Parser {
 
         const returnStmt = ASTBuilder.returnStatement(argument);
         returnStmt.location = returnToken.location;
+		argument.parent = returnStmt;
         return returnStmt;
     }
 
@@ -2629,6 +2792,8 @@ class Parser {
 
             const assignment = ASTBuilder.assignmentExpression(operatorToken.value, left, right);
             assignment.location = left.location;
+			left.parent = assignment;
+			right.parent = assignment;
             return assignment;
         }
 
@@ -2656,6 +2821,8 @@ class Parser {
             const alternate = this.parseConditionalExpression();
 
             const conditional = ASTBuilder.conditionalExpression(test, consequent, alternate);
+			consequent.parent = conditional;
+			if (alternate) alternate.parent = conditional;
             conditional.location = test.location;
             return conditional;
         }
@@ -2677,6 +2844,8 @@ class Parser {
             }
 
             const logicalExpr = ASTBuilder.logicalExpression(operatorToken.value, left, right);
+			left.parent = logicalExpr;
+			right.parent = logicalExpr;
             logicalExpr.location = left.location;
             left = logicalExpr;
         }
@@ -2698,6 +2867,8 @@ class Parser {
             }
 
             const logicalExpr = ASTBuilder.logicalExpression(operatorToken.value, left, right);
+			left.parent = logicalExpr;
+			right.parent = logicalExpr;
             logicalExpr.location = left.location;
             left = logicalExpr;
         }
@@ -2719,6 +2890,8 @@ class Parser {
             }
 
             const binaryExpr = ASTBuilder.binaryExpression(operatorToken.value, left, right);
+			left.parent = binaryExpr;
+			right.parent = binaryExpr;
             binaryExpr.location = left.location;
             left = binaryExpr;
         }
@@ -2745,6 +2918,8 @@ class Parser {
             }
 
             const binaryExpr = ASTBuilder.binaryExpression(operatorToken.value, left, right);
+			left.parent = binaryExpr;
+			right.parent = binaryExpr;
             binaryExpr.location = left.location;
             left = binaryExpr;
         }
@@ -2766,6 +2941,8 @@ class Parser {
             }
 
             const binaryExpr = ASTBuilder.binaryExpression(operatorToken.value, left, right);
+			left.parent = binaryExpr;
+			right.parent = binaryExpr;
             binaryExpr.location = left.location;
             left = binaryExpr;
         }
@@ -2774,8 +2951,8 @@ class Parser {
     }
 
     parseMultiplicativeExpression() {
-        let left = this.parseUnaryExpression();
-        if (!left) return null;
+        let left = this.parseCastExpression(); // 修改这里
+		if (!left) return null;
 
         while (
             this.matchToken(TokenType.MULTIPLY) ||
@@ -2783,7 +2960,7 @@ class Parser {
             this.matchToken(TokenType.MODULO)
         ) {
             const operatorToken = this.consumeToken();
-            const right = this.parseUnaryExpression();
+            const right = this.parseCastExpression();
             
             if (!right) {
                 this.addError('Expected expression after multiplicative operator');
@@ -2791,6 +2968,8 @@ class Parser {
             }
 
             const binaryExpr = ASTBuilder.binaryExpression(operatorToken.value, left, right);
+			left.parent = binaryExpr;
+			right.parent = binaryExpr;
             binaryExpr.location = left.location;
             left = binaryExpr;
         }
@@ -2798,51 +2977,114 @@ class Parser {
         return left;
     }
 	
-	// 添加parseCastExpression方法处理类型转换
-    parseCastExpression() {
-        // 检查是否可能是类型转换
-        if (this.matchToken(TokenType.LEFT_PAREN)) {
-            const startIndex = this.currentTokenIndex;
-            
-            // 尝试解析类型说明符
-            this.consumeToken(); // 跳过 '('
-            const type = this.parseTypeSpecifier();
-            
-            if (type) {
-                // 检查是否有指针声明符
-                let pointerDepth = 0;
-                while (this.matchToken(TokenType.MULTIPLY)) {
-                    this.consumeToken();
-                    pointerDepth++;
-                }
-                
-                // 检查是否有右括号
-                if (this.matchToken(TokenType.RIGHT_PAREN)) {
-                    this.consumeToken(); // 跳过 ')'
-                    
-                    // 解析被转换的表达式
-                    const expression = this.parseCastExpression();
-                    if (expression) {
-                        // 创建类型转换节点
-                        const castExpr = new ASTNode('CastExpression');
-                        castExpr.addChild(type);
-                        castExpr.setAttribute('pointerDepth', pointerDepth);
-                        castExpr.addChild(expression);
-                        castExpr.location = type.location;
-                        return castExpr;
-                    }
-                }
-            }
-            
-            // 不是类型转换，回退
-            this.currentTokenIndex = startIndex;
-        }
-        
-        return this.parseUnaryExpression();
-    }
-
+	// 修改 parseCastExpression 方法，使其更健壮
+	parseCastExpression() {
+		// 检查是否可能是类型转换
+		if (this.matchToken(TokenType.LEFT_PAREN)) {
+			const startIndex = this.currentTokenIndex;
+			
+			// 尝试解析类型说明符
+			this.consumeToken(); // 跳过 '('
+			
+			// 解析类型限定符
+			const qualifiers = this.parseTypeQualifiers();
+			
+			// 尝试解析类型说明符
+			const typeTokens = [
+				TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID,
+				TokenType.DOUBLE, TokenType.LONG, TokenType.SHORT, 
+				TokenType.SIGNED, TokenType.UNSIGNED,
+				TokenType.STRUCT, TokenType.UNION, TokenType.ENUM
+			];
+			
+			let isType = false;
+			let typeNode = null;
+			
+			// 检查基本类型
+			for (const typeToken of typeTokens) {
+				if (this.matchToken(typeToken)) {
+					isType = true;
+					const token = this.consumeToken();
+					typeNode = ASTBuilder.typeSpecifier(token.value);
+					typeNode.setAttribute('location', token.location);
+					typeNode.setAttribute('qualifiers', qualifiers);
+					
+					// 处理struct/union/enum类型
+					if (token.type === TokenType.STRUCT || token.type === TokenType.UNION) {
+						this.parseStructOrUnionType(typeNode);
+					} else if (token.type === TokenType.ENUM) {
+						this.parseEnumType(typeNode);
+					}
+					break;
+				}
+			}
+			
+			// 检查特殊类型：device 和 null_t
+			if (!isType && this.matchToken(TokenType.IDENTIFIER)) {
+				const token = this.getCurrentToken();
+				if (token.value === 'device' || token.value === 'null_t' || this.knownTypeNames.has(token.value)) {
+					isType = true;
+					this.consumeToken();
+					typeNode = ASTBuilder.typeSpecifier(token.value);
+					typeNode.setAttribute('location', token.location);
+					typeNode.setAttribute('qualifiers', qualifiers);
+					typeNode.setAttribute('isCustomType', true);
+				}
+			}
+			
+			if (isType && typeNode) {
+				// 解析指针部分
+				while (this.matchToken(TokenType.MULTIPLY)) {
+					this.consumeToken();
+					typeNode.pointerQualifiers.push(this.parseTypeQualifiers());
+					typeNode.pointerDepth++;
+				}
+				
+				// 检查是否有右括号
+				if (this.matchToken(TokenType.RIGHT_PAREN)) {
+					this.consumeToken(); // 跳过 ')'
+					
+					// 解析被转换的表达式
+					const expression = this.parseCastExpression(); // 递归解析，允许嵌套类型转换
+					if (expression) {
+						// 创建类型转换节点
+						const castExpr = new ASTNode('CastExpression', typeNode, expression);
+						//castExpr.addChild(typeNode);
+						castExpr.setAttribute('pointerDepth', typeNode.pointerDepth);
+						castExpr.setAttribute('qualifiers', typeNode.pointerQualifiers);
+						//castExpr.addChild(expression);
+						castExpr.location = typeNode.location;
+						typeNode.parent = castExpr;
+						expression.parent = castExpr;
+						return castExpr;
+					} else {
+						this.addError('Expected expression after cast type');
+						return null;
+					}
+				} else {
+					this.addError('Expected right parenthesis in type cast');
+					// 回退
+					this.currentTokenIndex = startIndex;
+					return null;
+				}
+			} else {
+				// 不是类型转换，回退
+				this.currentTokenIndex = startIndex;
+			}
+		}
+		
+		// 如果不是类型转换，继续解析其他表达式
+		return this.parseUnaryExpression();
+	}
+	
+	// Currently, we always allow cast
+	isValidCast(targetType, sourceType) {
+		return true;
+	}
+	
 	// Consider overriding 
     parseUnaryExpression() {
+		
         // 检查一元操作符
         const unaryOperators = [
             TokenType.PLUS, TokenType.MINUS, TokenType.NOT, TokenType.BITWISE_NOT,
@@ -2864,10 +3106,10 @@ class Parser {
 					this.addError('Expected expression after unary operator');
 					return null;
 				}
-
+				
 				const unaryExpr = ASTBuilder.unaryExpression(operatorValue, argument);
 				unaryExpr.location = operatorToken.location;
-				
+				argument.parent = unaryExpr;
 				// 为解引用和取地址操作添加特殊标记
 				if (operatorValue === '*') {
 					unaryExpr.setAttribute('isDereference', true);
@@ -2895,6 +3137,7 @@ class Parser {
                 if (expression.type === 'Identifier' && this.isBuiltinFunction(expression.name)) {
                     const builtinCall = ASTBuilder.builtinCall(expression.name);
                     builtinCall.location = expression.location;
+					expression.parent = builtinCall;
                     
                     if (!this.matchToken(TokenType.RIGHT_PAREN)) {
                         do {
@@ -2908,6 +3151,7 @@ class Parser {
                 } else {
                     const callExpr = ASTBuilder.functionCall(expression);
                     callExpr.location = expression.location;
+					expression.parent = callExpr;
                     
                     if (!this.matchToken(TokenType.RIGHT_PAREN)) {
                         do {
@@ -2932,6 +3176,7 @@ class Parser {
                 memberExpr.addChild(index);
                 memberExpr.setAttribute('computed', true);
                 memberExpr.location = expression.location;
+				expression.parent = memberExpr;
                 expression = memberExpr;
             }
 			// 结构体成员访问（点操作符）
@@ -2950,6 +3195,7 @@ class Parser {
                 memberExpr.setAttribute('computed', false);
                 memberExpr.setAttribute('operator', '.');
                 memberExpr.location = expression.location;
+				expression.parent = memberExpr;
                 expression = memberExpr;
             }
             // 结构体指针成员访问（箭头操作符）
@@ -2968,6 +3214,7 @@ class Parser {
                 memberExpr.setAttribute('computed', false);
                 memberExpr.setAttribute('operator', '->');
                 memberExpr.location = expression.location;
+				expression.parent = memberExpr;
                 expression = memberExpr;
             }
             // 后置递增/递减
@@ -2976,6 +3223,7 @@ class Parser {
                 const unaryExpr = ASTBuilder.unaryExpression(operatorToken.value, expression);
                 unaryExpr.prefix = false;
                 unaryExpr.location = expression.location;
+				expression.parent = unaryExpr;
                 expression = unaryExpr;
             }
             else {
@@ -3110,6 +3358,7 @@ class SymbolEntry {
         this.name = name;
         this.type = type; // 类型信息（现在是TypeInfo对象）
         this.scope = scope;
+		this.owningScope = null;	// The scope that the function (if it points to one) owns
         this.kind = kind; // 'variable', 'function', 'parameter', 'type'
         this.location = location;
         this.initialized = false;
@@ -3119,6 +3368,8 @@ class SymbolEntry {
         this.memoryLocation = null;
         this.isGlobal = false;
 		this.isRegister = false; // 标记是否为register变量
+		// Note: this is also available for functions:
+		// (for functions, once 'true', it can't be inlined !)
         this.isAddressed = false; // 标记是否被取地址
 		this.isConst = false;
         this.isVolatile = false;
@@ -3157,7 +3408,6 @@ class Scope {
 
     addSymbol(symbol) {
         this.symbols.set(symbol.name, symbol);
-		// Can this work?
 		symbol.scope = this; // 建立双向关联
     }
 
@@ -3193,9 +3443,10 @@ class TypeInfo {
         this.kind = kind; // 'basic', 'struct', 'union', 'pointer', 'array', 'function', 'device', 'null'
         this.size = size; // 类型大小（按1字节对齐）
         this.members = members || []; // 结构体/联合体成员
-        this.pointerTo = null; // 对于指针类型，指向的类型
+        this.pointerTo = null; // 对于指针类型，指向的类型 (MUST BE A TYPE, NOT A FUNCTION)
         this.arraySize = null; // 对于数组类型，数组大小
         this.qualifiers = []; // 类型限定符（const, volatile）
+		this.functionTo = null;	// Pointing to what function for function type
     }
     
     isConst() {
@@ -3294,14 +3545,11 @@ class SemanticAnalyzer extends ASTVisitor {
                 const functionScope = new Scope(this.currentScope, 'function', node);
                 this.currentScope = functionScope;
                 node.scope = functionScope;
-				// This is the actual thing...
-				if (node.body) {
-					this.linkScopesToAST(node.body);
-				}
                 break;
                 
             case 'CompoundStatement':
                 // 块作用域
+				// TODO: There are some bugs here...
                 if (this.currentScope.type !== 'function' || 
                     (this.currentScope.astNode && this.currentScope.astNode.type !== 'CompoundStatement')) {
                     const blockScope = new Scope(this.currentScope, 'block', node);
@@ -3423,7 +3671,8 @@ class SemanticAnalyzer extends ASTVisitor {
         this.typeTable.set('null_t', new TypeInfo('null_t', 'null', 1));
         
         // 指针类型的基础（void*）
-        const voidPtrType = new TypeInfo('void*', 'pointer', 1);
+		// Pointer has a size of 2 !!
+        const voidPtrType = new TypeInfo('void*', 'pointer', 2);
         voidPtrType.pointerTo = this.typeTable.get('void');
         this.typeTable.set('void*', voidPtrType);
     }
@@ -3458,6 +3707,7 @@ class SemanticAnalyzer extends ASTVisitor {
                 this.currentScope,
                 'function'
             );
+			// Builtin symbol doesn't own scope
             this.currentScope.addSymbol(symbol);
         });
     }
@@ -3472,27 +3722,62 @@ class SemanticAnalyzer extends ASTVisitor {
 			return;
 		}
 		
-		// I say no
-        let baseTypeName = this.getTypeNameFromTypeNode(typedefNode.type);
-        let baseType = this.getTypeInfo(baseTypeName);
-		
-        if (!baseType) {
-            this.addError(`Unknown base type '${baseTypeName}' in typedef`, typedefNode.location);
-            return;
-        }
-		
-        typedefNode.declarators.forEach(declarator => {
-            const aliasName = declarator.name;
-            const aliasType = this.createAliasType(baseType, declarator);
-            
-            // 添加到类型表和typedef表
-            this.typeTable.set(aliasName, aliasType);
-            this.typedefTable.set(aliasName, {
-                originalType: baseType,
-                aliasType: aliasType,
-                location: declarator.location
-            });
-        });
+		// Some special process for function pointer type:
+		// ! TODO: Functions will need 'isAddressed' (to suppress inlining) !
+		if (typedefNode.isFunction) {
+			typedefNode.declarators.forEach(declarator => {
+				const aliasName = declarator.name;
+				// Directly create a new type instead of go aliases
+				// TODO: Add temporary name, if necessary?
+				// Function has a size of 1 (its address)
+				// (Different from pointer's size 2 due to the need of storing its block position
+				// This will make them have a name
+				const aliasType = new TypeInfo(aliasName, 'function', 1);
+				aliasType.qualifiers = typedefNode.functionDefinition.pointerQualifiers;
+				aliasType.functionTo = new SymbolEntry(
+					aliasName,
+					{
+						returnType: typedefNode.functionDefinition.returnType.typeName,
+						parameters: typedefNode.functionDefinition.parameters.map(param => ({
+							name: param.name,
+							type: this.getTypeNameFromTypeNode(param.type)
+						}))
+					},
+					this.globalScope,
+					'function',
+					typedefNode.location
+				);
+				
+				this.typeTable.set(aliasName, aliasType);
+				this.typedefTable.set(aliasName, {
+					originalType: aliasType,
+					aliasType: aliasType,
+					location: declarator.location
+				});
+			});
+		} else {
+			// Traditional process
+			let baseTypeName = this.getTypeNameFromTypeNode(typedefNode.type);
+			let baseType = this.getTypeInfo(baseTypeName);
+			
+			if (!baseType) {
+				this.addError(`Unknown base type '${baseTypeName}' in typedef`, typedefNode.location);
+				return;
+			}
+			
+			typedefNode.declarators.forEach(declarator => {
+				const aliasName = declarator.name;
+				const aliasType = this.createAliasType(baseType, declarator);
+				
+				// 添加到类型表和typedef表
+				this.typeTable.set(aliasName, aliasType);
+				this.typedefTable.set(aliasName, {
+					originalType: baseType,
+					aliasType: aliasType,
+					location: declarator.location
+				});
+			});
+		}
     }
 	
 	processStructOrUnionDefinition(defNode) {
@@ -3629,7 +3914,7 @@ class SemanticAnalyzer extends ASTVisitor {
         if (declarator.pointerDepth > 0) {
             let currentType = aliasType;
             for (let i = 0; i < declarator.pointerDepth; i++) {
-                const ptrType = new TypeInfo('', 'pointer', 1);
+                const ptrType = new TypeInfo('', 'pointer', 2);
                 ptrType.pointerTo = currentType;
                 ptrType.qualifiers = declarator.pointerQualifiers[i] || [];
                 currentType = ptrType;
@@ -3653,18 +3938,31 @@ class SemanticAnalyzer extends ASTVisitor {
         return aliasType;
     }
 	
-	getTypeInfo(typeName) {
+	// Manually modified to support pointers!
+	getTypeInfo(typeNameRaw) {
+		
+		let typeName = typeNameRaw;
+		const ptrLocate = typeName.indexOf('*');
+		const ptrSize = (ptrLocate < 0) ? 0 : typeName.length - ptrLocate;
+		if (ptrLocate != -1) {
+			typeName = typeName.slice(0, ptrLocate);
+		}
+		let result = null;
+		
         // 从类型表获取类型信息
         if (this.typeTable.has(typeName)) {
-            return this.typeTable.get(typeName);
+            result = this.typeTable.get(typeName);
+        } else if (this.structTable.has(typeName)) {
+            result = this.structTable.get(typeName);
         }
+		
+		for (let i = 0; i < ptrSize; i++) {
+			const ptrType = new TypeInfo('', 'pointer', '2');
+			ptrType.pointerTo = result;
+			result = ptrType;
+		}
         
-        // 检查是否是结构体/联合体
-        if (this.structTable.has(typeName)) {
-            return this.structTable.get(typeName);
-        }
-        
-        return null;
+        return result;
     }
 	
 	calculateTypeSize(typeInfo) {
@@ -3735,7 +4033,7 @@ class SemanticAnalyzer extends ASTVisitor {
         const funcSymbol = new SymbolEntry(
             node.name,
             {
-                returnType: node.returnType.typeName,
+                returnType: this.typeToString(this.getTypeNameFromTypeNode(node.returnType)),
                 parameters: node.parameters.map(param => ({
                     name: param.name,
                     type: this.getTypeNameFromTypeNode(param.type) /*param.type.typeName*/
@@ -3746,6 +4044,7 @@ class SemanticAnalyzer extends ASTVisitor {
             'function',
             node.location
         );
+		funcSymbol.owningScope = node.scope;
 
         this.currentScope.addSymbol(funcSymbol);
         this.currentFunction = funcSymbol;
@@ -3798,7 +4097,7 @@ class SemanticAnalyzer extends ASTVisitor {
         // 创建带有限定符的类型
         const varType = new TypeInfo(baseType.name, baseType.kind, baseType.size, [...baseType.members]);
         varType.qualifiers = [...baseType.qualifiers, ...qualifiers];
-        
+		
         node.declarators.forEach(declarator => {
             // 检查变量是否已声明
             const existingSymbol = this.currentScope.lookupCurrent(declarator.name);
@@ -3814,13 +4113,23 @@ class SemanticAnalyzer extends ASTVisitor {
             if (declarator.pointerDepth > 0) {
                 let currentType = finalType;
                 for (let i = 0; i < declarator.pointerDepth; i++) {
-                    const ptrType = new TypeInfo('', 'pointer', 1);
+                    const ptrType = new TypeInfo('', 'pointer', 2);
                     ptrType.pointerTo = currentType;
                     ptrType.qualifiers = declarator.pointerQualifiers[i] || [];
                     currentType = ptrType;
                 }
                 finalType = currentType;
-            }
+            } else {
+				if (baseType.functionTo) {
+					finalType.functionTo = baseType.functionTo;
+				}
+				// TODO: Check array support for typedef
+				if (baseType.arrayDimensions && baseType.arrayDimensions.length > 0) {
+					// baseType seems immutable so far
+					finalType.arraySize = baseType.arraySize;
+					finalType.arrayDimensions = baseType.arrayDimensions;
+				}
+			}
             
             // 处理数组
             if (declarator.arrayDimensions && declarator.arrayDimensions.length > 0) {
@@ -3892,24 +4201,28 @@ class SemanticAnalyzer extends ASTVisitor {
 	// 7th (1 Dec)
 	// 修改getTypeNameFromTypeNode以处理指针和结构体
 	// Priority adjusted manually !!!
+	// Also add pointer dereference manually
+	// This function doesn't case const qualifier
     getTypeNameFromTypeNode(typeNode) {
         if (!typeNode) return null;
         
+		const ptrSuffix = "*".repeat(typeNode.pointerDepth);
+		
 		// 处理结构体/联合体类型
         if (typeNode.type === 'TypeSpecifier' && 
             (typeNode.typeName === 'struct' || typeNode.typeName === 'union')) {
             const structName = typeNode.getAttribute('structOrUnionName');
-            return structName || typeNode.typeName;
+            return (structName || typeNode.typeName) + ptrSuffix;
         }
 		
         // 如果是TypeSpecifier节点
         if (typeNode.typeName) {
-            return typeNode.typeName;
+            return typeNode.typeName + ptrSuffix;
         }
         
         // 如果是标识符节点（处理typedef定义的类型）
         if (typeNode.type === 'Identifier') {
-            return typeNode.name;
+            return typeNode.name + ptrSuffix;
         }
         
         return null;
@@ -3957,87 +4270,87 @@ class SemanticAnalyzer extends ASTVisitor {
 
     visitUnaryExpression(node) {
         this.visit(node.argument);
-    const argType = this.getExpressionType(node.argument);
-    
-    if (!argType) return;
-    
-    const operator = node.operator;
-    
-    switch (operator) {
-        case '*': // 解引用操作
-            if (!this.isValidDereference(argType)) {
-                this.addError(`Cannot dereference non-pointer type '${this.typeToString(argType)}'`, node.location);
-                return;
-            }
-            
-            // 设置表达式结果类型
-            node.dataType = argType.pointerTo;
-            break;
-            
-        case '&': // 取地址操作
-            // 检查操作数是否为左值
-            if (!this.isLValue(node.argument)) {
-                this.addError(`Cannot take address of non-lvalue`, node.location);
-                return;
-            }
-            
-            // 检查是否为register变量
-            if (this.isRegisterVariable(node.argument)) {
-                this.addError(`Cannot take address of register variable`, node.location);
-                return;
-            }
-            
-            // 标记变量已被取地址
-            this.markVariableAsAddressed(node.argument);
-            
-            // 创建指针类型
-            const ptrType = new TypeInfo('', 'pointer', 1);
-            ptrType.pointerTo = argType;
-            node.dataType = ptrType;
-            break;
-            
-        case '+': case '-': // 正负号
-            if (!this.isNumericType(argType.name)) {
-                this.addError(`Unary '${operator}' requires numeric type`, node.location);
-                return;
-            }
-            node.dataType = argType;
-            break;
-            
-        case '~': // 按位取反
-            if (!this.isIntegerType(argType.name)) {
-                this.addError(`Unary '${operator}' requires integer type`, node.location);
-                return;
-            }
-            node.dataType = argType;
-            break;
-            
-        case '!': // 逻辑非
-            node.dataType = this.typeTable.get('int'); // 返回int类型（0或1）
-            break;
-            
-        case '++': case '--': // 递增递减
-            if (!this.isLValue(node.argument)) {
-                this.addError(`'${operator}' requires lvalue`, node.location);
-                return;
-            }
-            
-            if (!this.isNumericType(argType.name)) {
-                this.addError(`'${operator}' requires numeric type`, node.location);
-                return;
-            }
-            
-            // 检查const变量
-            if (argType.isConst()) {
-                this.addError(`Cannot modify const variable with '${operator}'`, node.location);
-            }
-            
-            node.dataType = argType;
-            break;
-            
-        default:
-            this.addError(`Unknown unary operator '${operator}'`, node.location);
-            break;
+		const argType = this.getExpressionType(node.argument);
+		
+		if (!argType) return;
+		
+		const operator = node.operator;
+		
+		switch (operator) {
+			case '*': // 解引用操作
+				if (!this.isValidDereference(argType)) {
+					this.addError(`Cannot dereference non-pointer type '${this.typeToString(argType)}'`, node.location);
+					return;
+				}
+				
+				// 设置表达式结果类型
+				node.dataType = argType.pointerTo;
+				break;
+				
+			case '&': // 取地址操作
+				// 检查操作数是否为左值
+				if (!this.isLValue(node.argument)) {
+					this.addError(`Cannot take address of non-lvalue`, node.location);
+					return;
+				}
+				
+				// 检查是否为register变量
+				if (this.isRegisterVariable(node.argument)) {
+					this.addError(`Cannot take address of register variable`, node.location);
+					return;
+				}
+				
+				// 标记变量已被取地址
+				this.markVariableAsAddressed(node.argument);
+				
+				// 创建指针类型
+				const ptrType = new TypeInfo('', 'pointer', 2);
+				ptrType.pointerTo = argType;
+				node.dataType = ptrType;
+				break;
+				
+			case '+': case '-': // 正负号
+				if (!this.isNumericType(argType.name)) {
+					this.addError(`Unary '${operator}' requires numeric type`, node.location);
+					return;
+				}
+				node.dataType = argType;
+				break;
+				
+			case '~': // 按位取反
+				if (!this.isIntegerType(argType.name)) {
+					this.addError(`Unary '${operator}' requires integer type`, node.location);
+					return;
+				}
+				node.dataType = argType;
+				break;
+				
+			case '!': // 逻辑非
+				node.dataType = this.typeTable.get('int'); // 返回int类型（0或1）
+				break;
+				
+			case '++': case '--': // 递增递减
+				if (!this.isLValue(node.argument)) {
+					this.addError(`'${operator}' requires lvalue`, node.location);
+					return;
+				}
+				
+				if (!this.isNumericType(argType.name)) {
+					this.addError(`'${operator}' requires numeric type`, node.location);
+					return;
+				}
+				
+				// 检查const变量
+				if (argType.isConst()) {
+					this.addError(`Cannot modify const variable with '${operator}'`, node.location);
+				}
+				
+				node.dataType = argType;
+				break;
+				
+			default:
+				this.addError(`Unknown unary operator '${operator}'`, node.location);
+				break;
 		}
     }
 	
@@ -4089,7 +4402,7 @@ class SemanticAnalyzer extends ASTVisitor {
         this.visit(node.right);
 
         const leftType = this.getExpressionType(node.left);
-        const rightType = this.getExpressionType(node.right);
+        let rightType = this.getExpressionType(node.right);
 
         if (!leftType || !rightType) {
             return;
@@ -4097,11 +4410,39 @@ class SemanticAnalyzer extends ASTVisitor {
 
         // 检查赋值兼容性
         if (!this.isTypeCompatible(leftType, rightType)) {
-            this.addError(
+			let funcFlag = false;
+			if (node.right.type === 'Identifier' && node.right.symbol.kind === 'function') {
+				// Try function pointer
+				const funcType = new TypeInfo('', 'function', 1);
+				funcType.functionTo = new SymbolEntry(
+					'',
+					{
+						returnType: node.right.symbol.type.returnType,
+						parameters: node.right.symbol.type.parameters
+					},
+					this.globalScope,
+					'function',
+					node.right.location
+				);
+				// Identifier itself can be assigned this:
+				node.dataType = funcType;
+				rightType = funcType;
+				funcFlag = this.isTypeCompatible(leftType, rightType);
+				const rightTypeReadable = this.typeToString(rightType);
+				if (!funcFlag) {
+					this.addError(`Incorrect type '${rightTypeReadable}' in assignment of function pointer '${leftType}'`,
+					node.location);
+				}
+			} else {
+				this.addError(
                 `Cannot assign '${rightType}' to '${leftType}'`,
                 node.location
-            );
-            return;
+				);
+			}
+			if (!funcFlag) {
+				
+				return;
+			}
         }
 		
 		// TODO: Some issues about "const int*" / "int* const" might exist
@@ -4399,6 +4740,7 @@ class SemanticAnalyzer extends ASTVisitor {
         // 如果节点已经有数据类型，直接返回
         if (node.dataType) {
             return node.dataType;
+			//return this.typeTable.get(node.dataType) ?? node.dataType;
         }
 
         // 根据节点类型推断类型
@@ -4422,7 +4764,7 @@ class SemanticAnalyzer extends ASTVisitor {
                     // 取地址操作
                     const argType = this.getExpressionType(node.argument);
                     if (argType) {
-                        const ptrType = new TypeInfo('', 'pointer', 1);
+                        const ptrType = new TypeInfo('', 'pointer', 2);
                         ptrType.pointerTo = argType;
                         return ptrType;
                     }
@@ -4478,7 +4820,7 @@ class SemanticAnalyzer extends ASTVisitor {
 					if (pointerDepth > 0) {
 						let currentType = baseType;
 						for (let i = 0; i < pointerDepth; i++) {
-							const ptrType = new TypeInfo('', 'pointer', 1);
+							const ptrType = new TypeInfo('', 'pointer', 2);
 							ptrType.pointerTo = currentType;
 							currentType = ptrType;
 						}
@@ -4492,7 +4834,7 @@ class SemanticAnalyzer extends ASTVisitor {
                 return this.typeTable.get('int');
 
             case 'StringLiteral':
-                const charPtrType = new TypeInfo('', 'pointer', 1);
+                const charPtrType = new TypeInfo('', 'pointer', 2);
                 charPtrType.pointerTo = this.typeTable.get('char');
                 return charPtrType;
 
@@ -4513,9 +4855,22 @@ class SemanticAnalyzer extends ASTVisitor {
 	}
 
     // 修改类型兼容性检查以支持指针和结构体
-    isTypeCompatible(targetType, sourceType) {
-        if (!targetType || !sourceType) return false;
+    isTypeCompatible(targetTypeRaw, sourceTypeRaw) {
+		
+		let targetType = targetTypeRaw, sourceType = sourceTypeRaw;
+		// TODO: Might be sth like '*'
+		if (typeof targetType === 'string') {
+			targetType = this.getTypeInfo(targetType);
+		}
+		if (typeof sourceType === 'string') {
+			sourceType = this.getTypeInfo(sourceType);
+		}
+		
+		if (!targetType || !sourceType) return false;
         
+		// Remove const qualifier for both sides:
+		
+		
         // 相同类型总是兼容
         if (this.typeToString(targetType) === this.typeToString(sourceType)) {
             return true;
@@ -4561,7 +4916,19 @@ class SemanticAnalyzer extends ASTVisitor {
     }
 
 	// ! Has manual content !
-    isTypeCompatibleForOperator(operator, leftType, rightType) {
+    isTypeCompatibleForOperator(operator, leftTypeRaw, rightTypeRaw) {
+		
+		let leftType = leftTypeRaw, rightType = rightTypeRaw;
+		// TODO: Might be sth like '*'
+		if (typeof leftType === 'string') {
+			leftType = this.getTypeInfo(leftType);
+		}
+		if (typeof rightType === 'string') {
+			rightType = this.getTypeInfo(rightType);
+		}
+		
+		if (!leftType || !rightType) return false;
+		
         const arithmeticOps = ['+', '-', '*', '/', '%'];
         const comparisonOps = ['==', '!=', '<', '<=', '>', '>='];
         const logicalOps = ['&&', '||'];
@@ -4569,10 +4936,10 @@ class SemanticAnalyzer extends ASTVisitor {
 
 		// No operator is allowed for struct / union
 		// (Manually written)
-		if (leftType === 'struct' || leftType === 'union')
+		if (leftType.kind === 'struct' || leftType.kind === 'union' || leftType.kind === 'function')
 			return false;
 
-		if (rightType === 'struct' || rightType === 'union')
+		if (rightType.kind === 'struct' || rightType.kind === 'union' || leftType.kind === 'function')
 			return false;
 		// (End)
 		
@@ -4611,6 +4978,9 @@ class SemanticAnalyzer extends ASTVisitor {
 	// 添加类型转字符串方法
     typeToString(typeInfo) {
         if (!typeInfo) return 'unknown';
+		if (typeof typeInfo === 'string') {
+			return typeInfo;
+		}
         
         let result = '';
         if (typeInfo.qualifiers && typeInfo.qualifiers.length > 0) {
@@ -4621,14 +4991,24 @@ class SemanticAnalyzer extends ASTVisitor {
             result += this.typeToString(typeInfo.pointerTo) + '*';
         } else if (typeInfo.kind === 'array') {
             result += this.typeToString(typeInfo.pointerTo) + `[${typeInfo.arraySize || ''}]`;
-        } else {
+        } else if (typeInfo.kind === 'function') {
+			result += '{' + this.typeToString(typeInfo.functionTo.type.returnType) + ' || ';
+			result += (typeInfo.functionTo.type.parameters.map(param => (this.typeToString(param.type)))).join(',') + '}';
+		} else {
             result += typeInfo.name;
         }
         
         return result;
     }
 
-    isTypeCompatibleForUnaryOperator(operator, argType) {
+	// Check for LVal beforehand
+    isTypeCompatibleForUnaryOperator(operator, argTypeRaw) {
+		
+		let argType = argTypeRaw;
+		if (typeof argType === 'string') {
+			argType = this.getTypeInfo(argType);
+		}
+		
         const arithmeticOps = ['+', '-'];
         const logicalOps = ['!'];
         const bitwiseOps = ['~'];
@@ -4653,6 +5033,10 @@ class SemanticAnalyzer extends ASTVisitor {
         if (incrementOps.includes(operator)) {
             return this.isNumericType(argType);
         }
+		
+		if (operator === '*') {
+			return argType.kind === 'pointer';
+		}
 
         return true;
     }
@@ -4665,6 +5049,19 @@ class SemanticAnalyzer extends ASTVisitor {
 
     getUnaryResultType(operator, argType) {
         // 一元表达式通常保持操作数类型
+		
+		if (operator === '&') {
+			// Return a pointer
+			const ptrType = new TypeInfo('', 'pointer', 2);
+			ptrType.pointerTo = argType;
+			return ptrType;
+		}
+		
+		if (operator === '*') {
+			// Return a pointer's pointing-to
+			return argType.pointerTo;
+		}
+		
         return argType;
     }
 
@@ -4736,8 +5133,8 @@ class Optimizer {
         this.analyzedScopes = new Set();
     }
 
-    optimize(analysisResult) {
-        const { ast, globalScope, symbolTable, typeTable, structTable, typedefTable } = analysisResult;
+    optimize(analysisResult, ast) {
+        const { globalScope, symbolTable, typeTable, structTable, typedefTable } = analysisResult;
         
         this.ast = ast;
         this.globalScope = globalScope;
@@ -4836,60 +5233,60 @@ class Optimizer {
 
     // =============== 节点分析 ===============
 
-    analyzeNode(node) {
+    analyzeNode(node, info = null) {
         if (!node) return;
         
         switch (node.type) {
             case 'FunctionDeclaration':
-                this.analyzeFunction(node);
+                this.analyzeFunction(node, info);
                 break;
                 
             case 'VariableDeclaration':
-                this.analyzeVariableDeclaration(node);
+                this.analyzeVariableDeclaration(node, info);
                 break;
                 
             case 'CompoundStatement':
-                this.analyzeCompoundStatement(node);
+                this.analyzeCompoundStatement(node, info);
                 break;
                 
             case 'ExpressionStatement':
-                this.analyzeExpressionStatement(node);
+                this.analyzeExpressionStatement(node, info);
                 break;
                 
             case 'AssignmentExpression':
-                this.analyzeAssignmentExpression(node);
+                this.analyzeAssignmentExpression(node, info);
                 break;
                 
             case 'Identifier':
-                this.analyzeIdentifier(node);
+                this.analyzeIdentifier(node, info);
                 break;
                 
             case 'BinaryExpression':
-                this.analyzeBinaryExpression(node);
+                this.analyzeBinaryExpression(node, info);
                 break;
                 
             case 'UnaryExpression':
-                this.analyzeUnaryExpression(node);
+                this.analyzeUnaryExpression(node, info);
                 break;
                 
             case 'IfStatement':
-                this.analyzeIfStatement(node);
+                this.analyzeIfStatement(node, info);
                 break;
                 
             case 'WhileStatement':
-                this.analyzeWhileStatement(node);
+                this.analyzeWhileStatement(node, info);
                 break;
                 
             case 'ForStatement':
-                this.analyzeForStatement(node);
+                this.analyzeForStatement(node, info);
                 break;
                 
             case 'ReturnStatement':
-                this.analyzeReturnStatement(node);
+                this.analyzeReturnStatement(node, info);
                 break;
                 
             case 'FunctionCall':
-                this.analyzeFunctionCall(node);
+                this.analyzeFunctionCall(node, info);
                 break;
                 
             default:
@@ -4902,8 +5299,41 @@ class Optimizer {
     }
 
     // =============== 具体分析函数 ===============
+	
+	// These functions are manually implemented as I have reached maximum conversation length of Deepseek:
+	
+	analyzeCompoundStatement(node, info = null) {
+		if (node.statements) {
+			node.statements.forEach(child => this.analyzeNode(child));
+		}
+	}
+	
+	analyzeExpressionStatement(node, info = null) {
+		if (node.children) {
+			node.children.forEach(child => this.analyzeNode(child));
+		}
+	}
+	
+	// TODO: Value assignment might be a kind of writing !!!
+	analyzeBinaryExpression(node, info = null) {
+		this.analyzeNode(node.left);
+		this.analyzeNode(node.right);
+	}
+	
+	// Some unary expressions have side effects of writing (++ and --):
+	analyzeUnaryExpression(node, info = null) {
+		if (node.prefix && (node.operator === '++' || node.operator === '--')) {
+			if (node.argument.type === 'Identifier') {
+				this.addWriteForCurrentScope(node.argument.name);
+			}
+		} else {
+			this.analyzeNode(node.argument);
+		}
+	}
+	
+	// (End)
 
-    analyzeFunction(funcNode) {
+    analyzeFunction(funcNode, info = null) {
         const funcName = funcNode.name;
         
         // 记录函数信息
@@ -4924,7 +5354,7 @@ class Optimizer {
         }
     }
 
-    analyzeVariableDeclaration(node) {
+    analyzeVariableDeclaration(node, info = null) {
         const scopePath = this.getCurrentScopePath();
         const localConstants = this.localConstants.get(scopePath);
         const variableUses = this.variableUses.get(scopePath);
@@ -4958,7 +5388,8 @@ class Optimizer {
         });
     }
 
-    analyzeIdentifier(node) {
+	// Something might be to do here:
+    analyzeIdentifier(node, info = null) {
         const scopePath = this.getCurrentScopePath();
         const variableUses = this.variableUses.get(scopePath);
         
@@ -4972,24 +5403,17 @@ class Optimizer {
         const symbol = this.currentScope.lookup(node.name);
         if (symbol && symbol.kind === 'function') {
             // 函数调用统计在analyzeFunctionCall中处理
+			// Debug:
+			console.log('identifier being called on function: node:');
+			console.log(node);
+			symbol.isAddressed = true;
         }
     }
 
-    analyzeAssignmentExpression(node) {
+    analyzeAssignmentExpression(node, info = null) {
         // 分析左值
         if (node.left.type === 'Identifier') {
-            const scopePath = this.getCurrentScopePath();
-            const variableUses = this.variableUses.get(scopePath);
-            const localConstants = this.localConstants.get(scopePath);
-            
-            const varName = node.left.name;
-            const usage = variableUses.get(varName);
-            if (usage) {
-                usage.writes++;
-            }
-            
-            // 赋值会改变变量值，从常量表中移除
-            localConstants.delete(varName);
+            this.addWriteForCurrentScope(node.left.name);
         }
         
         // 分析右值
@@ -4997,7 +5421,7 @@ class Optimizer {
         this.analyzeNode(node.right);
     }
 
-    analyzeFunctionCall(node) {
+    analyzeFunctionCall(node, info = null) {
         if (node.callee.type === 'Identifier') {
             const funcName = node.callee.name;
             
@@ -5020,6 +5444,21 @@ class Optimizer {
         // 分析参数
         node.arguments.forEach(arg => this.analyzeNode(arg));
     }
+
+	addWriteForCurrentScope(varName) {
+		const scopePath = this.getCurrentScopePath();
+		const variableUses = this.variableUses.get(scopePath);
+		const localConstants = this.localConstants.get(scopePath);
+		
+		const usage = variableUses.get(varName);
+		if (usage) {
+			usage.writes++;
+		}
+		
+		// 赋值会改变变量值，从常量表中移除
+		// TODO: Check if the value exists?
+		localConstants.delete(varName);
+	}
 
     // =============== 作用域优化 ===============
 
@@ -5175,11 +5614,16 @@ class Optimizer {
     }
 
     deadCodeEliminationInScope(scope) {
-        if (!scope.astNode) return;
-        
-        // 移除空语句、空块等
-        this.removeDeadCode(scope.astNode);
-    }
+		if (!scope.astNode) return;
+		
+		// 移除死代码
+		if (this.removeDeadCode(scope.astNode)) {
+			this.modified = true;
+		}
+		
+		// 清理空的复合语句
+		this.cleanupEmptyStatements(scope.astNode);
+	}
 
     // =============== 全局优化 ===============
 
@@ -5215,6 +5659,7 @@ class Optimizer {
         });
     }
 
+	// ! Has manual changes !
     removeUnusedFunctions() {
         const usedFunctions = new Set(['main']);
         
@@ -5237,32 +5682,39 @@ class Optimizer {
         });
         
         // 删除未使用的函数定义
+		// Manually use owningScope instead of scope
         const globalSymbols = this.globalScope.getAllSymbols();
         globalSymbols.forEach(symbol => {
             if (symbol.kind === 'function' && symbol.scope.astNode) {
                 const funcName = symbol.name;
-                const funcNode = symbol.scope.astNode;
+				if (symbol.owningScope) {
+					const funcNode = symbol.owningScope.astNode;
                 
-                // 保留main函数、内联函数和被使用的函数
-                if (funcName !== 'main' && 
-                    !funcNode.isInline && 
-                    !usedFunctions.has(funcName) &&
-                    funcNode.isDefinition) {
-                    
-                    // 从AST中删除函数定义
-                    this.removeNodeFromParent(funcNode);
-                    this.modified = true;
-                    this.warnings.push(`Removed unused function '${funcName}'`);
-                }
+					// 保留main函数、内联函数和被使用的函数
+					if (funcName !== 'main' && 
+						!funcNode.isInline && 
+						!usedFunctions.has(funcName) &&
+						funcNode.body) {
+						// For functions we use 'body (=== null)' instead of 'isDefinition'
+						
+						// 从AST中删除函数定义
+						this.removeNodeFromParent(funcNode);
+						this.modified = true;
+						this.warnings.push(`Removed unused function '${funcName}'`);
+					}
+				}
+                
             }
         });
     }
 
+	// Has manual changes on 'isAddressed'
     inlineFunctions() {
         // 收集适合内联的函数
         const inlineCandidates = [];
         
         this.functionInfo.forEach((info, funcName) => {
+			if (info.isAddressed) return;	// Can't be inlined!
             if (info.calls === 1 || info.isInline || info.size <= 3) {
                 inlineCandidates.push(funcName);
             }
@@ -5347,14 +5799,20 @@ class Optimizer {
         }
     }
 
+	// ! This function has TO-DOs !
     hasSideEffects(node) {
         if (!node) return false;
         
         // 检查节点是否有副作用
         switch (node.type) {
-            case 'FunctionCall':
-            case 'BuiltinCall':
             case 'AssignmentExpression':
+			case 'FunctionCall':
+				// Check only if children have side effects
+				// TODO: Double-check logic here
+				break;
+            case 'BuiltinCall':
+				return true;
+				break;
             case 'UnaryExpression':
                 if (node.operator === '++' || node.operator === '--') {
                     return true;
@@ -6150,35 +6608,6 @@ class Optimizer {
 		return hasSideEffects;
 	}
 
-/**
-	 * 检查函数是否有副作用
-	 */
-	functionHasSideEffects(funcNode) {
-		let hasSideEffects = false;
-		
-		const checkNode = (node) => {
-			if (!node) return;
-			
-			switch (node.type) {
-				case 'FunctionCall':
-				case 'BuiltinCall':
-				case 'AssignmentExpression':
-				case 'UnaryExpression':
-					if (node.operator === '++' || node.operator === '--') {
-						hasSideEffects = true;
-					}
-					break;
-			}
-			
-			if (node.children) {
-				node.children.forEach(child => checkNode(child));
-			}
-		};
-		
-		checkNode(funcNode.body);
-		return hasSideEffects;
-	}
-
 	/**
 	 * 清理全局声明
 	 */
@@ -6462,6 +6891,510 @@ class Optimizer {
 		}
 		
 		return clone;
+	}
+
+	/**
+	 * 移除死代码
+	 * @param {ASTNode} node - 要处理的AST节点
+	 * @returns {boolean} - 返回是否进行了修改
+	 */
+	removeDeadCode(node) {
+		if (!node) return false;
+		
+		let modified = false;
+		
+		switch (node.type) {
+			case 'CompoundStatement':
+				modified = this.removeDeadCodeInCompoundStatement(node);
+				break;
+				
+			case 'IfStatement':
+				modified = this.removeDeadCodeInIfStatement(node);
+				break;
+				
+			case 'WhileStatement':
+			case 'DoWhileStatement':
+				modified = this.removeDeadCodeInLoopStatement(node);
+				break;
+				
+			case 'ForStatement':
+				modified = this.removeDeadCodeInForStatement(node);
+				break;
+				
+			case 'FunctionDeclaration':
+				if (node.body) {
+					modified = this.removeDeadCode(node.body);
+				}
+				break;
+				
+			default:
+				// 递归处理子节点
+				modified = this.recursivelyRemoveDeadCode(node);
+				break;
+		}
+		
+		// 如果修改了当前节点，可能需要进一步处理
+		if (modified) {
+			this.modified = true;
+		}
+		
+		return modified;
+	}
+
+	/**
+	 * 递归移除死代码
+	 * @param {ASTNode} node - 要处理的AST节点
+	 * @returns {boolean} - 返回是否进行了修改
+	 */
+	recursivelyRemoveDeadCode(node) {
+		if (!node) return false;
+		
+		let modified = false;
+		
+		// 根据节点类型处理不同的子节点
+		switch (node.type) {
+			case 'Program':
+				// 处理函数和全局声明
+				if (node.functions) {
+					node.functions.forEach(func => {
+						if (this.removeDeadCode(func)) {
+							modified = true;
+						}
+					});
+				}
+				if (node.globalDeclarations) {
+					node.globalDeclarations.forEach(decl => {
+						if (this.removeDeadCode(decl)) {
+							modified = true;
+						}
+					});
+				}
+				break;
+				
+			case 'ExpressionStatement':
+				if (node.expression) {
+					modified = this.recursivelyRemoveDeadCode(node.expression);
+				}
+				break;
+				
+			case 'VariableDeclaration':
+				// 变量声明没有需要删除的死代码，但可能需要检查初始化器
+				if (node.declarators) {
+					node.declarators.forEach(declarator => {
+						if (declarator.initializer) {
+							if (this.recursivelyRemoveDeadCode(declarator.initializer)) {
+								modified = true;
+							}
+						}
+					});
+				}
+				break;
+				
+			case 'BinaryExpression':
+				modified = this.recursivelyRemoveDeadCode(node.left) || 
+						   this.recursivelyRemoveDeadCode(node.right);
+				break;
+				
+			case 'UnaryExpression':
+				modified = this.recursivelyRemoveDeadCode(node.argument);
+				break;
+				
+			case 'AssignmentExpression':
+				modified = this.recursivelyRemoveDeadCode(node.left) || 
+						   this.recursivelyRemoveDeadCode(node.right);
+				break;
+				
+			case 'FunctionCall':
+			case 'BuiltinCall':
+				if (node.callee) {
+					modified = this.recursivelyRemoveDeadCode(node.callee);
+				}
+				if (node.arguments) {
+					node.arguments.forEach(arg => {
+						if (this.recursivelyRemoveDeadCode(arg)) {
+							modified = true;
+						}
+					});
+				}
+				break;
+				
+			case 'MemberExpression':
+				// 处理对象和属性
+				if (node.object) {
+					modified = this.recursivelyRemoveDeadCode(node.object);
+				}
+				if (node.property) {
+					modified = modified || this.recursivelyRemoveDeadCode(node.property);
+				}
+				break;
+				
+			default:
+				// 对于其他节点，递归处理所有子节点
+				if (node.children) {
+					node.children.forEach(child => {
+						if (this.recursivelyRemoveDeadCode(child)) {
+							modified = true;
+						}
+					});
+				}
+				break;
+		}
+		
+		return modified;
+	}
+
+	/**
+	 * 移除复合语句中的死代码
+	 * @param {ASTNode} compoundStmt - 复合语句节点
+	 * @returns {boolean} - 返回是否进行了修改
+	 */
+	removeDeadCodeInCompoundStatement(compoundStmt) {
+		if (!compoundStmt || !compoundStmt.statements) return false;
+		
+		let modified = false;
+		let newStatements = [];
+		let hasUnconditionalControlFlow = false;
+		
+		for (let i = 0; i < compoundStmt.statements.length; i++) {
+			const stmt = compoundStmt.statements[i];
+			
+			// 如果已经有无条件控制流（如return、break、continue、goto），
+			// 则后面的语句都是死代码
+			if (hasUnconditionalControlFlow) {
+				// 标记为已修改
+				modified = true;
+				this.warnings.push(`Removed dead code after unconditional control flow in compound statement`);
+				continue;
+			}
+			
+			// 检查当前语句是否是无条件控制流
+			if (this.isUnconditionalControlFlow(stmt)) {
+				hasUnconditionalControlFlow = true;
+			}
+			
+			// 递归处理当前语句中的死代码
+			if (this.removeDeadCode(stmt)) {
+				modified = true;
+			}
+			
+			// 如果语句仍然有效（没有被完全删除），则保留它
+			if (!this.isNullStatement(stmt)) {
+				newStatements.push(stmt);
+			} else {
+				modified = true;
+			}
+		}
+		
+		// 更新语句列表
+		if (modified) {
+			compoundStmt.statements = newStatements;
+		}
+		
+		return modified;
+	}
+
+	/**
+	 * 移除if语句中的死代码
+	 * @param {ASTNode} ifStmt - if语句节点
+	 * @returns {boolean} - 返回是否进行了修改
+	 */
+	removeDeadCodeInIfStatement(ifStmt) {
+		if (!ifStmt) return false;
+		
+		let modified = false;
+		
+		// 处理条件表达式
+		if (ifStmt.test && this.recursivelyRemoveDeadCode(ifStmt.test)) {
+			modified = true;
+		}
+		
+		// 处理then分支
+		if (ifStmt.consequent && this.removeDeadCode(ifStmt.consequent)) {
+			modified = true;
+		}
+		
+		// 处理else分支
+		if (ifStmt.alternate && this.removeDeadCode(ifStmt.alternate)) {
+			modified = true;
+		}
+		
+		// 如果条件总是为真或为假，可以优化整个if语句
+		const testValue = this.evaluateConstantExpression(ifStmt.test);
+		if (testValue !== undefined) {
+			if (testValue) {
+				// 条件为真，只保留then分支
+				if (ifStmt.alternate) {
+					// 删除else分支
+					ifStmt.alternate = null;
+					modified = true;
+					this.warnings.push(`Removed else branch from always-true if statement`);
+				}
+			} else {
+				// 条件为假，只保留else分支（如果有）
+				if (ifStmt.alternate) {
+					// 用else分支替换整个if语句
+					// 注意：这里我们只标记修改，实际替换在调用者中处理
+					this.warnings.push(`If statement with always-false condition can be replaced with else branch`);
+				} else {
+					// 没有else分支，整个if语句都可以删除
+					// 注意：这里我们只标记修改，实际删除在调用者中处理
+					this.warnings.push(`If statement with always-false condition and no else branch can be removed`);
+				}
+			}
+		}
+		
+		return modified;
+	}
+
+	/**
+	 * 移除循环语句中的死代码
+	 * @param {ASTNode} loopStmt - 循环语句节点
+	 * @returns {boolean} - 返回是否进行了修改
+	 */
+	removeDeadCodeInLoopStatement(loopStmt) {
+		if (!loopStmt) return false;
+		
+		let modified = false;
+		
+		// 处理条件表达式
+		if (loopStmt.test && this.recursivelyRemoveDeadCode(loopStmt.test)) {
+			modified = true;
+		}
+		
+		// 处理循环体
+		if (loopStmt.body && this.removeDeadCode(loopStmt.body)) {
+			modified = true;
+		}
+		
+		// 检查循环条件是否为常量false
+		const testValue = this.evaluateConstantExpression(loopStmt.test);
+		if (testValue !== undefined && !testValue) {
+			// 循环条件总是为假，整个循环都是死代码
+			this.warnings.push(`Loop with always-false condition can be removed`);
+			// 注意：这里我们只标记修改，实际删除在调用者中处理
+		}
+		
+		return modified;
+	}
+
+	/**
+	 * 移除for语句中的死代码
+	 * @param {ASTNode} forStmt - for语句节点
+	 * @returns {boolean} - 返回是否进行了修改
+	 */
+	removeDeadCodeInForStatement(forStmt) {
+		if (!forStmt) return false;
+		
+		let modified = false;
+		
+		// 处理初始化部分
+		if (forStmt.init && this.recursivelyRemoveDeadCode(forStmt.init)) {
+			modified = true;
+		}
+		
+		// 处理条件部分
+		if (forStmt.test && this.recursivelyRemoveDeadCode(forStmt.test)) {
+			modified = true;
+		}
+		
+		// 处理更新部分
+		if (forStmt.update && this.recursivelyRemoveDeadCode(forStmt.update)) {
+			modified = true;
+		}
+		
+		// 处理循环体
+		if (forStmt.body && this.removeDeadCode(forStmt.body)) {
+			modified = true;
+		}
+		
+		// 检查循环条件是否为常量false
+		const testValue = this.evaluateConstantExpression(forStmt.test);
+		if (testValue !== undefined && !testValue) {
+			// 循环条件总是为假，整个循环都是死代码
+			this.warnings.push(`For loop with always-false condition can be removed`);
+			// 注意：这里我们只标记修改，实际删除在调用者中处理
+		}
+		
+		return modified;
+	}
+
+	/**
+	 * 检查语句是否是无条件控制流
+	 * @param {ASTNode} stmt - 语句节点
+	 * @returns {boolean} - 如果是无条件控制流则返回true
+	 */
+	isUnconditionalControlFlow(stmt) {
+		if (!stmt) return false;
+		
+		switch (stmt.type) {
+			case 'ReturnStatement':
+				// return语句总是无条件控制流
+				return true;
+				
+			case 'BreakStatement':
+			case 'ContinueStatement':
+				// break和continue在循环或switch中是控制流
+				// 这里我们简化处理，认为它们总是控制流
+				return true;
+				
+			case 'IfStatement':
+				// if语句只有在两个分支都有控制流时才是无条件控制流
+				if (stmt.alternate) {
+					return this.hasUnconditionalControlFlow(stmt.consequent) && 
+						   this.hasUnconditionalControlFlow(stmt.alternate);
+				}
+				return false;
+				
+			case 'CompoundStatement':
+				// 复合语句只有在包含无条件控制流时才可能
+				return this.hasUnconditionalControlFlowInCompound(stmt);
+				
+			default:
+				return false;
+		}
+	}
+
+	/**
+	 * 检查节点是否包含无条件控制流
+	 * @param {ASTNode} node - 节点
+	 * @returns {boolean} - 如果包含无条件控制流则返回true
+	 */
+	hasUnconditionalControlFlow(node) {
+		if (!node) return false;
+		
+		// 如果是无条件控制流语句
+		if (this.isUnconditionalControlFlow(node)) {
+			return true;
+		}
+		
+		// 递归检查子节点
+		switch (node.type) {
+			case 'CompoundStatement':
+				return this.hasUnconditionalControlFlowInCompound(node);
+				
+			case 'IfStatement':
+				if (node.alternate) {
+					return this.hasUnconditionalControlFlow(node.consequent) && 
+						   this.hasUnconditionalControlFlow(node.alternate);
+				}
+				return false;
+				
+			default:
+				// 检查所有子节点
+				if (node.children) {
+					for (const child of node.children) {
+						if (this.hasUnconditionalControlFlow(child)) {
+							return true;
+						}
+					}
+				}
+				return false;
+		}
+	}
+
+	/**
+	 * 检查复合语句中是否包含无条件控制流
+	 * @param {ASTNode} compoundStmt - 复合语句节点
+	 * @returns {boolean} - 如果包含无条件控制流则返回true
+	 */
+	hasUnconditionalControlFlowInCompound(compoundStmt) {
+		if (!compoundStmt || !compoundStmt.statements) return false;
+		
+		for (const stmt of compoundStmt.statements) {
+			if (this.hasUnconditionalControlFlow(stmt)) {
+				return true;
+			}
+		}
+		
+		return false;
+	}
+
+	/**
+	 * 检查是否为空语句
+	 * @param {ASTNode} stmt - 语句节点
+	 * @returns {boolean} - 如果是空语句则返回true
+	 */
+	isNullStatement(stmt) {
+		if (!stmt) return true;
+		
+		// 空表达式语句
+		if (stmt.type === 'ExpressionStatement' && !stmt.expression) {
+			return true;
+		}
+		
+		// 空的复合语句
+		if (stmt.type === 'CompoundStatement' && 
+			(!stmt.statements || stmt.statements.length === 0)) {
+			return true;
+		}
+		
+		// 已经被标记为删除的节点
+		if (stmt.type === 'DeletedStatement') {
+			return true;
+		}
+		
+		return false;
+	}
+	
+		/**
+	 * 清理空语句
+	 * @param {ASTNode} node - 要处理的AST节点
+	 * @returns {boolean} - 返回是否进行了修改
+	 */
+	cleanupEmptyStatements(node) {
+		if (!node) return false;
+		
+		let modified = false;
+		
+		switch (node.type) {
+			case 'CompoundStatement':
+				if (node.statements) {
+					const originalLength = node.statements.length;
+					
+					// 过滤掉空语句
+					node.statements = node.statements.filter(stmt => !this.isNullStatement(stmt));
+					
+					if (node.statements.length !== originalLength) {
+						modified = true;
+						this.warnings.push(`Removed empty statements from compound statement`);
+					}
+					
+					// 递归清理每个语句
+					node.statements.forEach(stmt => {
+						if (this.cleanupEmptyStatements(stmt)) {
+							modified = true;
+						}
+					});
+				}
+				break;
+				
+			case 'IfStatement':
+				modified = this.cleanupEmptyStatements(node.consequent) || 
+						   (node.alternate ? this.cleanupEmptyStatements(node.alternate) : false);
+				break;
+				
+			case 'WhileStatement':
+			case 'DoWhileStatement':
+				modified = this.cleanupEmptyStatements(node.body);
+				break;
+				
+			case 'ForStatement':
+				modified = this.cleanupEmptyStatements(node.body);
+				break;
+				
+			default:
+				// 递归处理子节点
+				if (node.children) {
+					node.children.forEach(child => {
+						if (this.cleanupEmptyStatements(child)) {
+							modified = true;
+						}
+					});
+				}
+				break;
+		}
+		
+		return modified;
 	}
 
 }
