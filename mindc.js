@@ -5140,9 +5140,11 @@ class Optimizer {
         this.constants = new Map(); // 全局常量表
         this.localConstants = new Map(); // 局部常量表 {scopePath: Map<varName, value>}
         this.variableUses = new Map(); // 变量使用统计 {scopePath: Map<varName, {reads, writes}>}
+		//this.visitedSideEffects = false;
         
         // 作用域分析
         this.currentScope = null;
+		this.currentFunction = null;
         this.scopeStack = [];
         this.analyzedScopes = new Set();
     }
@@ -5188,11 +5190,11 @@ class Optimizer {
         // 1. 收集全局信息（函数调用图等）
         this.collectGlobalInfo();
         
-        // 2. 删除无用函数
-        this.removeUnusedFunctions();
-        
         // 3. 按作用域递归分析
         this.analyzeScope(this.globalScope);
+		
+		// 2. 删除无用函数
+        this.removeUnusedFunctions();
         
         // 4. 函数内联
         this.inlineFunctions();
@@ -5241,6 +5243,10 @@ class Optimizer {
     }
 
     exitScope() {
+		const scopePath = this.currentScope.getPath();
+		// Cleanup information, which is not necessary at all
+		//this.localConstants.delete(scopePath);
+		//this.variableUses.delete(scopePath);
         this.currentScope = this.scopeStack.pop();
     }
 
@@ -5389,7 +5395,7 @@ class Optimizer {
 	// ! Manually adjusted !
 	analyzeUnaryExpression(node, info = null) {
 		
-		if (node.prefix && (node.operator === '++' || node.operator === '--')) {
+		if ((node.operator === '++' || node.operator === '--')) {
 			if (node.argument.type === 'Identifier') {
 				const scopePath = this.currentScope.lookupScopeOf(node.argument.name).getPath();
 				const localConstants = this.localConstants.get(scopePath);
@@ -5411,7 +5417,7 @@ class Optimizer {
 	// ! Manually added scope entrance !
     analyzeFunction(funcNode, info = null) {
         const funcName = funcNode.name;
-        
+        this.currentFunction = funcName;
         // 记录函数信息
         if (!this.functionInfo.has(funcName)) {
             this.functionInfo.set(funcName, {
@@ -5437,6 +5443,7 @@ class Optimizer {
 		if (enteredScope) {
 			this.exitScope();
 		}
+		this.currentFunction = null;	// Given that functions won't be embedded
     }
 
     analyzeVariableDeclaration(node, info = null) {
@@ -5523,7 +5530,7 @@ class Optimizer {
 						constValue = this.evaluateConstantExpression(node.right);
 					}
 					if (constValue !== undefined) {
-						localConstants.set(node.left.name, constValue);
+						//localConstants.set(node.left.name, constValue);
 						const symbol = this.currentScope.lookup(node.left.name);
 						if (symbol) {
 							symbol.markAsConstant(constValue);
@@ -5548,7 +5555,7 @@ class Optimizer {
                 
                 // 记录调用关系
                 if (this.currentScope && this.currentScope.astNode) {
-                    const callerName = this.currentScope.astNode.name || 'anonymous';
+                    const callerName = this.currentFunction || 'anonymous';
                     if (!this.functionCallGraph.has(callerName)) {
                         this.functionCallGraph.set(callerName, new Set());
                     }
@@ -5560,56 +5567,69 @@ class Optimizer {
         // 分析参数
         node.arguments.forEach(arg => this.analyzeNode(arg, info));
     }
-
+	
+	// ! Manually updated !
 	analyzeIfStatement(node, info = null) {
 		// 分析条件表达式
+		let conditionValue;
 		if (node.test) {
 			this.analyzeNode(node.test, info);
 			
 			// 检查条件是否为常量
-			const conditionValue = this.evaluateConstantExpression(node.test);
+			conditionValue = this.evaluateConstantExpression(node.test);
 			
 			// 记录条件信息用于优化
-			if (conditionValue !== undefined) {
-				node.setAttribute('constantCondition', conditionValue);
-				
-				if (conditionValue) {
-					// 条件总是为真，可以标记then分支总是执行
-					this.warnings.push(`Condition always true in if statement`, node.test.location);
-				} else {
-					// 条件总是为假，可以标记else分支总是执行（如果有）
-					this.warnings.push(`Condition always false in if statement`, node.test.location);
+			if (!info || (!info.isLoop && !info.optimizingLoop)) {
+				if (conditionValue !== undefined) {
+					node.setAttribute('constantCondition', conditionValue);
+					
+					if (conditionValue) {
+						// 条件总是为真，可以标记then分支总是执行
+						this.warnings.push(`Condition always true in if statement`, node.test.location);
+					} else {
+						// 条件总是为假，可以标记else分支总是执行（如果有）
+						this.warnings.push(`Condition always false in if statement`, node.test.location);
+					}
 				}
 			}
+			
 			
 			// 检查条件是否有副作用
 			if (this.hasSideEffects(node.test)) {
 				node.setAttribute('conditionHasSideEffects', true);
 			}
 		}
-		
-		// 分析then分支
-		if (node.consequent) {
-			this.analyzeNode(node.consequent, info);
-			
-			// 检查then分支是否有副作用
-			if (this.hasSideEffects(node.consequent)) {
-				node.setAttribute('consequentHasSideEffects', true);
+		if (conditionValue !== undefined && info && info.optimizingLoop) {
+			if (conditionValue == 0) {
+				if (node.alternate) this.analyzeNode(node.alternate, info);
+			} else {
+				if (node.consequent) this.analyzeNode(node.consequent, info);
 			}
-		}
-		
-		// 分析else分支
-		if (node.alternate) {
-			this.analyzeNode(node.alternate, info);
+		} else {
+			// 分析then分支
+			if (node.consequent) {
+				this.analyzeNode(node.consequent, info);
+				
+				// 检查then分支是否有副作用
+				if (this.hasSideEffects(node.consequent)) {
+					node.setAttribute('consequentHasSideEffects', true);
+				}
+			}
 			
-			// 检查else分支是否有副作用
-			if (this.hasSideEffects(node.alternate)) {
-				node.setAttribute('alternateHasSideEffects', true);
+			// 分析else分支
+			if (node.alternate) {
+				this.analyzeNode(node.alternate, info);
+				
+				// 检查else分支是否有副作用
+				if (this.hasSideEffects(node.alternate)) {
+					node.setAttribute('alternateHasSideEffects', true);
+				}
 			}
 		}
 	}
 	
 	analyzeWhileStatement(node, info = null) {
+		node.setAttribute('hasSideEffects', false);
 		// 分析条件表达式
 		if (node.test) {
 			this.analyzeNode(node.test, info);
@@ -5657,9 +5677,8 @@ class Optimizer {
 			}
 			
 			// 检查循环体是否有副作用
-			if (this.hasSideEffects(node.body)) {
-				node.setAttribute('bodyHasSideEffects', true);
-			}
+			node.setAttribute('bodyHasSideEffects', this.hasSideEffects(node.body));
+			
 			
 			// 记录是否有break/continue
 			if (loopInfo.hasBreak) {
@@ -5672,7 +5691,17 @@ class Optimizer {
 		}
 		
 		// 尝试分析while循环是否可以优化
-		this.analyzeWhileLoopForOptimization(node);
+		if (!node.getAttribute('bodyHasSideEffects')) {
+			if (!info || !info.isLoop) {
+				if (this.analyzeWhileLoopForOptimization(node)) {
+					if ((!info || !info.optimizingLoop) && this.optimizeDeterministicWhileLoop(node)) {
+						this.modified = true;
+					}
+				}
+			}
+		} else {
+			this.markLoopAsPotentiallyWithSideEffects(node);
+		}
 		
 		if (node.getAttribute('infiniteLoop')) {
 			this.warnings.push(`Infinite loop detected (while(true))`, node.test.location);
@@ -5722,6 +5751,9 @@ class Optimizer {
 					const initValue = localConstants.get(loopVarName);
 					
 					if (initValue !== undefined) {
+						// Successful to make registrations
+						whileNode.setAttribute('loopVarName', loopVarName);
+						
 						// 尝试计算循环次数
 						const iterationCount = this.calculateLoopIterations(
 							initValue,
@@ -5821,19 +5853,27 @@ class Optimizer {
 	
 	// ! Manually modified !
 	analyzeForStatement(node, info = null) {
+		// 进入循环体作用域
+		node.setAttribute('hasSideEffects', false);
+		const loopInfo = {
+			isLoop: true,
+			parentLoop: node,
+			hasBreak: false,
+			hasContinue: false,
+			parentInfo: info
+		};
 		// 分析初始化部分
 		if (node.init) {
-			this.analyzeNode(node.init, info);
+			this.analyzeNode(node.init, null);	// Do changes !!
 			
 			// 检查初始化是否有副作用
-			if (this.hasSideEffects(node.init)) {
-				node.setAttribute('initHasSideEffects', true);
-			}
+			node.setAttribute('initHasSideEffects', this.hasSideEffects(node.init));
 		}
 		
 		// 分析条件部分
 		if (node.test) {
-			this.analyzeNode(node.test, info);
+			// ! Always make changes for initialization !
+			this.analyzeNode(node.test, null);
 			
 			// 检查条件是否为常量
 			const conditionValue = this.evaluateConstantExpression(node.test);
@@ -5857,9 +5897,7 @@ class Optimizer {
 			}
 			
 			// 检查条件是否有副作用
-			if (this.hasSideEffects(node.test)) {
-				node.setAttribute('conditionHasSideEffects', true);
-			}
+			node.setAttribute('conditionHasSideEffects', this.hasSideEffects(node.test));
 		} else {
 			// 没有条件表达式，是无限循环 (for(;;))
 			// ! Notice that there might be 'break' !
@@ -5868,26 +5906,16 @@ class Optimizer {
 		
 		// 分析更新部分
 		if (node.update) {
-			this.analyzeNode(node.update, info);
+			this.analyzeNode(node.update, loopInfo);
 			
 			// 检查更新是否有副作用
-			if (this.hasSideEffects(node.update)) {
-				node.setAttribute('updateHasSideEffects', true);
-			}
+			node.setAttribute('updateHasSideEffects', this.hasSideEffects(node.update));
 		}
 		
 		// 分析循环体
 		if (node.body) {
-			// 进入循环体作用域
-			const loopInfo = {
-				isLoop: true,
-				parentLoop: node,
-				hasBreak: false,
-				hasContinue: false
-			};
-			
 			// 分析循环体
-			this.analyzeNode(node.body, loopInfo);
+			this.analyzeNode(node.body, loopInfo);// Don't do changes
 			
 			// 检查循环体是否有副作用
 			if (this.hasSideEffects(node.body)) {
@@ -5905,7 +5933,17 @@ class Optimizer {
 		}
 		
 		// (Manually added) Do optimize afterwards
-		this.analyzeAndOptimizeForLoop(node, info);
+		if (!node.getAttribute('bodyHasSideEffects')) {
+			if (!info || !info.isLoop) {
+				if (this.analyzeAndOptimizeForLoop(node, info)) {
+					if ((!info || !info.optimizingLoop) && this.optimizeDeterministicForLoop(node)) {
+						this.modified = true;
+					}
+				}
+			}
+		} else {
+			this.markLoopAsPotentiallyWithSideEffects(node);
+		}
 		
 		if (node.getAttribute('infiniteLoop')) {
 			this.warnings.push(`Infinite loop detected (for with constant true condition)`, node.test.location);
@@ -6268,7 +6306,7 @@ class Optimizer {
 		
 		// User configuration
 		const configuredMaxSimulation = 100;
-		const configuredMaxGrossSimulation = 5000000;
+		const configuredMaxGrossSimulation = 50000;
 		// End
 		
 		const scopePath = this.currentScope.lookupScopeOf(loopVarName).getPath();
@@ -6292,7 +6330,7 @@ class Optimizer {
 		};
 		
 		if (envInfo && envInfo.grossIterationCount) {
-			info.grossIterationCount *= envinfo.grossIterationCount;
+			info.grossIterationCount *= envInfo.grossIterationCount;
 		}
 		if (info.grossIterationCount > configuredMaxGrossSimulation) {
 			return false;
@@ -6300,6 +6338,7 @@ class Optimizer {
 		
 		// 初始化循环变量
 		localConstants.set(loopVarName, initValue);
+		loopNode.setAttribute('loopVarName', loopVarName);
 		
 		// 如果有循环体，尝试分析它
 		if (loopNode.body && iterationCount > 0) {
@@ -6320,10 +6359,27 @@ class Optimizer {
 				const newValue = currentValue + updateInfo.step;
 				localConstants.set(loopVarName, newValue);
 				
+				// Manually added: quit also when the condition is no longer satisfied:
+				if (loopNode.test) {
+					const testEval = this.evaluateConstantExpression(loopNode.test);
+					if (testEval == 0) {
+						break;
+					}
+				}
+				
 				// 如果循环变量不再可优化，停止模拟
 				const usage = variableUses.get(loopVarName);
 				if (usage && !usage.canOptimize) {
+					loopNode.setAttribute('maybeHasSideEffects', true);
 					break;
+				}
+			}
+			
+			if (loopNode.test) {
+				const testEval = this.evaluateConstantExpression(loopNode.test);
+				if (testEval != 0) {
+					// Still can be evaluated!!!
+					loopNode.setAttribute('maybeHasSideEffects', true);
 				}
 			}
 			
@@ -6337,6 +6393,7 @@ class Optimizer {
 			
 			// !! In further generation, let it begin from i instead of its preset value !!
 			loopNode.setAttribute('simulatedIterations', i);
+			loopNode.setAttribute('simulatedTermination', info.currentLoopVar);
 		}
 		return true;
 	}
@@ -6389,10 +6446,9 @@ class Optimizer {
 	 */
 	collectModifiedVariablesInLoop(loopNode) {
 		const modifiedVars = new Set();
-		
-		if (!loopNode.body) return modifiedVars;
-		
+
 		// 递归收集赋值表达式中的变量
+		// There's no need to make this closure :(
 		const collectFromNode = (node) => {
 			if (!node) return;
 			
@@ -6400,13 +6456,28 @@ class Optimizer {
 				case 'AssignmentExpression':
 					if (node.left.type === 'Identifier') {
 						modifiedVars.add(node.left.name);
+					} else {
+						// Unrecognized...
+						this.errors.push('Internal Error: Unrecognized variable in loop optimizer', node.left);
 					}
 					break;
-					
+				
+				case 'BinaryExpression':
+					if (node.operator.includes('=') && node.operator !== '==' && node.operator !== '!=') {
+						if (node.left.type === 'Identifier') {
+							modifiedVars.add(node.left.name);
+						} else {
+							this.errors.push('Internal Error: Unrecognized variable in loop optimizer',node.left);
+						}
+					}
+					break;
 				case 'UnaryExpression':
-					if ((node.operator === '++' || node.operator === '--') &&
-						node.argument.type === 'Identifier') {
-						modifiedVars.add(node.argument.name);
+					if ((node.operator === '++' || node.operator === '--')) {
+						if (node.argument.type === 'Identifier') {
+							modifiedVars.add(node.argument.name);
+						} else {
+							this.errors.push('Internal Error: Unrecognized variable in loop optimizer',node.left);
+						}
 					}
 					break;
 					
@@ -6420,6 +6491,22 @@ class Optimizer {
 						loopNode.setAttribute('hasFunctionCall', true);
 					}
 					break;
+				
+				case 'CompoundStatement':
+					node.statements.forEach(stmt => collectFromNode(stmt));
+					break;
+				case 'ForStatement':
+				case 'WhileStatement':
+				case 'IfStatement':
+					if (node.init) collectFromNode(node.init);
+					if (node.test) collectFromNode(node.test);
+					if (node.update) collectFromNode(node.update);
+					if (node.body) collectFromNode(node.body);
+					if (node.consequent) collectFromNode(node.consequent);
+					if (node.alternate) collectFromNode(node.alternate);
+					break;
+				case 'ReturnStatement':
+					if (node.argument) collectFromNode(node.argument);
 			}
 			
 			// 递归处理子节点
@@ -6428,8 +6515,461 @@ class Optimizer {
 			}
 		};
 		
-		collectFromNode(loopNode.body);
+		collectFromNode(loopNode);
 		return modifiedVars;
+	}
+	
+		/**
+	 * 优化可确定的循环，将其替换为直接赋值
+	 * @param {ASTNode} node - 要处理的AST节点
+	 * @returns {boolean} - 是否进行了优化
+	 */
+	optimizeDeterministicLoops(node) {
+		if (!node) return false;
+		
+		let modified = false;
+		
+		switch (node.type) {
+			case 'ForStatement':
+				modified = this.optimizeDeterministicForLoop(node);
+				break;
+				
+			case 'WhileStatement':
+				modified = this.optimizeDeterministicWhileLoop(node);
+				break;
+				
+			case 'CompoundStatement':
+				if (node.statements) {
+					// 处理复合语句中的所有语句
+					for (let i = 0; i < node.statements.length; i++) {
+						const stmt = node.statements[i];
+						if (this.optimizeDeterministicLoops(stmt)) {
+							modified = true;
+							// 重新检查当前索引，因为stmt可能已被替换
+							i--;
+						}
+					}
+				}
+				break;
+				
+			case 'IfStatement':
+				modified = this.optimizeDeterministicLoops(node.consequent) ||
+						  (node.alternate ? this.optimizeDeterministicLoops(node.alternate) : false);
+				break;
+				
+			default:
+				// 递归处理子节点
+				if (node.children) {
+					node.children.forEach(child => {
+						if (this.optimizeDeterministicLoops(child)) {
+							modified = true;
+						}
+					});
+				}
+				break;
+		}
+		
+		return modified;
+	}
+
+	/**
+	 * 优化可确定的for循环
+	 * @param {ASTNode} forNode - for语句节点
+	 * @returns {boolean} - 是否进行了优化
+	 * @remark Has manual changes !
+	 */
+	optimizeDeterministicForLoop(forNode) {
+		if (!forNode || forNode.type !== 'ForStatement') return false;
+		
+		// 检查循环是否可优化
+		const canOptimize = forNode.getAttribute('canOptimize');
+		const iterationCount = forNode.getAttribute('iterationCount');
+		// ! Manually adds !
+		const simulatedIterations = forNode.getAttribute('simulatedIterations');
+		const simulatedTerminations = forNode.getAttribute('simulatedTerminations');
+		const loopVarName = forNode.getAttribute('loopVarName');
+		
+		const hasSideEffects = forNode.getAttribute('hasSideEffects');
+		const neverExecuted = forNode.getAttribute('neverExecuted');
+		
+		if (!canOptimize && !neverExecuted) return false;
+		
+		// 如果循环永远不会执行
+		if (neverExecuted) {
+			return this.replaceLoopWithInitialization(forNode);
+		}
+		
+		// 如果循环有副作用，不能完全删除
+		if (hasSideEffects || forNode.getAttribute('maybeHasSideEffects')) {
+			// 检查是否可以部分优化（减少循环次数）
+			return this.partiallyOptimizeLoop(forNode, loopVarName, iterationCount);
+		}
+		
+		// 完全可优化的循环
+		return this.fullyOptimizeDeterministicLoop(forNode, iterationCount);
+	}
+
+	/**
+	 * 用初始化语句替换循环（用于永远不会执行的循环）
+	 * @param {ASTNode} forNode - for语句节点
+	 * @returns {boolean} - 是否进行了替换
+	 */
+	replaceLoopWithInitialization(forNode) {
+		// 创建替换语句
+		const replacementStatements = [];
+		
+		// 保留初始化部分（如果有）
+		if (forNode.init) {
+			if (forNode.init.type === 'VariableDeclaration') {
+				replacementStatements.push(forNode.init);
+			} else if (forNode.init.type === 'ExpressionStatement') {
+				replacementStatements.push(forNode.init);
+			}
+		}
+		
+		// 保留条件的副作用（如果有）
+		const conditionHasSideEffects = forNode.getAttribute('conditionHasSideEffects');
+		if (conditionHasSideEffects && forNode.test) {
+			const exprStmt = new ASTNode('ExpressionStatement');
+			exprStmt.expression = forNode.test;
+			replacementStatements.push(exprStmt);
+		}
+		
+		// 创建替换节点
+		let replacementNode;
+		if (replacementStatements.length === 0) {
+			replacementNode = null;
+		} else if (replacementStatements.length === 1) {
+			replacementNode = replacementStatements[0];
+		} else {
+			const compoundStmt = ASTBuilder.compoundStatement();
+			compoundStmt.statements = replacementStatements;
+			replacementNode = compoundStmt;
+		}
+		
+		// 替换循环
+		this.replaceNode(forNode, replacementNode);
+		this.warnings.push(`Replaced never-executed loop with initialization only`);
+		return true;
+	}
+
+	
+	/**
+	 * 优化可确定的while循环
+	 * @param {ASTNode} whileNode - while语句节点
+	 * @returns {boolean} - 是否进行了优化
+	 * @todo -- Use the similar skill (partial execution) in FOR loops !
+	 * @todo
+		!!! THE CALL PARAMETER INSIDE THIS FUNCTION !!!
+		(Must fetch the variable index)
+	 */
+	optimizeDeterministicWhileLoop(whileNode) {
+		if (!whileNode || whileNode.type !== 'WhileStatement') return false;
+		
+		// 检查循环是否可优化
+		const canOptimize = whileNode.getAttribute('canOptimize');
+		const iterationCount = whileNode.getAttribute('iterationCount');
+		const hasSideEffects = whileNode.getAttribute('hasSideEffects');
+		const neverExecuted = whileNode.getAttribute('neverExecuted');
+		
+		if (!canOptimize && !neverExecuted) return false;
+		
+		// 如果循环永远不会执行
+		if (neverExecuted) {
+			// while循环没有初始化部分，直接删除
+			// 但需要保留条件的副作用（如果有）
+			const conditionHasSideEffects = whileNode.getAttribute('conditionHasSideEffects');
+			if (conditionHasSideEffects) {
+				// 用条件表达式替换整个while循环
+				const exprStmt = new ASTNode('ExpressionStatement');
+				exprStmt.expression = whileNode.test;
+				this.replaceNode(whileNode, exprStmt);
+			} else {
+				// 完全删除
+				this.replaceNode(whileNode, null);
+			}
+			return true;
+		}
+		
+		// 如果循环有副作用，不能完全删除
+		if (hasSideEffects || whileNode.getAttribute('maybeHasSideEffects')) {
+			// 检查是否可以部分优化（减少循环次数）
+			return this.partiallyOptimizeLoop(whileNode, loopVarName, iterationCount);
+		}
+		
+		// 完全可优化的循环
+		return this.fullyOptimizeDeterministicLoop(whileNode, iterationCount);
+	}
+
+	/**
+	 * 完全优化确定性循环（替换为直接赋值）
+	 * @param {ASTNode} loopNode - 循环节点
+	 * @param {number} iterationCount - 迭代次数
+	 * @returns {boolean} - 是否进行了优化
+	 * @remark ! Has manual changes !
+	 */
+	fullyOptimizeDeterministicLoop(loopNode, iterationCount) {
+		if (iterationCount === undefined || iterationCount < 0) return false;
+		
+		// 收集循环中修改的所有变量
+		const modifiedVars = this.collectModifiedVariablesInLoop(loopNode);
+		
+		// 创建替换语句
+		const replacementStatements = [];
+		
+		// 对于for循环，保留初始化部分（如果有）
+		if (loopNode.type === 'ForStatement' && loopNode.init) {
+			// 检查初始化部分是否是变量声明
+			if (loopNode.init.type === 'VariableDeclaration') {
+				replacementStatements.push(loopNode.init);
+			} else if (loopNode.init.type === 'ExpressionStatement') {
+				replacementStatements.push(loopNode.init);
+			} else if (loopNode.init.type === 'AssignmentExpression') {
+				const exprStmt = new ASTNode('ExpressionStatement');
+				exprStmt.expression = loopNode.init;
+				replacementStatements.push(exprStmt);
+			}
+		}
+		
+		// After init!
+		// 检查所有修改的变量在循环结束后是否有确定的常量值
+		const varFinalValues = new Map();
+		for (const varName of modifiedVars) {
+			const scopePath = this.currentScope.lookupScopeOf(varName).getPath();
+			const localConstants = this.localConstants.get(scopePath);
+			const variableUses = this.variableUses.get(scopePath);
+			const finalValue = localConstants.get(varName);
+			if (finalValue === undefined) {
+				// 变量没有确定的最终值，不能完全优化
+				return false;
+			}
+			varFinalValues.set(varName, finalValue);
+			
+			// 检查变量的使用情况
+			const usage = variableUses.get(varName);
+			if (usage && !usage.canOptimize) {
+				// 变量标记为不可优化
+				return false;
+			}
+		}
+		
+		// 为每个修改的变量创建赋值语句
+		for (const [varName, finalValue] of varFinalValues) {
+			// 创建数值字面量
+			const numericLiteral = ASTBuilder.numericLiteral(finalValue);
+			
+			// 创建标识符
+			const identifier = ASTBuilder.identifier(varName);
+			
+			// 创建赋值表达式
+			const assignmentExpr = ASTBuilder.assignmentExpression('=', identifier, numericLiteral);
+			
+			// 创建表达式语句
+			const exprStmt = new ASTNode('ExpressionStatement');
+			exprStmt.expression = assignmentExpr;
+			
+			replacementStatements.push(exprStmt);
+		}
+		
+		// 如果有多个语句，用复合语句包装
+		let replacementNode;
+		if (replacementStatements.length === 0) {
+			// 没有语句要生成，完全删除循环
+			replacementNode = null;
+		} else if (replacementStatements.length === 1) {
+			// 只有一个语句，直接使用
+			replacementNode = replacementStatements[0];
+		} else {
+			// 多个语句，用复合语句包装
+			const compoundStmt = ASTBuilder.compoundStatement();
+			compoundStmt.statements = replacementStatements;
+			replacementNode = compoundStmt;
+			replacementStatements.forEach(stmt => stmt.parent = compoundStmt);
+		}
+		
+		// 替换循环节点
+		this.replaceNode(loopNode, replacementNode);
+		
+		this.warnings.push(`Optimized deterministic loop with ${iterationCount} iterations to direct assignments`);
+		return true;
+	}
+
+	/**
+	 * 部分优化循环（减少循环次数）
+	 * @param {ASTNode} loopNode - 循环节点
+	 * @param {string} loopVariable
+	 * @param {number} totalIterations - 总迭代次数
+	 * @returns {boolean} - 是否进行了优化
+	 * @remark This is manually adjusted !
+	 * @remark The function collectModifiedVariables() should be actually collectModifiedVariablesInLoop()
+	 * @todo This might not be useful for WHILE loops !
+	 * @todo The variables to collect might be more than loop variables themselves
+	 */
+	partiallyOptimizeLoop(loopNode, loopVariable, totalIterations) {
+		if (!totalIterations || totalIterations <= 1) return false;
+		
+		// 获取当前作用域路径
+		const scopePath = this.getCurrentScopePath();
+		const localConstants = this.localConstants.get(scopePath);
+		
+		// 收集循环中修改的变量
+		const modifiedVars = this.collectModifiedVariablesInLoop(loopNode);
+		
+		// 找到第一个有副作用的迭代
+		const firstSideEffectIteration = loopNode.getAttribute('simulatedIterations');
+		
+		if (firstSideEffectIteration === 0) {
+			// 第一轮就有副作用，不能优化
+			return false;
+		}
+		
+		if (firstSideEffectIteration >= totalIterations) {
+			// 所有迭代都没有副作用，可以完全优化
+			// Debug:
+			console.log('unexpected side effect call');
+			return this.fullyOptimizeDeterministicLoop(loopNode, totalIterations);
+		}
+		
+		// 部分优化：展开没有副作用的部分，保留有副作用的部分
+		return this.partiallyUnrollLoop(loopNode, loopVariable, totalIterations, firstSideEffectIteration, modifiedVars);
+	}
+
+
+	/**
+	 * 部分展开循环
+	 * @param {ASTNode} loopNode - 循环节点
+	 * @param {string} loopVariable - The loop index variable
+	 * @param {number} totalIterations - 总迭代次数
+	 * @param {number} firstSideEffect - 第一个有副作用的迭代索引
+	 * @param {Set<string>} modifiedVars - 修改的变量集合
+	 * @returns {boolean} - 是否进行了优化
+	 * @remark There are adjustements done manually to adapt to existing code
+	 */
+	partiallyUnrollLoop(loopNode, loopVariable, totalIterations, firstSideEffect, modifiedVars) {
+		const indexAtSideEffect = loopNode.getAttribute('simulatedTermination');	// This is a value
+		
+		// 创建替换语句
+		const replacementStatements = [];
+		
+		// 对于for循环，保留初始化部分
+		if (loopNode.type === 'ForStatement' && loopNode.init) {
+			if (loopNode.init.type === 'VariableDeclaration') {
+				replacementStatements.push(loopNode.init);
+			} else if (loopNode.init.type === 'ExpressionStatement') {
+				replacementStatements.push(loopNode.init);
+			}
+		}
+		
+		// 展开没有副作用的部分（通过直接赋值）
+		if (firstSideEffect > 0) {
+			
+			modifiedVars.forEach(varName => {
+				const scopePath = this.currentScope.lookupScopeOf(varName).getPath();
+				const localConstants = this.localConstants.get(scopePath);
+				const value = localConstants.get(varName);
+				const numericLiteral = ASTBuilder.numericLiteral(value);
+				const identifier = ASTBuilder.identifier(varName);
+				const assignmentExpr = ASTBuilder.assignmentExpression('=', identifier, numericLiteral);
+				const exprStmt = new ASTNode('ExpressionStatement');
+				exprStmt.expression = assignmentExpr;
+				replacementStatements.push(exprStmt);
+			});
+			
+			/*
+			// 计算无副作用迭代后的变量值
+			const optimizedValues = this.calculateValuesAfterIterations(loopNode, firstSideEffect, modifiedVars);
+			
+			// 为每个变量创建赋值语句
+			for (const [varName, value] of optimizedValues) {
+				const numericLiteral = ASTBuilder.numericLiteral(value);
+				const identifier = ASTBuilder.identifier(varName);
+				const assignmentExpr = ASTBuilder.assignmentExpression('=', identifier, numericLiteral);
+				const exprStmt = new ASTNode('ExpressionStatement');
+				exprStmt.expression = assignmentExpr;
+				replacementStatements.push(exprStmt);
+			}
+			*/
+			this.warnings.push(`Partially unrolled loop: ${firstSideEffect} side-effect-free iterations converted to direct assignments`);
+		}
+		
+		// 修改原循环，减少迭代次数
+		const remainingIterations = totalIterations - firstSideEffect;
+		
+		if (remainingIterations > 0) {
+			// 需要创建一个新的循环，执行剩余的有副作用迭代
+			
+			let modifiedLoop;
+			if (loopNode.type === 'ForStatement') {
+				modifiedLoop = this.createModifiedForLoop(loopNode, loopVariable, indexAtSideEffect);
+			} else {
+				modifiedLoop = this.createModifiedWhileLoop(loopNode, loopVariable, indexAtSideEffect);
+			}
+			
+			if (modifiedLoop) {
+				replacementStatements.push(modifiedLoop);
+			}
+		}
+		
+		// 创建替换节点
+		let replacementNode;
+		if (replacementStatements.length === 0) {
+			replacementNode = null;
+		} else if (replacementStatements.length === 1) {
+			replacementNode = replacementStatements[0];
+		} else {
+			const compoundStmt = ASTBuilder.compoundStatement();
+			compoundStmt.statements = replacementStatements;
+			replacementNode = compoundStmt;
+		}
+		
+		// 替换原循环
+		this.replaceNode(loopNode, replacementNode);
+		return true;
+	}
+
+	/**
+	 * 创建修改后的for循环（减少迭代次数）
+	 * @param {ASTNode} originalLoop - 原始循环
+	 * @param {number} completedIterations - 已完成的迭代次数
+	 * @param {number} remainingIterations - 剩余迭代次数
+	 * @returns {ASTNode} - 修改后的循环
+	 * @remark <NOTICE> WE MUST DEAL WITH SPECIAL INITIALIZATIONS !!!
+	 */
+	createModifiedForLoop(originalLoop, loopVariable, newInitValue) {
+		// 复制原始循环
+		const newLoop = new ASTNode('ForStatement');
+		newLoop.init = originalLoop.init;
+		newLoop.test = originalLoop.test;
+		newLoop.update = originalLoop.update;
+		newLoop.body = originalLoop.body;
+		
+		// 修改初始化部分：将循环变量设置为已完成的迭代后的值
+		if (loopVar) {
+			const initValue = this.getVariableInitialValue(loopVar);
+			if (initValue !== undefined) {
+				const numericLiteral = ASTBuilder.numericLiteral(newInitValue);
+				const identifier = ASTBuilder.identifier(loopVariable);
+				const assignmentExpr = ASTBuilder.assignmentExpression('=', identifier, numericLiteral);
+				
+				if (originalLoop.init.type === 'VariableDeclaration') {
+					// 修改变量声明的初始值
+					const newDeclarator = ASTBuilder.variableDeclarator(loopVar);
+					newDeclarator.initializer = numericLiteral;
+					newLoop.init.declarators = [newDeclarator];
+				} else if (originalLoop.init.type === 'ExpressionStatement') {
+					// To be verified
+					originalLoop.addChild(assignmentExpr);
+				} else {
+					// 创建赋值表达式语句
+					const exprStmt = new ASTNode('ExpressionStatement');
+					exprStmt.expression = assignmentExpr;
+					newLoop.init = exprStmt;
+				}
+			}
+		}
+		
+		
+		return newLoop;
 	}
 
 	
@@ -6473,7 +7013,11 @@ class Optimizer {
 		const usage = variableUses.get(varName);
 		if (usage) {
 			usage.writes++;
-			usage.canOptimize = (noSideEffectValue != null);
+			if (noSideEffectValue != null) {
+				usage.canOptimize = true;
+			} else {
+				usage.canOptimize = false;
+			}
 		}
 		
 		// 赋值会改变变量值，从常量表中移除
@@ -6685,7 +7229,7 @@ class Optimizer {
         const symbols = scope.getAllSymbols();
         symbols.forEach(symbol => {
             if (symbol.kind === 'function' && symbol.scope.astNode) {
-                const funcNode = symbol.scope.astNode;
+                const funcNode = symbol.owningScope ? symbol.owningScope.astNode : symbol.scope.astNode;
                 this.functionInfo.set(symbol.name, {
                     calls: 0,
                     hasSideEffects: false,
@@ -6879,6 +7423,7 @@ class Optimizer {
 				break;
 			case 'FunctionCall':
             case 'BuiltinCall':
+			case 'AsmStatement':
 				// There won't be cross-function optimizing
 				return true;
 				break;
@@ -6922,6 +7467,10 @@ class Optimizer {
 					}
 				}
 				break;
+			case 'StructMemberNode':
+			case 'PointerTypeNode':
+				// Not considering struct members
+				return true;
 			case 'Identifier':
 				const scopePath = this.currentScope.lookupScopeOf(node.name).getPath();
 				const variableUses = this.variableUses.get(scopePath);
@@ -7442,6 +7991,7 @@ class Optimizer {
 		
 		// 如果函数现在没有被调用，可以删除它
 		if (funcInfo.calls === 0) {
+			this.globalSymbols.removeSymbol(funcName);	// Manually added
 			this.removeNodeFromParent(funcInfo.node);
 			this.warnings.push(`Removed unused function '${funcName}' after inlining`);
 		}
@@ -8326,10 +8876,10 @@ class Optimizer {
 	preserveSideEffects(stmt) {
 		if (!stmt) return null;
 		
-		// 检查语句是否有副作用
-		if (!this.hasSideEffects(stmt)) {
+		// 检查语句是否有副作用 (Not necessary and result in errors)
+		/*if (!this.hasSideEffects(stmt)) {
 			return null;
-		}
+		}*/
 		
 		switch (stmt.type) {
 			case 'ExpressionStatement':
