@@ -4,6 +4,14 @@
 
 **NOTICE: Currently, works are still in progress.**
 
+## Current Plan
+
+The two parts of the compiler is expected to be done at the same time: the optimizer and the final code generator.
+
+The latter is without doubt easier.
+
+----
+
 Above all, please notice that: Mindustry-C is an **mainly AI-generated** and partially-experimental project. The AI tool used in this project is DeepSeek (for individuals).
 
 > I have no time to code, though. I've written only prompts and a few lines of code for it. (Yet for sure, I have to do all bug-fixing.)
@@ -29,12 +37,14 @@ There have been many similar softwares aiming at using languages like C/C++ (ali
 - Function call stack (whose size can be adjusted)
 
 - Mindustry "system calls"
+  - Building control (interfaces reserved)
+  - Unit control (to be done)
 
 - Direct "assembly" insertion
 
 - Compiler's optimizing
   - Compile-time constant evaluation
-    - Including those in `for` or `while` loop!
+    - Including those in `for` or `while` loop (they won't be so efficient, though)!
   - Removal of unused code/variable
     - Including unused `if` branches or `while` loops
   - Inlining functions
@@ -49,3 +59,5 @@ Following functions **rely on** memory allocation:
 - Any array
 
 A pointer takes up 2 units of spaces, respectively storing the memory cell and address of the element it points to.
+
+Arrays might also take up additional spaces to store its previous/next cell of storage. Designing memory structure for this strange "cyber-" hardware is hard.
