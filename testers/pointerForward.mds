@@ -1,0 +1,20 @@
+__ptrblock := cell1
+__ptrpos := 3
+cell1 : {null,bank1,64}
+bank1 : {cell1,cell2,512}
+cell2 : {bank1,null,64}
+__step := 111
+# 1
+jump 11 lessThanEq __step 0
+read __block __ptrblock 2
+op sub __mxstep __block __ptrpos
+jump 7 greaterThanEq __step __mxstep
+op add __ptrpos __ptrpos __step
+set __step 0
+jump 11 always x false
+read __ptrblock __ptrblock 1
+op sub __step __step __mxstep
+set __ptrpos 3
+jump 0 always x false
+end
+@
