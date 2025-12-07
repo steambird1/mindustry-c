@@ -1709,6 +1709,7 @@ class Parser {
             this.consumeToken(); // 跳过 ':'
             const bitFieldExpr = this.parseExpression();
             if (bitFieldExpr) {
+				bitFieldExpr.parent = declarator;
                 bitField = bitFieldExpr;
             }
         }
@@ -1911,11 +1912,13 @@ class Parser {
                         const param = this.parseParameter();
                         if (param) {
                             params.push(param);
+							if (this.matchToken(TokenType.IDENTIFIER))
+								this.consumeToken();	// Last parameter identifier is to be consumed !!!
                         }
+						
                     } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
                 }
-				if (this.matchToken(TokenType.IDENTIFIER))
-					this.consumeToken();	// Last parameter identifier is to be consumed !!!
+				
                 this.expectToken(TokenType.RIGHT_PAREN);
                 declarator.functionParams = params;
             }
@@ -2379,9 +2382,11 @@ class Parser {
             if (this.matchToken(TokenType.ASSIGN)) {
                 this.consumeToken();
                 varDeclarator.initializer = this.parseExpression();
+				varDeclarator.initializer.parent = varDeclarator;
             }
             
             declarators.push(varDeclarator);
+			varDeclarator.parent = varDecl;
         } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
 
         this.expectToken(TokenType.SEMICOLON);
@@ -2402,6 +2407,7 @@ class Parser {
         if (this.matchToken(TokenType.ASSIGN)) {
             this.consumeToken();
             declarator.initializer = this.parseExpression();
+			declarator.initializer.parent = declarator;
         }
 
         return declarator;
@@ -2821,6 +2827,7 @@ class Parser {
             const alternate = this.parseConditionalExpression();
 
             const conditional = ASTBuilder.conditionalExpression(test, consequent, alternate);
+			test.parent = conditional;
 			consequent.parent = conditional;
 			if (alternate) alternate.parent = conditional;
             conditional.location = test.location;
@@ -3142,7 +3149,10 @@ class Parser {
                     if (!this.matchToken(TokenType.RIGHT_PAREN)) {
                         do {
                             const arg = this.parseExpression();
-                            if (arg) builtinCall.arguments.push(arg);
+                            if (arg) {
+								builtinCall.arguments.push(arg);
+								arg.parent = builtinCall;
+							}
                         } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
                     }
                     
@@ -3156,7 +3166,10 @@ class Parser {
                     if (!this.matchToken(TokenType.RIGHT_PAREN)) {
                         do {
                             const arg = this.parseExpression();
-                            if (arg) callExpr.arguments.push(arg);
+                            if (arg) {
+								callExpr.arguments.push(arg);
+								arg.parent = callExpr;
+							}
                         } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
                     }
                     
@@ -3341,7 +3354,10 @@ class Parser {
 					}
 				} else {
 					const arg = this.parseExpression();
-					if (arg) builtinCall.arguments.push(arg);
+					if (arg) {
+						builtinCall.arguments.push(arg);
+						arg.parent = builtinCall;
+					}
 				}
 			} while (this.matchToken(TokenType.COMMA) && this.consumeToken());
 		}
@@ -5128,6 +5144,21 @@ class SemanticAnalyzer extends ASTVisitor {
 // Optimizer comes first?
 // I MUST DEBUG THIS ON MY OWN :(
 
+// Auxiliary type to handle break/continue
+class BreakException {
+	constructor(node) {
+		this.node = node;
+		this.type = 'BreakException';
+	}
+}
+
+class ContinueException {
+	constructor(node) {
+		this.node = node;
+		this.type = 'ContinueException';
+	}
+}
+
 class Optimizer {
     constructor() {
         this.modified = false;
@@ -5171,6 +5202,7 @@ class Optimizer {
         do {
             this.modified = false;
             this.optimizationPass();
+			this.analyzedScopes.clear();
             iteration++;
 			// debug:
 			console.log(iteration + ' -th optimize:');
@@ -5325,6 +5357,10 @@ class Optimizer {
 			case 'ContinueStatement':
 				this.analyzeContinueStatement(node, info);
 				break;
+				
+			case 'MemberExpression':
+				// Don't further analyze them!!!
+				break;
                 
             default:
                 // 递归分析子节点
@@ -5415,6 +5451,7 @@ class Optimizer {
 	
 	// (End)
 	// ! Manually added scope entrance !
+	// The condition for inlining has been adjusted.
     analyzeFunction(funcNode, info = null) {
         const funcName = funcNode.name;
         this.currentFunction = funcName;
@@ -5423,8 +5460,10 @@ class Optimizer {
             this.functionInfo.set(funcName, {
                 calls: 0,
                 hasSideEffects: false,
+				isAddressed: false,
                 isDefinition: funcNode.body !== null,
                 isInline: funcNode.isInline || false,
+				canInline: true,
                 node: funcNode,
                 scope: funcNode.scope
             });
@@ -5436,13 +5475,31 @@ class Optimizer {
 			this.enterScope(funcNode.scope);
 		}
 		
+		const funcInfo = {
+			inFunction: true,
+			returnCount: 0,
+			parentInfo: info
+		};
+		
         // 分析函数体
         if (funcNode.body) {
-            this.analyzeNode(funcNode.body, info);
+            this.analyzeNode(funcNode.body, funcInfo);
         }
 		if (enteredScope) {
 			this.exitScope();
 		}
+		
+		// Consider whether this can be inlined
+		if (!this.functionInfo.get(funcName).isAddressed) {
+			if (funcInfo.returnCount > 1) {
+				this.functionInfo.get(funcName).canInline = false;
+			} else if (funcInfo.returnCount == 1) {
+				this.functionInfo.get(funcName).canInline = funcNode.body.statements[funcNode.body.statements.length - 1].type === 'ReturnStatement';
+			} else {
+				this.functionInfo.get(funcName).canInline = true;
+			}
+		}
+		
 		this.currentFunction = null;	// Given that functions won't be embedded
     }
 
@@ -5693,7 +5750,7 @@ class Optimizer {
 		// 尝试分析while循环是否可以优化
 		if (!node.getAttribute('bodyHasSideEffects')) {
 			if (!info || !info.isLoop) {
-				if (this.analyzeWhileLoopForOptimization(node)) {
+				if (this.analyzeWhileLoopForOptimization(node, info)) {
 					if ((!info || !info.optimizingLoop) && this.optimizeDeterministicWhileLoop(node)) {
 						this.modified = true;
 					}
@@ -5713,7 +5770,7 @@ class Optimizer {
 	 * 分析while循环是否可以优化
 	 * @param {ASTNode} whileNode - while语句节点
 	 */
-	analyzeWhileLoopForOptimization(whileNode) {
+	analyzeWhileLoopForOptimization(whileNode, info) {
 		// while循环的优化比for循环更复杂
 		// 这里我们只处理简单情况：条件中的变量在循环体中被简单修改
 		
@@ -5753,11 +5810,11 @@ class Optimizer {
 					if (initValue !== undefined) {
 						// Successful to make registrations
 						whileNode.setAttribute('loopVarName', loopVarName);
-						
+						const conditionInfo = { comparisonOp, constValue };
 						// 尝试计算循环次数
 						const iterationCount = this.calculateLoopIterations(
 							initValue,
-							{ comparisonOp, constValue },
+							conditionInfo,
 							updateInfo
 						);
 						
@@ -5766,16 +5823,23 @@ class Optimizer {
 							
 							if (iterationCount === 0) {
 								whileNode.setAttribute('neverExecuted', true);
+								return true;
 							} else if (iterationCount <= 100) {
 								// 可以优化
 								whileNode.setAttribute('canOptimize', true);
+								if (!this.simulateLoop(whileNode, loopVarName, initValue, conditionInfo, updateInfo, iterationCount, info)) {
+									whileNode.setAttribute('optimized', false);
+									return false;
+								}
 								whileNode.setAttribute('optimized', true);
+								return true;
 							}
 						}
 					}
 				}
 			}
 		}
+		return false;
 	}
 
 	/**
@@ -5918,9 +5982,7 @@ class Optimizer {
 			this.analyzeNode(node.body, loopInfo);// Don't do changes
 			
 			// 检查循环体是否有副作用
-			if (this.hasSideEffects(node.body)) {
-				node.setAttribute('bodyHasSideEffects', true);
-			}
+			node.setAttribute('bodyHasSideEffects', this.hasSideEffects(node.body));
 			
 			// 记录是否有break/continue
 			if (loopInfo.hasBreak) {
@@ -6345,6 +6407,7 @@ class Optimizer {
 			// 对于简单循环，我们可以模拟少量迭代来传播常量
 			const maxSimulatedIterations = Math.min(iterationCount, configuredMaxSimulation);
 			let i = 0;
+			let broken = false, continuing = false;
 			for (i = 0; i < maxSimulatedIterations; i++) {
 				// 分析循环体
 				// This will result in an execution
@@ -6352,7 +6415,22 @@ class Optimizer {
 				
 				info.currentRound = i;
 				info.currentLoopVar = currentValue;
-				this.analyzeNode(loopNode.body, info);
+				
+				try {
+					this.analyzeNode(loopNode.body, info);
+				} catch (error) {
+					switch (error.type) {
+						case 'BreakException':
+							broken = true;
+							break;
+						case 'ContinueException':
+							continuing = true;	// No special handler
+							break;
+						default:
+							throw error;
+							break;
+					}
+				}
 				
 				// 更新循环变量
 				
@@ -6366,6 +6444,9 @@ class Optimizer {
 						break;
 					}
 				}
+				if (broken) {
+					break;
+				}
 				
 				// 如果循环变量不再可优化，停止模拟
 				const usage = variableUses.get(loopVarName);
@@ -6375,7 +6456,7 @@ class Optimizer {
 				}
 			}
 			
-			if (loopNode.test) {
+			if ((!broken) && loopNode.test) {
 				const testEval = this.evaluateConstantExpression(loopNode.test);
 				if (testEval != 0) {
 					// Still can be evaluated!!!
@@ -6631,7 +6712,7 @@ class Optimizer {
 		const conditionHasSideEffects = forNode.getAttribute('conditionHasSideEffects');
 		if (conditionHasSideEffects && forNode.test) {
 			const exprStmt = new ASTNode('ExpressionStatement');
-			exprStmt.expression = forNode.test;
+			exprStmt.addChild(forNode.test);
 			replacementStatements.push(exprStmt);
 		}
 		
@@ -6682,7 +6763,7 @@ class Optimizer {
 			if (conditionHasSideEffects) {
 				// 用条件表达式替换整个while循环
 				const exprStmt = new ASTNode('ExpressionStatement');
-				exprStmt.expression = whileNode.test;
+				exprStmt.addChild(whileNode.test);
 				this.replaceNode(whileNode, exprStmt);
 			} else {
 				// 完全删除
@@ -6726,7 +6807,7 @@ class Optimizer {
 				replacementStatements.push(loopNode.init);
 			} else if (loopNode.init.type === 'AssignmentExpression') {
 				const exprStmt = new ASTNode('ExpressionStatement');
-				exprStmt.expression = loopNode.init;
+				exprStmt.addChild(loopNode.init);
 				replacementStatements.push(exprStmt);
 			}
 		}
@@ -6766,7 +6847,7 @@ class Optimizer {
 			
 			// 创建表达式语句
 			const exprStmt = new ASTNode('ExpressionStatement');
-			exprStmt.expression = assignmentExpr;
+			exprStmt.addChild(assignmentExpr);
 			
 			replacementStatements.push(exprStmt);
 		}
@@ -6802,6 +6883,7 @@ class Optimizer {
 	 * @returns {boolean} - 是否进行了优化
 	 * @remark This is manually adjusted !
 	 * @remark The function collectModifiedVariables() should be actually collectModifiedVariablesInLoop()
+	 * @remark This function is currently not widely used
 	 * @todo This might not be useful for WHILE loops !
 	 * @todo The variables to collect might be more than loop variables themselves
 	 */
@@ -6871,7 +6953,7 @@ class Optimizer {
 				const identifier = ASTBuilder.identifier(varName);
 				const assignmentExpr = ASTBuilder.assignmentExpression('=', identifier, numericLiteral);
 				const exprStmt = new ASTNode('ExpressionStatement');
-				exprStmt.expression = assignmentExpr;
+				exprStmt.addChild(assignmentExpr);
 				replacementStatements.push(exprStmt);
 			});
 			
@@ -6944,8 +7026,8 @@ class Optimizer {
 		newLoop.body = originalLoop.body;
 		
 		// 修改初始化部分：将循环变量设置为已完成的迭代后的值
-		if (loopVar) {
-			const initValue = this.getVariableInitialValue(loopVar);
+		if (loopVariable) {
+			const initValue = this.getVariableInitialValue(loopVariable);
 			if (initValue !== undefined) {
 				const numericLiteral = ASTBuilder.numericLiteral(newInitValue);
 				const identifier = ASTBuilder.identifier(loopVariable);
@@ -6953,7 +7035,7 @@ class Optimizer {
 				
 				if (originalLoop.init.type === 'VariableDeclaration') {
 					// 修改变量声明的初始值
-					const newDeclarator = ASTBuilder.variableDeclarator(loopVar);
+					const newDeclarator = ASTBuilder.variableDeclarator(loopVariable);
 					newDeclarator.initializer = numericLiteral;
 					newLoop.init.declarators = [newDeclarator];
 				} else if (originalLoop.init.type === 'ExpressionStatement') {
@@ -6962,7 +7044,7 @@ class Optimizer {
 				} else {
 					// 创建赋值表达式语句
 					const exprStmt = new ASTNode('ExpressionStatement');
-					exprStmt.expression = assignmentExpr;
+					exprStmt.addChild(assignmentExpr);
 					newLoop.init = exprStmt;
 				}
 			}
@@ -6987,12 +7069,18 @@ class Optimizer {
 				funcInfo.hasReturn = true;
 			}
 		}
+		if (info && info.inFunction) {
+			info.returnCount++;
+		}
 	}
 
 	analyzeBreakStatement(node, info = null) {
 		// 标记在循环或switch中有break
 		if (info && info.isLoop) {
 			info.hasBreak = true;
+		}
+		if (info && info.optimizingLoop) {
+			throw new BreakException(node);
 		}
 		// 也可以记录在其他结构中，如switch
 	}
@@ -7001,6 +7089,9 @@ class Optimizer {
 		// 标记在循环中有continue
 		if (info && info.isLoop) {
 			info.hasContinue = true;
+		}
+		if (info && info.optimizingLoop) {
+			throw new ContinueException(node);
 		}
 	}
 
@@ -7235,6 +7326,8 @@ class Optimizer {
                     hasSideEffects: false,
                     isDefinition: funcNode.body !== null,
                     isInline: funcNode.isInline || false,
+					isAddressed: symbol.isAddressed,
+					canInline: false,
                     node: funcNode,
                     scope: symbol.scope,
                     size: this.estimateFunctionSize(funcNode)
@@ -7431,7 +7524,8 @@ class Optimizer {
 				// ++ and -- itself actually have no side effect.
 				// side effect of '&' depends
 				if (node.operator === '&' || node.operator === '*') {
-					return this.hasSideEffects(node.argument);
+					//return this.hasSideEffects(node.argument);
+					return true;	// No pointer analyses!
 				}
 				break;
 			
@@ -7467,7 +7561,7 @@ class Optimizer {
 					}
 				}
 				break;
-			case 'StructMemberNode':
+			case 'MemberExpression':
 			case 'PointerTypeNode':
 				// Not considering struct members
 				return true;
@@ -7785,7 +7879,13 @@ class Optimizer {
 					return;
 				}
 				break;
-				
+			
+			case 'VariableDeclarator':
+				if (oldNode === parent.initializer) {
+					parent.initializer = newNode;
+					newNode.parent = parent;
+				}
+			
 			case 'MemberExpression':
 				if (oldNode === parent.getChild(0)) {
 					if (newNode) {
@@ -7961,6 +8061,7 @@ class Optimizer {
     shouldInlineFunction(funcName) {
         const info = this.functionInfo.get(funcName);
         if (!info || !info.node.body) return false;
+		if (!info.canInline) return false;
         
         // 检查递归调用
         const calledFunctions = this.functionCallGraph.get(funcName) || new Set();
@@ -7991,7 +8092,7 @@ class Optimizer {
 		
 		// 如果函数现在没有被调用，可以删除它
 		if (funcInfo.calls === 0) {
-			this.globalSymbols.removeSymbol(funcName);	// Manually added
+			this.globalScope.removeSymbol(funcName);	// Manually added
 			this.removeNodeFromParent(funcInfo.node);
 			this.warnings.push(`Removed unused function '${funcName}' after inlining`);
 		}
@@ -8040,7 +8141,7 @@ class Optimizer {
 			'functions', 'globalDeclarations', 'typeDefinitions',
 			'statements', 'expression', 'test', 'consequent', 'alternate',
 			'body', 'init', 'update', 'argument', 'left', 'right',
-			'declarators', 'arguments', 'callee'
+			'declarators', 'arguments', 'callee', 'initializer'
 		];
 		
 		for (const field of fieldsToCheck) {
@@ -8058,8 +8159,10 @@ class Optimizer {
 
 	/**
 	 * 在特定调用点内联函数
+	 * @remark Manually modified !
 	 */
 	inlineFunctionAtSite(funcNode, callNode, parentNode, context) {
+		// Cloned body must be a compound statement
 		// 检查是否适合内联
 		if (!this.isSuitableForInlining(funcNode, callNode, context)) {
 			return;
@@ -8081,28 +8184,108 @@ class Optimizer {
 		this.replaceParametersInAST(clonedBody, paramMap);
 		
 		// 处理返回语句
-		const returnValue = this.extractAndReplaceReturns(clonedBody, parentNode, callNode);
+		// (This function is no longer used)
+		//const returnValue = this.extractAndReplaceReturns(clonedBody, parentNode, callNode);
 		
-		if (returnValue !== undefined) {
-			// 函数有返回值，用返回值替换调用
-			this.replaceNode(callNode, returnValue);
-		} else if (parentNode.type === 'ExpressionStatement') {
+		// TODO: ! See whether the return value is got somewhere !
+		const doInsertInto = (targetNode, lvalOfReturn, doDeletion) => {
+			const index = targetNode.statements.indexOf(parentNode);
+			if (index !== -1) {
+				// 删除原表达式语句，插入函数体内容
+				if (doDeletion) targetNode.statements.splice(index, 1);
+				let spliceFix = 0;
+				clonedBody.statements.forEach((stmt, i) => {
+					let actualStmt = stmt;
+					if (stmt.type === 'ReturnStatement') {
+						// Initially insert an auxiliary computer
+						const compStmt = stmt.argument;
+						//targetNode.statements.splice(index + i + spliceFix, 0, compStmt);
+						//compStmt.parent = targetNode;
+						//spliceFix++;
+						
+						actualStmt = null;
+						if (lvalOfReturn) {
+							// The right value is the function call
+							//lvalOfReturn.right = stmt.argument;
+							if (lvalOfReturn.left && lvalOfReturn.left === callNode) {
+								//lvalOfReturn.left = compStmt;
+								this.replaceNode(lvalOfReturn.left, compStmt);
+							}
+							if (lvalOfReturn.right && lvalOfReturn.right === callNode) {
+								this.replaceNode(lvalOfReturn.right, compStmt);
+							}
+							if (lvalOfReturn.argument && lvalOfReturn.argument === callNode) {
+								this.replaceNode(lvalOfReturn.argument, compStmt);
+							}
+							if (lvalOfReturn.initializer && lvalOfReturn.initializer === callNode) {
+								this.replaceNode(lvalOfReturn.initializer, compStmt);
+							}
+							//actualStmt = lvalOfReturn;	// There's no need to insert
+							compStmt.parent = lvalOfReturn;
+						} else if (!actualStmt) {
+							actualStmt = stmt.argument;
+							// Might have side effects
+						}
+					}
+					if (actualStmt) {
+						targetNode.statements.splice(index + i + spliceFix, 0, actualStmt);
+						actualStmt.parent = targetNode;
+					}
+					
+				});
+				return true;
+			} else {
+				return false;
+			}
+		};
+		
+		let parentOfParent = parentNode.parent, result = true;
+		const directParent = parentNode;	// Not modified ver
+		// Get first compound statement
+		while (parentOfParent && parentOfParent.type !== 'CompoundStatement') {
+			parentNode = parentOfParent;
+			parentOfParent = parentOfParent.parent;
+		}
+		if (directParent.type === 'ExpressionStatement') {
 			// 没有返回值的函数调用，用函数体替换整个表达式语句
+			// ExpressionStatement means that there's no assignment
 			if (clonedBody.type === 'CompoundStatement') {
 				// 将复合语句的内容插入到父节点中
-				const parentOfParent = parentNode.parent;
 				if (parentOfParent && parentOfParent.statements) {
-					const index = parentOfParent.statements.indexOf(parentNode);
-					if (index !== -1) {
-						// 删除原表达式语句，插入函数体内容
-						parentOfParent.statements.splice(index, 1);
-						clonedBody.statements.forEach((stmt, i) => {
-							parentOfParent.statements.splice(index + i, 0, stmt);
-							stmt.parent = parentOfParent;
-						});
-					}
+					result = doInsertInto(parentOfParent, null, false);
+				} else {
+					this.errors.push(`Internal Error: Unable to inline function '${funcNode.name} (E3)'`);
+					return false;
 				}
 			}
+			// Then delete the function call in the expression statement
+			const index = directParent.children.indexOf(callNode);
+			if (index !== -1) directParent.children.splice(index, 1);
+		} else if (directParent.type === 'AssignmentExpression' || directParent.type === 'BinaryExpression' || directParent.type === 'UnaryExpression' || directParent.type === 'VariableDeclarator') {
+			// Also need this:
+			if (clonedBody.type === 'CompoundStatement') {
+				// 将复合语句的内容插入到父节点中
+				if (parentOfParent && parentOfParent.statements) {
+					// Should be already replaced inside the loop
+					result = doInsertInto(parentOfParent, directParent, false);
+				} else {
+					this.errors.push(`Internal Error: Unable to inline function '${funcNode.name} (E1)'`);
+					return false;
+				}
+			}
+			// Replacement already done
+		} else if (directParent.type === 'compoundStatement') {
+			// Directly insert it? I should go for the call node!
+			result = doInsertInto(callNode, null, true);
+			// Delete the original statement inside
+		} else {
+			this.errors.push(`Internal Error: Unable to inline function '${funcNode.name} (E4)'`);
+			return false;
+		}
+		
+		if (!result) {
+			this.errors.push(`Internal Error: Unable to inline function '${funcNode.name}' (E2)`);
+			return false;
 		}
 		
 		// 更新调用计数
@@ -8113,10 +8296,12 @@ class Optimizer {
 		
 		this.modified = true;
 		this.warnings.push(`Inlined function '${funcNode.name}'`);
+		return true;
 	}
 
 	/**
 	 * 检查函数是否适合内联
+	 * @remark This function is probably not needed
 	 */
 	isSuitableForInlining(funcNode, callNode, context) {
 		// 检查参数数量
@@ -8170,7 +8355,7 @@ class Optimizer {
 			'functions', 'globalDeclarations', 'typeDefinitions',
 			'statements', 'expression', 'test', 'consequent', 'alternate',
 			'body', 'init', 'update', 'argument', 'left', 'right',
-			'declarators', 'arguments', 'callee'
+			'declarators', 'arguments', 'callee', 'initializer'
 		];
 		
 		for (const field of fieldsToCheck) {
@@ -8403,7 +8588,7 @@ class Optimizer {
 				'functions', 'globalDeclarations', 'typeDefinitions',
 				'statements', 'expression', 'test', 'consequent', 'alternate',
 				'body', 'init', 'update', 'argument', 'left', 'right',
-				'declarators', 'arguments', 'callee'
+				'declarators', 'arguments', 'callee', 'initializer'
 			];
 			
 			for (const field of fieldsToCheck) {
@@ -8434,6 +8619,7 @@ class Optimizer {
 		
 		// 创建新节点
 		const clone = new ASTNode(node.type, node.location);
+		clone.parent = node.parent;
 		
 		// 复制属性
 		for (const [key, value] of node._attributes) {
@@ -8545,6 +8731,25 @@ class Optimizer {
 					node.children.forEach(child => clone.addChild(this.cloneAST(child)));
 				}
 				break;
+		}
+		
+		const fieldsToCheck = [
+				'functions', 'globalDeclarations', 'typeDefinitions',
+				'statements', 'expression', 'test', 'consequent', 'alternate',
+				'body', 'init', 'update', 'argument', 'left', 'right',
+				'declarators', 'arguments', 'callee', 'initializer'
+			];
+			
+		for (const field of fieldsToCheck) {
+			if (Array.isArray(clone[field])) {
+				for (const item of clone[field]) {
+					if (item && typeof item === 'object') {
+						item.parent = clone;
+					}
+				}
+			} else if (clone[field] && typeof clone[field] === 'object') {
+				clone[field].parent = clone;
+			}
 		}
 		
 		return clone;
@@ -8882,9 +9087,6 @@ class Optimizer {
 		}*/
 		
 		switch (stmt.type) {
-			case 'ExpressionStatement':
-				// 表达式语句的副作用就是表达式本身
-				return stmt.expression ? stmt.expression : null;
 				
 			case 'CompoundStatement':
 				// 对于复合语句，提取所有有副作用的子语句
@@ -8899,7 +9101,7 @@ class Optimizer {
 							} else {
 								// 否则创建一个表达式语句
 								const exprStmt = new ASTNode('ExpressionStatement');
-								exprStmt.expression = preserved;
+								exprStmt.addChild(preserved);
 								sideEffectStatements.push(exprStmt);
 							}
 						}
@@ -8909,7 +9111,7 @@ class Optimizer {
 				if (sideEffectStatements.length === 0) {
 					return null;
 				} else if (sideEffectStatements.length === 1) {
-					return sideEffectStatements[0].expression || sideEffectStatements[0];
+					return sideEffectStatements[0].children[0] || sideEffectStatements[0];
 				} else {
 					const newCompound = ASTBuilder.compoundStatement();
 					newCompound.statements = sideEffectStatements;
@@ -9048,7 +9250,7 @@ class Optimizer {
 				if (conditionHasSideEffects && forStmt.test) {
 					// 将条件转换为表达式语句
 					const exprStmt = new ASTNode('ExpressionStatement');
-					exprStmt.expression = forStmt.test;
+					exprStmt.addChild(forStmt.test);
 					compoundStmt.statements.push(exprStmt);
 				}
 				
@@ -9089,7 +9291,7 @@ class Optimizer {
 				// 添加更新（但只执行一次）
 				if (forStmt.update) {
 					const updateStmt = new ASTNode('ExpressionStatement');
-					updateStmt.expression = forStmt.update;
+					updateStmt.addChild(forStmt.update);
 					compoundStmt.statements.push(updateStmt);
 				}
 				
@@ -9286,9 +9488,412 @@ class Optimizer {
 
 }
 
+// Compiler end, linker begin
+// (Written mainly on my own -- human programmer)
 
-// !! NOTICE: SINCE THIS, THERE ARE NOT-SYNCED CHANGES !!
-// (On campus)
+// Memory processor
+/*
+
+Pointer structure: [Device] + [Address]
+
+Reserved blocks:
+Block 0: Device pointer of the next block
+
+Stack structure:
+Block 0: Returning position of the function (the ones for `main` are in the registry)
+Block 1...: Parameters
+Further Blocks: Stack parameters
+Notice: Caller should clean the stack (like __cdecl).
+
+It should be guaranteed that the memories are continuously distributed!
+*/
+
+// Instruction manager comes first
+/*
+Input format:
+{
+	content: "instruct {1} {2} {3}",
+	referrer: [1..., 2..., 3...]
+}
+*/
+class Instruction {
+	constructor(instructSequence = []) {
+		if (instructSequence.length !== undefined) {
+			this.instructions = instructSequence;
+		} else {
+			this.instructions = [instructSequence];
+		}
+	}
+	
+	/**
+	 Connect 2 instruction types.
+	 @param other {Instruction}
+	 @return {Instruction} - this. This function modifies current instruction class.
+	 @remark This copies the object.
+	*/
+	concat(other) {
+		const currentLength = this.instructions.length;
+		other.instructions.forEach(stmt => {
+			this.instructions.push({
+				content: stmt.content,
+				referrer: stmt.referrer.map(refId => (refId + currentLength));
+			});
+		});
+		return this;
+	}
+	
+	output() {
+		return this.instructions.map(stmt => {
+			let code = stmt.content;
+			for (let i = 0; i < stmt.referrer.length; i++) {
+				let reg = new RegExp('\\{' + i + '\\}', 'g');
+				code = code.replace(reg, stmt.referrer[0]);
+			}
+			return code;
+		}).join("\n");
+	}
+	
+	size() {
+		return this.instructions.length;
+	}
+}
+
+class InstructionBuilder {
+	static set(target, value) {
+		return new Instruction({
+			content: `set ${target} ${value}`,
+			referrer: []
+		});
+	}
+	static op(type, target, value1, value2 = null) {
+		return new Instruction({
+			content: `op ${type} ${target} ${value1} ${value2}`,
+			referrer: []
+		});
+	}
+}
+
+// Combine logical components
+// (TODO)
+
+// Register function and generate corresponding function declaration
+// Notice that function positions are recorded by variables
+// (for more flexible jumpers)
+class FunctionRegisterer {
+	constructor() {
+		this.functionCollection = new Map();
+		this.callerId = 0;
+	}
+	
+	// stackSymbols are symbol entries
+	addFunction(name, body, stackSymbols = []) {
+		this.functionCollection.add(name, {
+			body: body,
+			stackSymbols: stackSymbols	// Currently reserved, as all variables are on the heap
+		});
+	}
+	
+	// Convention: functions are labeled through "_${name}"
+	getAllFunctionDecl() {
+		let result = new Instruction();
+		this.functionCollection.forEach((value, func) => {
+			let connector = new Instruction({
+				content: 'jump {0} always __x null',	// Instruction 2
+				referrer: [func.body.size() + 2]
+			});
+			connector.concat(func.body);
+			// ...
+			let header = new Instruction([
+				{
+					content: `set _${name} @counter`,
+					referrer: []
+				},
+				{
+					content: `op add _${name} _${name} 3`,	// Instruction 1
+					referrer: []
+				}
+			]);
+			result.concat(header);
+			result.concat(connector);
+		});
+		return result;
+	}
+	
+	/**
+	 * Get a function call instruction block.
+	 * @param name {string}
+	 * @param params {list of object: name, value}
+	 * @param memoryObject {MemoryManager}
+	 * @param fromMain {boolean}
+	 * @remark The return value will be stored in __returnA and __returnB (for pointer). These are set by the function itself
+	*/
+	getFunctionCall(name, params, memoryObject, fromMain = false) {
+		let result = new Instruction();
+		// Caller configuring the stack
+		// (storing returning point, if not from main)
+		let assignment;
+		if (!fromMain) {
+			memoryObject.pushStack();
+			assignment = memoryObject.assign("__stackpos_" + (this.callerId++);
+			result.concat(memoryObject.outputStorageOf(assignment, "__stackpos"));
+		}
+		result.concat(InstructionBuilder.set("__stackpos", "@counter"));
+		params.forEach(param => {
+			result.concat(InstructionBuilder.set(param.name, param.value));
+		});
+		result.concat(InstructionBuilder.op("add", "__stackpos", "__stackpos", 3));	// Instruction 1
+		result.concat(InstructionBuilder.set("@counter", name)); // Instruction 2 (caller)
+		// (Stack cleanup)
+		// Instruction 3 and sth else: continue the control flow
+		
+		// (set current return point)
+		if (!fromMain) {
+			memoryObject.popStack();
+			result.concat(memoryObject.outputFetchOf(assignment, "__stackpos"));
+		}
+		return result;
+	}
+}
+
+// This class also generates a few pieces
+// It is recommended to use scope path to describe variable 
+// This will raise exception for failed memory allocation
+class MemoryAllocationException {
+	constructor(varName = null, maxRemaining = null) {
+		this.varName = varName;
+		this.maxRemaining = maxRemaining;
+	}
+}
+
+class MemoryManager {
+	// Memory block structure: { name: ..., size: ... }
+	/*
+	Reserved information:
+	0 - Previous block
+	1 - Next block
+	2 - Block size
+	*/
+	constructor(memoryBlocks) {
+		this.memoryBlocks = memoryBlocks;
+		this.reservedSize = 3;
+		this.memoryPositionStack = [
+		{
+			block: 0,
+			position: this.reservedSize,
+			full: false
+		}
+		];
+		this.variableReference = new Map();
+	}
+	
+	// Services
+	
+	pushStack() {
+		this.memoryPositionStack.push({ ...this.currentState() });
+	}
+	
+	popStack() {
+		this.memoryPositionStack.pop();
+	}
+	
+	currentState() {
+		return this.memoryPositionStack[this.memoryPositionStack.length - 1];
+	}
+	
+	currentRemain() {
+		return this.memoryBlocks[this.currentState().block].size - this.currentState().position;
+	}
+	
+	assign(name, size) {
+		if (this.currentState().full) {
+			throw new MemoryAllocationException(name, 0);
+		}
+		const pos = { ...this.currentState() };
+		this.forwarding(size);
+		return pos;
+	}
+	
+	forwarding(size) {
+		let currentSize = size;
+		while (!this.currentState().full && currentSize > 0) {
+			if (this.currentRemain() <= currentSize) {
+				currentSize -= this.currentRemain();
+				this.skipToNextPage();	
+			} else {
+				this.currentState().position += currentSize;
+				currentSize = 0;
+			}
+		}
+		if (currentSize > 0) {
+			throw new MemoryAllocationException();
+		}
+	}
+	
+	skipToNextPage() {
+		if (this.currentState().block === this.memoryBlocks.length - 1) {
+			this.currentState().full = true;
+		} else {
+			this.currentState().block++;
+			this.currentState().position = this.reservedSize;
+		}
+	}
+	
+	// Instruction generation
+	// These all output lists
+	
+	// Internal function: for a constant address
+	outputStorageOf(position, variable) {
+		return new Instruction({
+			content: `write ${variable} ${this.memoryBlocks[position.block].name} ${position.position}$`,
+			referrer: []
+		});
+	}
+	
+	outputFetchOf(position, variable) {
+		return new Instruction({
+			content: `read ${variable} ${this.memoryBlocks[position.block].name} ${position.position}`,
+			referrer: []
+		});
+	}
+	
+	outputLinkInitializer() {
+		let result = new Instruction();
+		for (let i = 0; i < this.memoryBlocks.length; i++) {
+			result.concat(new Instruction({
+				content: 'write ' + (i === 0 ? 'null' : this.memoryBlocks[i-1].name) + ' ' + this.memoryBlocks[i].name + ' 0',
+				referrer: []
+			}));
+			result.concat(new Instruction({
+				content: 'write ' + (i === this.memoryBlocks.length - 1 ? 'null' : this.memoryBlocks[i+1].name) + ' ' + this.memoryBlocks[i].name + ' 1',
+				referrer: []
+			}));
+			result.concat(new Instruction({
+				content: 'write ' + this.memoryBlocks[i].size + ' ' + this.memoryBlocks[i].name + ' 2',
+				referrer: []
+			}));
+		}
+		return result;
+	}
+	
+	// This is a function for pointer, satisfying cdecl standard.
+	// Tested to be OK
+	// These two functions directly modify the pointers, so we don't use a 'ret'.
+	outputPointerForwardFunction(funcReg) {
+		/*
+		Logic: First read the remaining number and compare current step and the previous pointer. Add if not exceeding, or jump to next page.
+		*/
+		funcReg.addFunction('__pointerForward', new Instruction([
+		{
+			content: 'jump {0} lessThanEq __step 0',
+			referrer: [11]
+		},
+		{
+			content: 'read __block __ptrblock 2',
+			referrer: []
+		},
+		{
+			content: 'op sub __mxstep __block __ptrpos',
+			referrer: []
+		},
+		{
+			content: 'jump {0} greaterThanEq __step __mxstep',
+			referrer: [7]
+		},
+		{
+			content: 'op add __ptrpos __ptrpos __step',
+			referrer: []
+		},
+		{
+			content: 'set __step 0',
+			referrer: []
+		},
+		{
+			content: 'jump {0} always x false',
+			referrer: [11]
+		},
+		{
+			content: 'read __ptrblock __ptrblock 1',
+			referrer: []
+		},
+		{
+			content: 'op sub __step __step __mxstep',
+			referrer: []
+		},
+		{
+			content: `set __ptrpos ${this.reservedSize}`,
+			referrer: []
+		},
+		{
+			content: 'jump 0 always x false',
+			referrer: [0]
+		}]));
+	}
+	
+	outputPointerForwardCall(step, variable, funcReg) {
+		const caller = funcReg.getFunctionCall('__pointerForward', new Map([["__ptrpos", variable + '_pos'], ["__ptrblock", variable + '_block'], ["__step", step]]));
+		caller.concat(InstructionBuilder.set(variable + '_pos', "__ptrpos"));
+		caller.concat(InstructionBuilder.set(variable + '_block', "__ptrblock"));
+		return caller;
+	}
+	
+	outputPointerBackwardFunction(funcReg) {
+		// TODO: Backward pointers ...
+		funcReg.addFunction('__pointerBackward', new Instruction([
+		{
+			content: 'jump {0} lessThanEq __step 0',
+			referrer: [11]
+		},
+		{
+			content: 'read __block __ptrblock 2',	// Actually unused
+			referrer: []
+		},
+		{
+			content: `op sub __mxstep __ptrpos ${this.reservedSize}`,
+			referrer: []
+		},
+		{
+			content: 'jump {0} greaterThanEq __step __mxstep',
+			referrer: [7]
+		},
+		{
+			content: 'op sub __ptrpos __ptrpos __step',
+			referrer: []
+		},
+		{
+			content: 'set __step 0',
+			referrer: []
+		},
+		{
+			content: 'jump {0} always x false',
+			referrer: [11]
+		},
+		{
+			content: 'read __ptrblock __ptrblock 0',
+			referrer: []
+		},
+		{
+			content: 'op sub __step __step __mxstep',
+			referrer: []
+		},
+		{
+			content: `set __ptrpos ${this.reservedSize}`,
+			referrer: []
+		},
+		{
+			content: 'jump 0 always x false',
+			referrer: [0]
+		}]));
+	}
+	
+	outputPointerBackwardCall(step, variable, funcReg) {
+		const caller = funcReg.getFunctionCall('__pointerBackward', new Map([["__ptrpos", variable + '_pos'], ["__ptrblock", variable + '_block'], ["__step", step]]));
+		caller.concat(InstructionBuilder.set(variable + '_pos', "__ptrpos"));
+		caller.concat(InstructionBuilder.set(variable + '_block', "__ptrblock"));
+		return caller;
+	}
+}
+
+
 
 // 内建函数处理器
 // This should be written WITH code generator
@@ -9321,16 +9926,6 @@ class CodeGenerator extends CompilationPhase {
     generate(ast) {
         // 将AST转换为目标代码
         // 返回目标代码字符串数组
-    }
-    
-    // 内存管理方法
-	// (-- To prompt: it is about assigned MEMORY THAT WE USE)
-    allocateMemory(variable, size = 1) {
-        // 在内存块中分配空间
-    }
-    
-    freeMemory(variable) {
-        // 释放内存空间
     }
     
     // 变量管理
