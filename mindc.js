@@ -1688,6 +1688,7 @@ class Parser {
         return typeDef;
     }
 
+	
     // 修改struct/union成员解析，支持指针成员
     parseStructMember() {
         // 解析类型说明符
@@ -3406,6 +3407,10 @@ class SymbolEntry {
             this.type.qualifiers.push('const');
         }
     }
+
+	getAssemblySymbol() {
+		return this.scope.getPath() + "." + this.name;
+	}
 }
 
 // 作用域类
@@ -5224,6 +5229,14 @@ class Optimizer {
         
         // 3. 按作用域递归分析
         this.analyzeScope(this.globalScope);
+
+		// Do scope optimizing:
+		const optimizingScope = scope => {
+			// First optimize children scopes!
+			scope.children.forEach(child => optimizingScope(child));
+			this.optimizeScope(scope);
+		};
+		optimizingScope(this.globalScope);
 		
 		// 2. 删除无用函数
         this.removeUnusedFunctions();
@@ -5259,7 +5272,7 @@ class Optimizer {
         }
         
         // 进行作用域特定的优化
-        this.optimizeScope(scope);
+        //this.optimizeScope(scope);
         
         // 退出作用域
         this.exitScope();
@@ -5539,6 +5552,12 @@ class Optimizer {
     }
 
 	// Something might be to do here:
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 * @param {Object} info
+	 * @remark Notice: this also handles function pointers. 
+	 */
     analyzeIdentifier(node, info = null) {
         const scopePath = this.currentScope.lookupScopeOf(node.name).getPath();
         const variableUses = this.variableUses.get(scopePath);
@@ -5550,13 +5569,20 @@ class Optimizer {
         }
         
         // 检查是否为函数调用
+		// A function pointer
         const symbol = this.currentScope.lookup(node.name);
         if (symbol && symbol.kind === 'function') {
             // 函数调用统计在analyzeFunctionCall中处理
 			// Debug:
-			console.log('identifier being called on function: node:');
-			console.log(node);
+			//console.log('identifier being called on function: node:');
+			//console.log(node);
 			symbol.isAddressed = true;
+			const funcInfo = this.functionInfo.get(node.name);
+			this.recordFunctionCall(this.currentFunction.name ?? 'anonymous', node.name);
+			if (funcInfo) {
+				funcInfo.isAddressed = true;
+				funcInfo.canInline = false;
+			}
         }
     }
 
@@ -5601,6 +5627,13 @@ class Optimizer {
 		}
     }
 
+	recordFunctionCall(callerName, funcName) {
+		if (!this.functionCallGraph.has(callerName)) {
+			this.functionCallGraph.set(callerName, new Set());
+		}
+		this.functionCallGraph.get(callerName).add(funcName);
+	}
+
     analyzeFunctionCall(node, info = null) {
         if (node.callee.type === 'Identifier') {
             const funcName = node.callee.name;
@@ -5613,10 +5646,7 @@ class Optimizer {
                 // 记录调用关系
                 if (this.currentScope && this.currentScope.astNode) {
                     const callerName = this.currentFunction || 'anonymous';
-                    if (!this.functionCallGraph.has(callerName)) {
-                        this.functionCallGraph.set(callerName, new Set());
-                    }
-                    this.functionCallGraph.get(callerName).add(funcName);
+                    this.recordFunctionCall(callerName, funcName);
                 }
             }
         }
@@ -7125,6 +7155,10 @@ class Optimizer {
     // =============== 作用域优化 ===============
 
 	// New feature added in 2. conv
+	/**
+	 * @param {Scope} scope 
+	 * @bug Too many loops!
+	 */
     optimizeScope(scope) {
         const scopePath = scope.getPath();
         const variableUses = this.variableUses.get(scopePath) || new Map();
@@ -7137,17 +7171,34 @@ class Optimizer {
         this.constantPropagationInScope(scope, localConstants);
         
         // 3. 控制流优化（使用分析阶段收集的信息）
-		//this.optimizeControlFlowInScope(scope);
+		//this.optimizeControlFlowInScope(scope);	// Not implemented
 		
 		// 4. 死代码消除
 		this.deadCodeEliminationInScope(scope);
     }
 
+	/**
+	 * 
+	 * @param {Scope} scope 
+	 * @param {string} varName 
+	 */
+	variableCanBeRemoved(scope, varName) {
+		const symbol = scope.lookup(varName);
+		return (!symbol.isVolatile) && (!symbol.isAddressed);
+	}
+
+	/**
+	 * 
+	 * @param {Scope} scope 
+	 * @param {Object} variableUses 
+	 * @bug Maybe unused
+	 */
     removeUnusedVariablesInScope(scope, variableUses) {
         const symbols = scope.getAllSymbols();
         
         symbols.forEach(symbol => {
             if (symbol.kind !== 'variable') return;
+			if (!this.variableCanBeRemoved(symbol)) return;
             
             const usage = variableUses.get(symbol.name);
             if (!usage) return;
@@ -7174,20 +7225,36 @@ class Optimizer {
 
     constantPropagationInScope(scope, localConstants) {
         if (!scope.astNode) return;
-        
+        this.currentScope = scope;
         // 遍历作用域内的所有节点，传播常量
         this.traverseAndReplaceConstants(scope.astNode, localConstants);
     }
 
+	getLiteral(value) {
+		if (typeof value === 'number') {
+			return ASTBuilder.numericLiteral(value);
+		} else if (typeof value === 'string') {
+			return ASTBuilder.stringLiteral(value);
+		} else {
+			return null;
+		}
+	}
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 * @param {Map<string, any>} constants 
+	 * @bug Notice its time complexity !
+	 */
     traverseAndReplaceConstants(node, constants) {
         if (!node) return;
-        
+        // Maybe not numeric?
+		let rightConstValue;
         switch (node.type) {
             case 'Identifier':
                 const constValue = constants.get(node.name);
                 if (constValue !== undefined) {
                     // 替换为常量值
-                    const replacement = ASTBuilder.numericLiteral(constValue);
+                    const replacement = this.getLiteral(constValue);
                     replacement.location = node.location;
                     this.replaceNode(node, replacement);
                     this.modified = true;
@@ -7198,11 +7265,19 @@ class Optimizer {
                 // 常量折叠
                 const leftValue = this.evaluateConstantExpression(node.left);
                 const rightValue = this.evaluateConstantExpression(node.right);
+				const isAssignment = node.operator.includes('=') && node.operator !== '==' && node.operator !== '!=' && node.operator !== '>=' && node.operator !== '<=';
                 
-                if (leftValue !== undefined && rightValue !== undefined) {
+				if (isAssignment) {
+					if (node.left.type === 'Identifier' && this.variableCanBeRemoved(node.left.name) && leftValue !== undefined) {
+						this.replaceNode(node, null);
+						break;
+					}
+				}
+
+                if ((isAssignment || leftValue !== undefined) && rightValue !== undefined) {
                     const result = this.evaluateBinaryOperation(node.operator, leftValue, rightValue);
                     if (result !== undefined) {
-                        const replacement = ASTBuilder.numericLiteral(result);
+                        const replacement = this.getLiteral(result);
                         replacement.location = node.location;
                         this.replaceNode(node, replacement);
                         this.modified = true;
@@ -7220,7 +7295,7 @@ class Optimizer {
                 if (argValue !== undefined) {
                     const result = this.evaluateUnaryOperation(node.operator, argValue);
                     if (result !== undefined) {
-                        const replacement = ASTBuilder.numericLiteral(result);
+                        const replacement = this.getLiteral(result);
                         replacement.location = node.location;
                         this.replaceNode(node, replacement);
                         this.modified = true;
@@ -7248,27 +7323,59 @@ class Optimizer {
                     // 条件为假的while循环，直接删除
                     this.replaceNode(node, null);
                     this.modified = true;
+					break;
                 }
                 break;
-			/*	
+			
 			case 'AssignmentExpression':
 				// It is possible that assign value is given a constant
-				const rightValue = this.evaluateConstantExpression(node.right);
-				if (rightValue !== undefined && !rightValue) {
+				if (node.left.type === 'Identifier' && constants.has(node.left.name) && this.variableCanBeRemoved(node.left.name)) {
+					this.replaceNode(node, null);
+					break;
+				}
+				rightConstValue = this.evaluateConstantExpression(node.right);
+				if (rightConstValue != null) {
 					// This is a constant, add it into constant set
+					this.replaceNode(node.right, this.getLiteral(rightConstValue));
 				} else {
 					// Consider removal
-					
+					this.traverseAndReplaceConstants(node.right, constants);
 				}
 				break;
-			*/
+			
+			case 'VariableDeclarator':
+				// Some problems are here
+				if (constants.has(node.name) && this.variableCanBeRemoved(node.name)) {
+					this.replaceNode(node, null);
+					break;
+				}
+				rightConstValue = this.evaluateConstantExpression(node.initializer);
+				if (rightConstValue != null) {
+					// This is a constant, add it into constant set
+					this.replaceNode(node.initializer, this.getLiteral(rightConstValue));
+				} else {
+					// Consider removal
+					this.traverseAndReplaceConstants(node.initializer, constants);
+				}
+				break;
+
 			case 'CompoundStatement':
 				node.statements.forEach(stmt => this.traverseAndReplaceConstants(stmt, constants));
         }
+
+		if (!node) {
+			return;	// Already modified
+		}
         
         // 递归处理子节点
         if (node.children) {
             node.children.forEach(child => this.traverseAndReplaceConstants(child, constants));
+        }
+		if (node.declarators) {
+            node.declarators.forEach(child => this.traverseAndReplaceConstants(child, constants));
+        }
+		if (node.functions) {
+            node.functions.forEach(child => this.traverseAndReplaceConstants(child, constants));
         }
         
         // 处理特殊节点的子节点
@@ -7289,6 +7396,10 @@ class Optimizer {
                 if (node.test) this.traverseAndReplaceConstants(node.test, constants);
                 if (node.update) this.traverseAndReplaceConstants(node.update, constants);
                 if (node.body) this.traverseAndReplaceConstants(node.body, constants);
+                break;
+			
+			case 'FunctionDeclaration':
+				if (node.body) this.traverseAndReplaceConstants(node.body, constants);
                 break;
         }
     }
@@ -7434,9 +7545,20 @@ class Optimizer {
                 return node.value;
             case 'Identifier':
 				// Try evaluating in current environment
-				const scopePath = this.currentScope.lookupScopeOf(node.name).getPath();
-				const localConstantRef = this.localConstants.get(scopePath).get(node.name);
-				return localConstantRef ?? this.constants.get(node.name);
+				const scope = this.currentScope.lookupScopeOf(node.name);
+				if (scope != null) {
+					const scopePath = scope.getPath();
+					const localConstantRef = this.localConstants.get(scopePath).get(node.name);
+					return localConstantRef ?? this.constants.get(node.name);
+				} else if (this.functionInfo.has(node.name)) {
+					// Consider this a function call
+					const funcInfo = this.functionInfo.get(node.name);
+					funcInfo.calls++;
+					funcInfo.isAddressed = true;
+					funcInfo.canInline = false;
+					const callerName = this.currentFunction || 'anonymous';
+                    this.recordFunctionCall(callerName, funcInfo.name);
+				}
             case 'BinaryExpression':
 			case 'AssignmentExpression':	// Manually added
                 const left = this.evaluateConstantExpression(node.left);
@@ -7642,6 +7764,7 @@ class Optimizer {
 	 */
 	replaceNode(oldNode, newNode) {
 		if (!oldNode || oldNode === newNode) return;
+		this.modified = true;
 		
 		const parent = oldNode.parent;
 		if (!parent) {
@@ -7905,17 +8028,24 @@ class Optimizer {
 				
 			default:
 				// 处理通用子节点
-				if (parent.children) {
-					const childIndex = parent.children.indexOf(oldNode);
+				const foundDeletionIn = seq => {
+					const childIndex = seq.indexOf(oldNode);
 					if (childIndex !== -1) {
 						if (newNode) {
 							newNode.parent = parent;
-							parent.children[childIndex] = newNode;
+							seq[childIndex] = newNode;
 						} else {
-							parent.children.splice(childIndex, 1);
+							seq.splice(childIndex, 1);
 						}
-						return;
+						return true;
 					}
+					return false;
+				};
+				if (parent.children) {
+					foundDeletionIn(parent.children);
+				}
+				if (parent.declarators) {
+					foundDeletionIn(parent.declarators);
 				}
 				break;
 		}
@@ -9518,6 +9648,7 @@ Input format:
 */
 class Instruction {
 	constructor(instructSequence = []) {
+		//this.isInstructionGroup = true;
 		if (instructSequence.length !== undefined) {
 			this.instructions = instructSequence;
 		} else {
@@ -9536,7 +9667,7 @@ class Instruction {
 		other.instructions.forEach(stmt => {
 			this.instructions.push({
 				content: stmt.content,
-				referrer: stmt.referrer.map(refId => (refId + currentLength));
+				referrer: stmt.referrer.map(refId => (refId + currentLength))
 			});
 		});
 		return this;
@@ -9586,17 +9717,41 @@ class FunctionRegisterer {
 	}
 	
 	// stackSymbols are symbol entries
+	/**
+	 * 
+	 * @param {string} name 
+	 * @param {Instruction} body 
+	 * @param {List<SymbolEntry>} stackSymbols 
+	 */
 	addFunction(name, body, stackSymbols = []) {
+		let stackTotal = 0;
+		stackSymbols.forEach(element => {
+			stackTotal += element.size;
+		});
 		this.functionCollection.add(name, {
 			body: body,
-			stackSymbols: stackSymbols	// Currently reserved, as all variables are on the heap
+			stackSymbols: stackSymbols,
+			stackTotal: stackTotal
 		});
+	}
+
+	/**
+	 * @param {MemoryManager} memoryObject The manager shall be after heap memory allocation
+	 * @remark This adds stack initializer, etc.
+	 */
+	getSystemInitializer(memoryObject) {
+		const memoryState = memoryObject.currentState();
+		const header = new Instruction([
+			InstructionBuilder.set('__stackframe_block', memoryState.block),
+			InstructionBuilder.set('__stackframe_pos', memoryState.position)
+		]);
+		return header;
 	}
 	
 	// Convention: functions are labeled through "_${name}"
 	getAllFunctionDecl() {
 		let result = new Instruction();
-		this.functionCollection.forEach((value, func) => {
+		this.functionCollection.forEach((name, func) => {
 			let connector = new Instruction({
 				content: 'jump {0} always __x null',	// Instruction 2
 				referrer: [func.body.size() + 2]
@@ -9626,16 +9781,34 @@ class FunctionRegisterer {
 	 * @param memoryObject {MemoryManager}
 	 * @param fromMain {boolean}
 	 * @remark The return value will be stored in __returnA and __returnB (for pointer). These are set by the function itself
+	 * @todo MODIFY THE HEAPSTACK ASSIGNMENT !!!
 	*/
 	getFunctionCall(name, params, memoryObject, fromMain = false) {
+		const refFunction = this.functionCollection.get(name);
+		if (!refFunction) {
+			return new Instruction();
+		}
 		let result = new Instruction();
 		// Caller configuring the stack
 		// (storing returning point, if not from main)
 		let assignment;
 		if (!fromMain) {
 			memoryObject.pushStack();
-			assignment = memoryObject.assign("__stackpos_" + (this.callerId++);
-			result.concat(memoryObject.outputStorageOf(assignment, "__stackpos"));
+			// Consider configuring heap memories as required
+			// For each symbol, create a hidden pointer for it
+			let heapPreparation = new Instruction();
+			refFunction.stackSymbols.forEach(symbol => {
+				// So pointer-forward and -backward can't have stack symbols!
+				const memFwdCall = memoryObject.outputPointerForwardCall(symbol.size, '__stackframe', this);
+				heapPreparation.concat(new Instruction([
+					InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_block`, '__stackframe_block'),
+					InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_pos`, '__stackframe_pos')
+				]));
+				heapPreparation.concat(memFwdCall);
+			});
+			//assignment = memoryObject.assign("__stackpos_" + (this.callerId++));
+			//result.concat(memoryObject.outputStorageOf(assignment, "__stackpos"));
+			result.concat(heapPreparation);
 		}
 		result.concat(InstructionBuilder.set("__stackpos", "@counter"));
 		params.forEach(param => {
