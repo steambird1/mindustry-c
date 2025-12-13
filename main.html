@@ -8,6 +8,13 @@
 	<script>
 	
 	function do_compile() {
+		const memory = [
+			new MemoryBlock('cell1', 64),
+			new MemoryBlock('cell2', 64),
+			new MemoryBlock('cell3', 64),
+			new MemoryBlock('cell4', 64)
+		];
+		var compiler = new Compiler(memory);
 		var txt = document.getElementById('txt').value;
 		// debug..
 		
@@ -29,15 +36,31 @@
 			}
 		*/
 		
-			var optimizer = new Optimizer();
-			var opt = optimizer.optimize(result.ast);
-			console.log(opt);
-			if (opt.success) {
-				var further = new SemanticAnalyzer();
-				further.analyze(opt.ast);
-				console.log(further);
+			
+			var further = new SemanticAnalyzer();
+			compiler.SemanticAnalyzer = further;
+			further.analyze(result.ast);
+			console.log(further);
+			
+			if (further.errors.length == 0) {
+				var optm = new Optimizer();
+				var optresult = optm.optimize(further, result.ast);
+				console.log(optresult);
+				console.log(optm);
+				//console.log(result.ast);
+				if (optresult.success) {
+					var cg = new CodeGenerator(compiler);
+					var finalize = cg.generate(optresult.ast);
+					console.log(finalize);
+					console.log("===========================================");
+					finalize.result.isDebug = false;
+					const out = finalize.result.output();
+					console.log(out);
+					document.getElementById('result').value = out.join('\n');
+				}
 			}
-		
+			
+			// TODO: Re-analyze for each successful optimizion
 		}
 	}
 	

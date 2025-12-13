@@ -138,9 +138,29 @@ const ASTNodeType = {
 	DELETED: 'DeletedStatement'
 };
 
+class AttributeClass {
+	constructor() {
+		this._attributes = new Map();
+	}
+
+	setAttribute(key, value) {
+        this._attributes.set(key, value);
+        return this;
+    }
+    
+    getAttribute(key) {
+        return this._attributes.get(key);
+    }
+    
+    hasAttribute(key) {
+        return this._attributes.has(key);
+    }
+}
+
 // AST节点基类
-class ASTNode {
+class ASTNode extends AttributeClass {
     constructor(type, location = null) {
+		super();
         this.type = type;
         this.location = location; // { start: { line, column }, end: { line, column } }
         this.parent = null;
@@ -169,19 +189,6 @@ class ASTNode {
         return this.children.slice();
     }
     
-    setAttribute(key, value) {
-        this._attributes.set(key, value);
-        return this;
-    }
-    
-    getAttribute(key) {
-        return this._attributes.get(key);
-    }
-    
-    hasAttribute(key) {
-        return this._attributes.has(key);
-    }
-    
     // 遍历方法
     traverse(visitor, depth = 0) {
         visitor(this, depth);
@@ -201,6 +208,23 @@ class ASTNode {
     
     toString() {
         return `${this.type}${this.location ? ` at ${this.location.start.line}:${this.location.start.column}` : ''}`;
+    }
+}
+
+// 编译阶段基类
+class CompilationPhase {
+    constructor(compiler) {
+        this.compiler = compiler;
+        this.errors = [];
+        this.warnings = [];
+    }
+    
+    addError(message, line = null) {
+        this.errors.push({ message, line });
+    }
+    
+    addWarning(message, line = null) {
+        this.warnings.push({ message, line });
     }
 }
 
@@ -408,6 +432,7 @@ class TypeSpecifierNode extends ASTNode {
         super(ASTNodeType.TYPE_SPECIFIER);
         this.typeName = typeName;
         this.qualifiers = []; // 类型限定符（const, volatile）
+		this.storageClass = null;
         this.pointerDepth = 0; // 指针深度
         this.pointerQualifiers = []; // 指针限定符
 		this.isFunctionType = false;
@@ -623,7 +648,7 @@ class ASTBuilder {
 }
 
 // AST访问者模式基类
-class ASTVisitor {
+class ASTVisitor extends CompilationPhase {
     visit(node) {
 		// This modification is manually done.
 		let extracted = node.type;
@@ -657,23 +682,6 @@ class SymbolTableEntry {
         this.value = value;
         this.memoryLocation = null; // 在内存块中的位置
         this.isGlobal = false;
-    }
-}
-
-// 编译阶段基类
-class CompilationPhase {
-    constructor(compiler) {
-        this.compiler = compiler;
-        this.errors = [];
-        this.warnings = [];
-    }
-    
-    addError(message, line = null) {
-        this.errors.push({ message, line });
-    }
-    
-    addWarning(message, line = null) {
-        this.warnings.push({ message, line });
     }
 }
 
@@ -855,7 +863,7 @@ const KEYWORDS = {
     'const': TokenType.CONST,
     'continue': TokenType.CONTINUE,
     'default': TokenType.DEFAULT,
-    'do': TokenType.DO,
+    'do': TokenType.DO,	/* Do-while support not implemented right now */
     'double': TokenType.DOUBLE,
     'else': TokenType.ELSE,
     'enum': TokenType.ENUM,
@@ -1768,6 +1776,8 @@ class Parser {
         }
 		*/
 		
+		const storageTokens = [TokenType.STATIC, TokenType.REGISTER];
+
 		const typeTokens = [
             TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID,
             TokenType.DOUBLE, TokenType.LONG, TokenType.SHORT, TokenType.SIGNED, TokenType.UNSIGNED,
@@ -1796,6 +1806,12 @@ class Parser {
                 //return typeNode;
             }
         }
+
+		for (const storageToken of storageTokens) {
+			if (qualifiers.includes(storageToken)) {
+				typeNode.storageClass = storageToken;
+			}
+		}
 
         // 特殊类型：device 和 null_t
         if (checkSpecialTypes && this.matchToken(TokenType.IDENTIFIER)) {
@@ -1937,7 +1953,7 @@ class Parser {
 
     parseTypeQualifiers() {
         const qualifiers = [];
-        while (this.matchToken(TokenType.CONST) || this.matchToken(TokenType.VOLATILE)) {
+        while (this.matchToken(TokenType.STATIC) || this.matchToken(TokenType.REGISTER) || this.matchToken(TokenType.CONST) || this.matchToken(TokenType.VOLATILE)) {
             const qualifierToken = this.consumeToken();
             qualifiers.push(qualifierToken.value);
         }
@@ -2350,9 +2366,10 @@ class Parser {
     parseVariableDeclaration() {
         let type = this.parseTypeSpecifier();
         if (!type) return null;
-
+		
         const declarators = [];
 		const varDecl = ASTBuilder.variableDeclaration(type, []);
+		varDecl.storageClass = type.storageClass;
         do {
             const declarator = this.parseDeclarator(false);
 			
@@ -3252,6 +3269,26 @@ class Parser {
         const token = this.getCurrentToken();
 
         switch (token.type) {
+			// These cases handles builtin functions.
+			// Why aren't they identifiers?
+			case TokenType.ASM:
+			case TokenType.DRAW:
+			case TokenType.PRINT:
+			case TokenType.DRAWFLUSH:
+			case TokenType.PRINTFLUSH:
+			case TokenType.GETLINK:
+			case TokenType.CONTROL:
+			case TokenType.RADAR:
+			case TokenType.SENSOR:
+			case TokenType.SET:
+			case TokenType.OP:
+			case TokenType.LOOKUP:
+			case TokenType.WAIT:
+			case TokenType.STOP:
+			case TokenType.END:
+			case TokenType.JUMP:
+			case TokenType.READ:
+			case TokenType.WRITE:
             case TokenType.IDENTIFIER: {
                 this.consumeToken();
                 return ASTBuilder.identifier(token.value).setAttribute('location', token.location);
@@ -3386,10 +3423,13 @@ class SymbolEntry {
         this.writeCount = 0; // 写入次数
 
         this.memoryLocation = null;
-		this.accessThroughPointer = false;	// In-memory variable
+		this.accessThroughPointer = false;	// In-memory variable, must be accessed through memory blocks
+		this.implementAsPointer = false;	// This is true will mean that when getting value, it will return a pointer
+		// (for struct, union, pointer and array)
 
         this.isGlobal = false;
 		this.isRegister = false; // 标记是否为register变量
+		this.isStatic = false;
 		// Note: this is also available for functions:
 		// (for functions, once 'true', it can't be inlined !)
         this.isAddressed = false; // 标记是否被取地址
@@ -3493,6 +3533,7 @@ class TypeInfo {
         this.arraySize = null; // 对于数组类型，数组大小
         this.qualifiers = []; // 类型限定符（const, volatile）
 		this.functionTo = null;	// Pointing to what function for function type
+		this.memberReference = null;
     }
     
     isConst() {
@@ -3502,13 +3543,27 @@ class TypeInfo {
     isVolatile() {
         return this.qualifiers.includes('volatile');
     }
+
+	initializeReferenceTable() {
+		this.memberReference = new Map();	// Used only in generation
+		this.members.forEach(member => {
+			this.memberReference.set(member.name, member.offset);
+		});
+	}	
     
     toString() {
         let result = this.qualifiers.length > 0 ? this.qualifiers.join(' ') + ' ' : '';
         result += this.name;
-        if (this.kind === 'pointer' && this.pointerTo) {
-            result = this.pointerTo.toString() + '*';
+        if ((this.kind === 'pointer' || this.kind === 'array') && this.pointerTo) {
+            result += this.pointerTo.toString() + '*';
         }
+		if (this.type === 'array') {
+			result += `[${this.arraySize ?? ''}]`;
+		}
+		if (this.kind === 'function') {
+			result += '{' + this.functionTo.type.returnType.toString() + ' || ';
+			result += (this.functionTo.type.parameters.map(param => (param.type.toString()))).join(',') + '}';
+		}
         return result;
     }
 }
@@ -3722,35 +3777,38 @@ class SemanticAnalyzer extends ASTVisitor {
         const voidPtrType = new TypeInfo('void*', 'pointer', 2);
         voidPtrType.pointerTo = this.typeTable.get('void');
         this.typeTable.set('void*', voidPtrType);
+		const charPtrType = new TypeInfo('char*', 'pointer', 2);
+        voidPtrType.pointerTo = this.typeTable.get('char');
+        this.typeTable.set('char*', charPtrType);
     }
 
     initializeBuiltinFunctions() {
 		// TODO: Must be modified...
         const builtins = [
-            { name: 'draw', returnType: 'void', parameters: ['char*'] }, // 操作名称 + 变长参数
-			{ name: 'print', returnType: 'void', parameters: [] }, // 变长参数
+            { name: 'draw', returnType: 'void', parameters: ['char*'], hasVarArgs: true }, // 操作名称 + 变长参数
+			{ name: 'print', returnType: 'void', parameters: [], hasVarArgs: true }, // 变长参数
 			{ name: 'drawflush', returnType: 'void', parameters: ['device'] },
 			{ name: 'printflush', returnType: 'void', parameters: ['device'] },
 			{ name: 'getlink', returnType: 'device', parameters: ['int'] },
-			{ name: 'control', returnType: 'void', parameters: ['char*', 'device'] }, // 操作名称 + 设备 + 变长参数
+			{ name: 'control', returnType: 'void', parameters: ['char*', 'device'], hasVarArgs: true }, // 操作名称 + 设备 + 变长参数
 			{ name: 'radar', returnType: 'int', parameters: ['char*', 'char*', 'char*', 'char*', 'int'] },
 			{ name: 'sensor', returnType: 'int', parameters: ['device', 'int'] },
-			{ name: 'set', returnType: 'void', parameters: [] }, // 特殊处理
-			{ name: 'op', returnType: 'void', parameters: [] }, // 特殊处理
+			{ name: 'set', returnType: 'void', parameters: [], hasVarArgs: true, special: 'set' }, // 特殊处理
+			{ name: 'op', returnType: 'void', parameters: [], hasVarArgs: true, special: 'op' }, // 特殊处理
 			{ name: 'lookup', returnType: 'int', parameters: ['char*', 'int'] },
 			{ name: 'wait', returnType: 'void', parameters: ['int'] },
 			{ name: 'stop', returnType: 'void', parameters: [] },
 			{ name: 'end', returnType: 'void', parameters: [] },
-			{ name: 'jump', returnType: 'void', parameters: [] }, // 特殊处理
-			{ name: 'read', returnType: 'void', parameters: [] }, // 特殊处理
-			{ name: 'write', returnType: 'void', parameters: [] }, // 特殊处理
-			{ name: 'asm', returnType: 'void', parameters: ['char*'] } // TODO: I'm unsure about whether this can be correctly done now.
+			{ name: 'jump', returnType: 'void', parameters: [], hasVarArgs: true, special: 'jump' }, // 特殊处理
+			{ name: 'read', returnType: 'void', parameters: [], special: 'read'}, // 特殊处理
+			{ name: 'write', returnType: 'void', parameters: [], special: 'write'}, // 特殊处理
+			{ name: 'asm', returnType: 'void', parameters: ['char*'], special: 'asm'} // TODO: I'm unsure about whether this can be correctly done now.
         ];
 
         builtins.forEach(func => {
             const symbol = new SymbolEntry(
                 func.name,
-                { returnType: func.returnType, parameters: func.parameters },
+                { returnType: func.returnType, parameters: func.parameters, hasVarArgs: func.hasVarArgs ?? false, special: func.special ?? null },
                 this.currentScope,
                 'function'
             );
@@ -4060,8 +4118,8 @@ class SemanticAnalyzer extends ASTVisitor {
 
     visitProgram(node) {
         // 遍历所有全局声明和函数
+		node.globalDeclarations.forEach(decl => this.visit(decl));
         node.functions.forEach(func => this.visit(func));
-        node.globalDeclarations.forEach(decl => this.visit(decl));
     }
 
     visitFunctionDeclaration(node) {
@@ -4131,6 +4189,12 @@ class SemanticAnalyzer extends ASTVisitor {
     }
 
 	// Modified on 1 Dec, to be verified
+	// This function has manual changes!!!
+	/**
+	 * 
+	 * @param {VariableDeclarationNode} node 
+	 * @returns 
+	 */
     visitVariableDeclaration(node) {
         const baseTypeName = this.getTypeNameFromTypeNode(node.type);
         const qualifiers = node.type.getAttribute('qualifiers') || [];
@@ -4159,6 +4223,7 @@ class SemanticAnalyzer extends ASTVisitor {
 
             // 创建变量类型（处理指针和数组）
             let finalType = varType;
+			let pointerAccess = false;
             
             // 处理指针
             if (declarator.pointerDepth > 0) {
@@ -4186,12 +4251,16 @@ class SemanticAnalyzer extends ASTVisitor {
             if (declarator.arrayDimensions && declarator.arrayDimensions.length > 0) {
                 let arrayType = finalType;
                 for (const dim of declarator.arrayDimensions.reverse()) {
-                    const arrType = new TypeInfo('', 'array', arrayType.size * (dim || 1));
+					if (dim.type !== 'NumericLiteral') {
+						this.addWarning('Array size must be literal, or memory space is unallocated');
+					}
+                    const arrType = new TypeInfo('', 'array', arrayType.size * ((typeof dim.value === 'number') ? dim.value : 1));
                     arrType.arraySize = dim;
                     arrType.pointerTo = arrayType;
                     arrayType = arrType;
                 }
                 finalType = arrayType;
+				//pointerAccess = true;
             }
 
             // 创建变量符号
@@ -4211,6 +4280,13 @@ class SemanticAnalyzer extends ASTVisitor {
 			if (storageClass === 'register') {
 				varSymbol.isRegister = true;
 			}
+			if (storageClass === 'static') {
+				varSymbol.isStatic = true;
+				varSymbol.accessThroughPointer = true;
+			}
+			if (storageClass == 'extern') {
+				varSymbol.accessThroughPointer = true;
+			}
 			
 			// 添加const和volatile信息
             const qualifiers = node.type.getAttribute('qualifiers') || [];
@@ -4219,6 +4295,8 @@ class SemanticAnalyzer extends ASTVisitor {
 			
 			// 检查是否为全局变量
             varSymbol.isGlobal = this.currentScope === this.globalScope;
+			// Meaning that the variable requires special memory space. This doesn't mean that it's a pointer itself!
+			varSymbol.accessThroughPointer = pointerAccess || (varSymbol.isVolatile && !varSymbol.isRegister);
 
             this.currentScope.addSymbol(varSymbol);
 
@@ -4246,6 +4324,30 @@ class SemanticAnalyzer extends ASTVisitor {
             }
         });
     }
+
+	/**
+	 * 
+	 * @param {NumericLiteralNode} node 
+	 */
+	visitNumericLiteral(node) {
+		node.dataType = this.typeTable.get('int');
+	}
+
+	/**
+	 * 
+	 * @param {StringLiteralNode} node 
+	 */
+	visitStringLiteral(node) {
+		node.dataType = this.typeTable.get('char*');
+	}
+
+	/**
+	 * 
+	 * @param {NullLiteralNode} node 
+	 */
+	visitNullLiteral(node) {
+		node.dataType = this.typeTable.get('null_t');
+	}
 
 	// 5th conversation
 	// 新增辅助方法：从类型节点中提取类型名称
@@ -4425,6 +4527,7 @@ class SemanticAnalyzer extends ASTVisitor {
 			const symbol = this.currentScope.lookup(node.name);
 			if (symbol && symbol.kind === 'variable') {
 				symbol.isAddressed = true;
+				symbol.accessThroughPointer = true;
 				
 				// 被取地址的变量不能放在寄存器中
 				if (symbol.isRegister) {
@@ -4443,6 +4546,7 @@ class SemanticAnalyzer extends ASTVisitor {
 				const symbol = this.currentScope.lookup(arg.name);
 				if (symbol && symbol.kind === 'variable') {
 					symbol.isAddressed = true;
+					//symbol.accessThroughPointer = true;
 				}
 			}
 		}
@@ -4981,16 +5085,18 @@ class SemanticAnalyzer extends ASTVisitor {
 		if (!leftType || !rightType) return false;
 		
         const arithmeticOps = ['+', '-', '*', '/', '%'];
+		const pointerOps = ['+', '-'];
         const comparisonOps = ['==', '!=', '<', '<=', '>', '>='];
         const logicalOps = ['&&', '||'];
         const bitwiseOps = ['&', '|', '^', '<<', '>>'];
+		const pointerCompatible = ['pointer', 'array'];
 
 		// No operator is allowed for struct / union
 		// (Manually written)
 		if (leftType.kind === 'struct' || leftType.kind === 'union' || leftType.kind === 'function')
 			return false;
 
-		if (rightType.kind === 'struct' || rightType.kind === 'union' || leftType.kind === 'function')
+		if (rightType.kind === 'struct' || rightType.kind === 'union' || rightType.kind === 'function')
 			return false;
 		// (End)
 		
@@ -4999,15 +5105,20 @@ class SemanticAnalyzer extends ASTVisitor {
 
         // 算术运算符要求数值类型
         if (arithmeticOps.includes(operator)) {
-			if (leftType.kind === 'pointer' && rightType.kind === 'pointer') {
-				return this.isTypeCompatible(leftType.pointerTo, rightType.pointerTo);
+			const leftIsPointer = pointerCompatible.includes(leftType.kind);
+			const rightIsPointer = pointerCompatible.includes(rightType.kind);
+			if (leftIsPointer && rightIsPointer) {
+				return false;
 			}
-            return this.isNumericType(leftType.name) && this.isNumericType(rightType.name);
+			if ((leftIsPointer || rightIsPointer) && (!pointerOps.includes(operator))) {
+				return false;
+			}
+            return (this.isNumericType(leftType.name) || leftIsPointer) && (this.isNumericType(rightType.name) || rightIsPointer);
         }
 
         // 比较运算符要求兼容类型
         if (comparisonOps.includes(operator)) {
-			if (leftType.kind === 'pointer' && rightType.kind === 'pointer') {
+			if (pointerCompatible.includes(leftType.kind) && pointerCompatible.includes(rightType.kind)) {
 				return this.isTypeCompatible(leftType.pointerTo, rightType.pointerTo);
 			}
             return this.isTypeCompatible(leftType, rightType);
@@ -5033,23 +5144,7 @@ class SemanticAnalyzer extends ASTVisitor {
 			return typeInfo;
 		}
         
-        let result = '';
-        if (typeInfo.qualifiers && typeInfo.qualifiers.length > 0) {
-            result += typeInfo.qualifiers.join(' ') + ' ';
-        }
-        
-        if (typeInfo.kind === 'pointer') {
-            result += this.typeToString(typeInfo.pointerTo) + '*';
-        } else if (typeInfo.kind === 'array') {
-            result += this.typeToString(typeInfo.pointerTo) + `[${typeInfo.arraySize || ''}]`;
-        } else if (typeInfo.kind === 'function') {
-			result += '{' + this.typeToString(typeInfo.functionTo.type.returnType) + ' || ';
-			result += (typeInfo.functionTo.type.parameters.map(param => (this.typeToString(param.type)))).join(',') + '}';
-		} else {
-            result += typeInfo.name;
-        }
-        
-        return result;
+        return typeInfo.toString();
     }
 
 	// Check for LVal beforehand
@@ -5226,8 +5321,8 @@ class Optimizer {
 			this.analyzedScopes.clear();
             iteration++;
 			// debug:
-			console.log(iteration + ' -th optimize:');
-			console.log(this);
+			//console.log(iteration + ' -th optimize:');
+			//console.log(this);
         } while (this.modified && iteration < maxIterations);
         
         return {
@@ -5235,7 +5330,8 @@ class Optimizer {
             ast: this.ast,
             errors: this.errors,
             warnings: this.warnings,
-            optimized: iteration > 1
+            optimized: iteration > 1,
+			total_iterations: iteration	/* Manually added for debug */
         };
     }
 
@@ -5592,7 +5688,7 @@ class Optimizer {
 			// Debug:
 			//console.log('identifier being called on function: node:');
 			//console.log(node);
-			symbol.isAddressed = true;
+			symbol.isAddressed = true;	// Function doesn't need 'access-through-pointer'
 			const funcInfo = this.functionInfo.get(node.name);
 			this.recordFunctionCall(this.currentFunction.name ?? 'anonymous', node.name);
 			if (funcInfo) {
@@ -7195,11 +7291,13 @@ class Optimizer {
 
 	/**
 	 * 
-	 * @param {Scope} scope 
 	 * @param {string} varName 
 	 */
-	variableCanBeRemoved(scope, varName) {
-		const symbol = scope.lookup(varName);
+	variableCanBeRemoved(varName) {
+		let symbol = varName;
+		if (typeof varName === 'string') {
+			symbol = this.currentScope.lookup(varName);
+		}
 		return (!symbol.isVolatile) && (!symbol.isAddressed);
 	}
 
@@ -7214,6 +7312,8 @@ class Optimizer {
         
         symbols.forEach(symbol => {
             if (symbol.kind !== 'variable') return;
+			if (symbol.accessThroughPointer) return;
+			if (symbol.type && symbol.type.type && symbol.type.type.kind !== 'basic') return;
 			if (!this.variableCanBeRemoved(symbol)) return;
             
             const usage = variableUses.get(symbol.name);
@@ -9656,20 +9756,19 @@ It should be guaranteed that the memories are continuously distributed!
 
 // Instruction manager comes first
 /*
-Input format:
-{
-	content: "instruct {1} {2} {3}",
-	referrer: [1..., 2..., 3...]
-}
+Instruction input must be done by instruction builder!
 */
-class Instruction {
-	constructor(instructSequence = []) {
+class Instruction extends AttributeClass {
+	constructor(instructSequence = [], instructionReturn = null) {
+		super();
+		this.isDebug = false;
 		this.isInstructionGroup = true;
 		if (instructSequence.length !== undefined) {
 			this.instructions = instructSequence;
 		} else {
 			this.instructions = [instructSequence];
 		}
+		this.instructionReturn = instructionReturn;	// What this instruction returns
 	}
 	
 	/**
@@ -9689,24 +9788,48 @@ class Instruction {
 		});
 		return this;
 		*/
+		if (!other) return;
+		//other.isDebug = other.isDebug || this.isDebug;
 		this.instructions.push(other);
+		return this;
 	}
 	
-	output(additionalLength = 0) {
-		let currentLength = 0;
-		return this.instructions.map(stmt => {
+	/**
+	 * 
+	 * @param {number} [additionalLength=0] 
+	 * @param {number} [additionalIteration=0] 
+	 * @returns 
+	 * @bug
+	 * @todo
+	 */
+	output(additionalLength = 0, additionalIteration = 0) {
+		this.currentLength = additionalLength;
+		let currentIteration = 0, correction = 0;
+		/*
+		if (this.instructions.length == 1 && this.instructions[0].isInstructionGroup) {
+			return this.instructions[0].output(additionalLength);
+		}
+			*/
+		return this.instructions.flatMap(stmt => {
 			if (stmt.isInstructionGroup) {
-				const combination = stmt.output(currentLength);
-				currentLength += combination.length;
+				stmt.isDebug = this.isDebug;
+				const combination = stmt.output(this.currentLength, correction);
+				this.currentLength += combination.length;
+				//currentIteration++;
+				//correction += combination.length - 1;
 				return combination;
 			} else {
 				let code = stmt.content;
 				for (let i = 0; i < stmt.referrer.length; i++) {
 					let reg = new RegExp('\\{' + i + '\\}', 'g');
-					code = code.replace(reg, stmt.referrer[i] + currentLength + additionalLength);
+					code = code.replace(reg, stmt.referrer[i] + additionalLength - additionalIteration);
 				}
-				currentLength++;
-				return code;
+				this.currentLength++;
+				//currentIteration++;
+				if (this.isDebug) {
+					return [`${this.currentLength} | ${code} | ref:${stmt.referrer.toString()},addlen:${additionalLength}`];
+				}
+				return [code];
 			}
 		});
 	}
@@ -9716,9 +9839,11 @@ class Instruction {
 			if (stmt.isInstructionGroup) {
 				stmt.replace(variable, value);
 			} else {
-				stmt.content = stmt.content.replace(new RegExp(`\\{${variable}\\}`, 'g'), value);
+				stmt.content = stmt.content.replace(new RegExp(`\\{${variable}\\}`, 'g'), `{${stmt.referrer.length}}`);
+				stmt.referrer.push(value);
 			}
-		})
+		});
+		return this;
 	}
 
 	size() {
@@ -9734,22 +9859,49 @@ class Instruction {
 	}
 }
 
+class SingleInstruction extends Instruction {
+	constructor(data, instructionReturn) {
+		super(data, instructionReturn);
+		this.content = data.content;
+		this.referrer = data.referrer;
+		this.isInstructionGroup = false;
+	}
+
+	concat(other) {
+		super.concat(other);
+		this.isInstructionGroup = true;
+	}
+
+}
+
 class InstructionBuilder {
-	static set(target, value) {
-		return new Instruction({
+	static set(target, value, referrer = []) {
+		return new SingleInstruction({
 			content: `set ${target} ${value}`,
-			referrer: []
+			referrer: referrer
 		});
 	}
-	static op(type, target, value1, value2 = null) {
-		return new Instruction({
+	static op(type, target, value1, value2 = null, referrer = []) {
+		return new SingleInstruction({
 			content: `op ${type} ${target} ${value1} ${value2}`,
+			referrer: referrer
+		});
+	}
+	static jump(target, condition, value1 = null, value2 = null, referrer = []) {
+		return new SingleInstruction({
+			content: `jump ${target} ${condition} ${value1 ?? 'x'} ${value2 ?? '0'}`,
+			referrer: referrer
+		});
+	}
+	static read(target, block, position) {
+		return new SingleInstruction({
+			content: `read ${target} ${block} ${position}`,
 			referrer: []
 		});
 	}
-	static jump(target, condition, value1 = null, value2 = null) {
-		return new Instruction({
-			content: `jump ${target} ${condition} ${value1 ?? 'x'} ${value2 ?? '0'}`,
+	static write(source, block, position) {
+		return new SingleInstruction({
+			content: `write ${source} ${block} ${position}`,
 			referrer: []
 		});
 	}
@@ -9775,17 +9927,18 @@ class FunctionRegisterer {
 	 * @param {Scope} scope The scope should be function scope
 	 * @param {List<SymbolEntry>} stackSymbols 
 	 */
-	addFunction(name, body, scope = null, givenStackSymbols = []) {
+	addFunction(name, body, scope = null, givenStackSymbols = [], specialBuiltin = false) {
 		let stackTotal = 0;
 		let stackSymbols = givenStackSymbols;
 		stackSymbols.push(new SymbolEntry('__stackpos', 'int', scope, 'variable', null, 1));
 		stackSymbols.forEach(element => {
 			if (element.size != null) stackTotal += element.size;
 		});
-		this.functionCollection.add(name, {
+		this.functionCollection.set(name, {
 			body: body,
 			stackSymbols: stackSymbols,
-			stackTotal: stackTotal
+			stackTotal: stackTotal,
+			specialBuiltin: specialBuiltin
 		});
 	}
 
@@ -9805,24 +9958,15 @@ class FunctionRegisterer {
 	// Convention: functions are labeled through "_${name}"
 	getAllFunctionDecl() {
 		let result = new Instruction();
-		this.functionCollection.forEach((name, func) => {
+		this.functionCollection.forEach((func, name) => {
 			const returner = new Instruction([InstructionBuilder.set('@counter', '__stackpos')]);
-			let connector = new Instruction({
-				content: 'jump {0} always __x null',	// Instruction 2
-				referrer: [func.body.size() + 2]
-			});
+			let connector = InstructionBuilder.jump('{0}', 'always', null, null, [func.body.size() + 2]);
 			connector.concat(func.body);
 			connector.concat(returner);	// As a component of cunction body
 			// ...
 			let header = new Instruction([
-				{
-					content: `set _${name} @counter`,
-					referrer: []
-				},
-				{
-					content: `op add _${name} _${name} 3`,	// Instruction 1
-					referrer: []
-				}
+				InstructionBuilder.set(`_${name}`, '@counter'),
+				InstructionBuilder.op('add', `_${name}`, `_${name}`, 3)
 			]);
 			result.concat(header);
 			result.concat(connector);
@@ -9832,10 +9976,10 @@ class FunctionRegisterer {
 	
 	/**
 	 * Get a function call instruction block.
-	 * @param name {string}
-	 * @param params {list of object: name, value}
-	 * @param memoryObject {MemoryManager}
-	 * @param fromMain {boolean}
+	 * @param {string} name
+	 * @param {list<Object{name, value}>} params Notice: Only for internal calls.
+	 * @param {MemoryManager} memoryObject
+	 * @param {boolean} fromMain
 	 * @remark The return value will be stored in __returnA and __returnB (for pointer). These are set by the function itself
 	 * @todo MODIFY THE HEAPSTACK ASSIGNMENT !!!
 	*/
@@ -9848,26 +9992,29 @@ class FunctionRegisterer {
 		// Caller configuring the stack
 		// (storing returning point, if not from main)
 		let assignment;
+		let stackPositionPointer = null;
 		if (!fromMain) {
-			memoryObject.pushStack();
 			// Consider configuring heap memories as required
 			// For each symbol, create a hidden pointer for it
 			let heapPreparation = new Instruction();
-			let stackPositionPointer = null;
 			refFunction.stackSymbols.forEach(symbol => {
 				// So pointer-forward and -backward can't have stack symbols!
+				if (symbol.name === '__stackpos') {
+					if (refFunction.specialBuiltin) {
+						heapPreparation.concat(InstructionBuilder.set('__internal_stackpos', '__stackpos'));
+						return;
+					}
+					stackPositionPointer = symbol.getAssemblySymbol();
+					heapPreparation.concat(memoryObject.outputPointerStorageOf(stackPositionPointer, '__stackpos'));
+				}
 				const memFwdCall = memoryObject.outputPointerForwardCall(symbol.size, '__stackframe', this);
-				
 				heapPreparation.concat(new Instruction([
 					InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_block`, '__stackframe_block'),
 					InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_pos`, '__stackframe_pos')
 				]));
-				if (symbol.name === '__stackpos') {
-					stackPositionPointer = symbol.getAssemblySymbol();
-					heapPreparation.concat(memoryObject.outputPointerStorageOf(stackPositionPointer, '__stackpos'));
-				}
 				heapPreparation.concat(memFwdCall);
 			});
+			
 			//assignment = memoryObject.assign("__stackpos_" + (this.callerId++));
 			//result.concat(memoryObject.outputStorageOf(assignment, "__stackpos"));
 			result.concat(heapPreparation);
@@ -9883,9 +10030,12 @@ class FunctionRegisterer {
 		// Instruction 3 and sth else: continue the control flow
 		// !!!! Function return will be responsible for setting @counter back !!!!
 		// (set current return point)
-		if (!fromMain && stackPositionPointer) {
-			//memoryObject.popStack();
-			result.concat(memoryObject.outputPointerFetchOf(stackPositionPointer, '__stackpos'));
+		if (!fromMain && (stackPositionPointer || refFunction.specialBuiltin)) {
+			if (refFunction.specialBuiltin) {
+				result.concat(InstructionBuilder.set('__stackpos', '__internal_stackpos'));
+			} else {
+				result.concat(memoryObject.outputPointerFetchOf(stackPositionPointer, '__stackpos'));
+			}
 		}
 		return result;
 	}
@@ -9901,6 +10051,65 @@ class MemoryAllocationException {
 	}
 }
 
+class MemoryBlock {
+	constructor(name, size) {
+		this.name = name;
+		this.size = size;
+	}
+}
+
+const MEMORY_RESERVE_SIZE = 4;
+
+class MemoryBlockInfo {
+	constructor(block, position, full, parent = null) {
+		this.block = block;
+		this.position = position;
+		this.full = full;
+		this.parent = parent;
+		this.reservedSize = MEMORY_RESERVE_SIZE;
+	}
+
+	duplicate() {
+		return new MemoryBlockInfo(this.block, this.position, this.full, this.parent);
+	}
+
+	currentRemain() {
+		if (this.parent) return this.parent.currentRemain();
+		else return Infinity;
+	}
+
+	skipToNextPage() {
+		if (this.parent) {
+			if (this.block === this.parent.memoryBlocks.length - 1) {
+				this.full = true;
+			} else {
+				this.block++;
+				this.position = this.reservedSize;
+			}
+		} else {
+			throw new MemoryAllocationException();
+		}
+		return this;
+	}
+
+	forwarding(size) {
+		let currentSize = size;
+		while (!this.full && currentSize > 0) {
+			if (this.currentRemain() <= currentSize) {
+				currentSize -= this.currentRemain();
+				this.skipToNextPage();	
+			} else {
+				this.position += currentSize;
+				currentSize = 0;
+			}
+		}
+		if (currentSize > 0) {
+			throw new MemoryAllocationException();
+		}
+		return this;
+	}
+}
+
 class MemoryManager {
 	// Memory block structure: { name: ..., size: ... }
 	/*
@@ -9911,14 +10120,8 @@ class MemoryManager {
 	*/
 	constructor(memoryBlocks) {
 		this.memoryBlocks = memoryBlocks;
-		this.reservedSize = 3;
-		this.memoryPositionStack = [
-		{
-			block: 0,
-			position: this.reservedSize,
-			full: false
-		}
-		];
+		this.reservedSize = MEMORY_RESERVE_SIZE;
+		this.memoryPositionStack = [new MemoryBlockInfo(0, this.reservedSize, false)];
 		this.variableReference = new Map();
 	}
 	
@@ -9944,34 +10147,17 @@ class MemoryManager {
 		if (this.currentState().full) {
 			throw new MemoryAllocationException(name, 0);
 		}
-		const pos = { ...this.currentState() };
+		const pos = this.currentState().duplicate();
 		this.forwarding(size);
 		return pos;
 	}
 	
 	forwarding(size) {
-		let currentSize = size;
-		while (!this.currentState().full && currentSize > 0) {
-			if (this.currentRemain() <= currentSize) {
-				currentSize -= this.currentRemain();
-				this.skipToNextPage();	
-			} else {
-				this.currentState().position += currentSize;
-				currentSize = 0;
-			}
-		}
-		if (currentSize > 0) {
-			throw new MemoryAllocationException();
-		}
+		this.currentState().forwarding(size);
 	}
 	
 	skipToNextPage() {
-		if (this.currentState().block === this.memoryBlocks.length - 1) {
-			this.currentState().full = true;
-		} else {
-			this.currentState().block++;
-			this.currentState().position = this.reservedSize;
-		}
+		this.currentState().skipToNextPage();
 	}
 	
 	// Instruction generation
@@ -9979,39 +10165,24 @@ class MemoryManager {
 	
 	// Internal function: for a constant address
 	outputStorageOf(position, variable) {
-		return new Instruction({
-			content: `write ${variable} ${this.memoryBlocks[position.block].name} ${position.position}$`,
-			referrer: []
-		});
+		return InstructionBuilder.write(variable, this.memoryBlocks[position.block].name, position.position);
 	}
 	
 	outputFetchOf(position, variable) {
-		return new Instruction({
-			content: `read ${variable} ${this.memoryBlocks[position.block].name} ${position.position}`,
-			referrer: []
-		});
+		return InstructionBuilder.read(variable, this.memoryBlocks[position.block].name, position.position);
 	}
 
 	outputPointerStorageOf(pointer, data) {
-		return new Instruction([
-			{
-				content: `write ${data} ${pointer}_block ${pointer}_pos`,
-				referrer: []
-			}
-		]);
+		return InstructionBuilder.write(data, `${pointer}_block`, `${pointer}_pos`);
 	}
 
 	outputPointerFetchOf(pointer, data) {
-		return new Instruction([
-			{
-				content: `read ${data} ${pointer}_block ${pointer}_pos`,
-				referrer: []
-			}
-		]);
+		return InstructionBuilder.read(data, `${pointer}_block`, `${pointer}_pos`);
 	}
 	
 	outputLinkInitializer() {
 		let result = new Instruction();
+		let baseAddress = 0;
 		for (let i = 0; i < this.memoryBlocks.length; i++) {
 			result.concat(new Instruction({
 				content: 'write ' + (i === 0 ? 'null' : this.memoryBlocks[i-1].name) + ' ' + this.memoryBlocks[i].name + ' 0',
@@ -10025,6 +10196,11 @@ class MemoryManager {
 				content: 'write ' + this.memoryBlocks[i].size + ' ' + this.memoryBlocks[i].name + ' 2',
 				referrer: []
 			}));
+			result.concat(new Instruction({
+				content: 'write ' + baseAddress + ' ' + this.memoryBlocks[i].name + ' 3',
+				referrer: []
+			}));
+			baseAddress += this.memoryBlocks[i].size - this.reservedSize;
 		}
 		return result;
 	}
@@ -10037,54 +10213,22 @@ class MemoryManager {
 		Logic: First read the remaining number and compare current step and the previous pointer. Add if not exceeding, or jump to next page.
 		*/
 		funcReg.addFunction('__pointerForward', new Instruction([
-		{
-			content: 'jump {0} lessThanEq __step 0',
-			referrer: [11]
-		},
-		{
-			content: 'read __block __ptrblock 2',
-			referrer: []
-		},
-		{
-			content: 'op sub __mxstep __block __ptrpos',
-			referrer: []
-		},
-		{
-			content: 'jump {0} greaterThanEq __step __mxstep',
-			referrer: [7]
-		},
-		{
-			content: 'op add __ptrpos __ptrpos __step',
-			referrer: []
-		},
-		{
-			content: 'set __step 0',
-			referrer: []
-		},
-		{
-			content: 'jump {0} always x false',
-			referrer: [11]
-		},
-		{
-			content: 'read __ptrblock __ptrblock 1',
-			referrer: []
-		},
-		{
-			content: 'op sub __step __step __mxstep',
-			referrer: []
-		},
-		{
-			content: `set __ptrpos ${this.reservedSize}`,
-			referrer: []
-		},
-		{
-			content: 'jump 0 always x false',
-			referrer: [0]
-		}]));
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [11]),
+			InstructionBuilder.read('__block', '__ptrblock', 2),
+			InstructionBuilder.op('sub', '__mxstep', '__block', '__ptrpos'),
+			InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [7]),
+			InstructionBuilder.op('add', '__ptrpos', '__ptrpos', '__step'),
+			InstructionBuilder.set('__step', 0),
+			InstructionBuilder.jump('{0}', 'always', null, null, [11]),
+			InstructionBuilder.read('__ptrblock', '__ptrblock', 1),
+			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),
+			InstructionBuilder.set('__ptrpos', this.reservedSize),
+			InstructionBuilder.jump('{0}', 'always', null, null, [0])
+		]), null, [], true);
 	}
 	
 	outputPointerForwardCall(step, variable, funcReg) {
-		const caller = funcReg.getFunctionCall('__pointerForward', new Map([["__ptrpos", variable + '_pos'], ["__ptrblock", variable + '_block'], ["__step", step]]));
+		const caller = funcReg.getFunctionCall('__pointerForward', new Map([["__ptrpos", variable + '_pos'], ["__ptrblock", variable + '_block'], ["__step", step]]), this);
 		caller.concat(InstructionBuilder.set(variable + '_pos', "__ptrpos"));
 		caller.concat(InstructionBuilder.set(variable + '_block', "__ptrblock"));
 		return caller;
@@ -10093,54 +10237,23 @@ class MemoryManager {
 	outputPointerBackwardFunction(funcReg) {
 		// TODO: Backward pointers ...
 		funcReg.addFunction('__pointerBackward', new Instruction([
-		{
-			content: 'jump {0} lessThanEq __step 0',
-			referrer: [11]
-		},
-		{
-			content: 'read __block __ptrblock 2',	// Actually unused
-			referrer: []
-		},
-		{
-			content: `op sub __mxstep __ptrpos ${this.reservedSize}`,
-			referrer: []
-		},
-		{
-			content: 'jump {0} greaterThanEq __step __mxstep',
-			referrer: [7]
-		},
-		{
-			content: 'op sub __ptrpos __ptrpos __step',
-			referrer: []
-		},
-		{
-			content: 'set __step 0',
-			referrer: []
-		},
-		{
-			content: 'jump {0} always x false',
-			referrer: [11]
-		},
-		{
-			content: 'read __ptrblock __ptrblock 0',
-			referrer: []
-		},
-		{
-			content: 'op sub __step __step __mxstep',
-			referrer: []
-		},
-		{
-			content: `set __ptrpos ${this.reservedSize}`,
-			referrer: []
-		},
-		{
-			content: 'jump 0 always x false',
-			referrer: [0]
-		}]));
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [10]),
+
+			InstructionBuilder.op('sub', '__mxstep', '__ptrpos', this.reservedSize),
+			InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [6]),
+			InstructionBuilder.op('sub', '__ptrpos', '__ptrpos', '__step'),
+			InstructionBuilder.set('__step', 0),
+			InstructionBuilder.jump('{0}', 'always', null, null, [10]),
+			InstructionBuilder.read('__ptrblock', '__ptrblock', 0),
+			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),
+
+			InstructionBuilder.read('__ptrpos', '__ptrblock', 4),
+			InstructionBuilder.jump('{0}', 'always', null, null, [0])
+		]), null, [], true);
 	}
 	
 	outputPointerBackwardCall(step, variable, funcReg) {
-		const caller = funcReg.getFunctionCall('__pointerBackward', new Map([["__ptrpos", variable + '_pos'], ["__ptrblock", variable + '_block'], ["__step", step]]));
+		const caller = funcReg.getFunctionCall('__pointerBackward', new Map([["__ptrpos", variable + '_pos'], ["__ptrblock", variable + '_block'], ["__step", step]]), this);
 		caller.concat(InstructionBuilder.set(variable + '_pos', "__ptrpos"));
 		caller.concat(InstructionBuilder.set(variable + '_block', "__ptrblock"));
 		return caller;
@@ -10168,6 +10281,13 @@ class BuiltinFunctionHandler {
     // 其他内建函数...
 }
 
+class InternalGenerationFailure {
+	constructor(message, node = null) {
+		this.message = message;
+		this.node = node;
+	}
+}
+
 // 代码生成器
 class CodeGenerator extends ASTVisitor {
 	/**
@@ -10176,11 +10296,12 @@ class CodeGenerator extends ASTVisitor {
 	 */
     constructor(compiler) {
         super(compiler);
-		this.semantic = compiler.semanticAnalyzer;
+		this.semantic = compiler.SemanticAnalyzer;
 		this.registryId = 0;
         this.outputCode = new Instruction();
 		this.memory = new MemoryManager(compiler.memoryInfo);
 		this.functionManagement = new FunctionRegisterer();
+		this.currentScope = null;
 		this.errors = [];
 		this.warnings = [];
 	}
@@ -10191,16 +10312,34 @@ class CodeGenerator extends ASTVisitor {
 	 */
     generate(ast) {
         // 将AST转换为目标代码
-        let result = new Instruction();
-		if (ast.scope) this.processHeapMemory(ast.scope);
-		else this.warnings.push('Program has no global scope');
-		
-		result.concat(this.memory.outputLinkInitializer());
-		result.concat(this.functionManagement.getSystemInitializer());
-
-		// Register functions by processing its instructions
-
-		// Generate system entry
+        let result = new Instruction(), success = true;
+		try {
+			this.currentScope = this.semantic.globalScope;
+			if (ast.scope) this.processHeapMemory(ast.scope);
+			else this.addWarning('Program has no global scope');
+			/*
+			this.semantic.typeTable.forEach(elem => {
+				elem.initializeReferenceTable();
+			});
+			*/
+			result.concat(this.memory.outputLinkInitializer());
+			if (!this.compiler.config.getAttribute('noPointerFunction')) {
+				result.concat(this.memory.outputPointerForwardFunction(this.functionManagement));
+				result.concat(this.memory.outputPointerBackwardFunction(this.functionManagement));
+			}
+			result.concat(this.functionManagement.getSystemInitializer(this.memory));
+			result.concat(this.visit(ast));
+		} catch (error) {
+			success = false;
+			this.addError(`Internal parser error: ${error.message}\n${error.stack}`);
+		}
+		return {
+			success: success,
+			result: result,
+			errors: this.errors,
+			warnings: this.warnings,
+			memory: this.memory
+		}
     }
 
 	/**
@@ -10211,19 +10350,37 @@ class CodeGenerator extends ASTVisitor {
 	processHeapMemory(scope) {
 		scope.getAllSymbols().forEach(symbol => {
 			// Update symbol size information
-			switch (symbol.type) {
+			switch (symbol.kind) {
 				case 'variable':
 				case 'struct':
 				case 'union':
-					symbol.size = this.semantic.getTypeInfo(symbol.type).size;
+					const symbolType = symbol.type.type;
+					symbol.size = symbolType.size;
+					switch (symbolType.kind) {
+						case 'basic':
+						case 'device':
+						case 'null_t':
+							break;
+						case 'pointer':
+							symbol.size = 2;
+						case 'array':
+							symbol.implementAsPointer = true;
+							break;
+						case 'function':
+							break;
+						default:
+							// struct/union, etc.
+							symbol.implementAsPointer = true;
+							symbol.accessThroughPointer = true;	// Must be accessed through pointer
+					}
 					break;
-				
-				case 'pointer':
-					symbol.size = 2;
+				default:
 					break;
 			}
 			// Assign heap memory
-			symbol.memoryLocation = this.memory.assign(symbol.getAssemblySymbol(), symbol.size);
+			if (symbol.accessThroughPointer) {
+				symbol.memoryLocation = this.memory.assign(symbol.getAssemblySymbol(), symbol.size);
+			}
 		});
 		scope.children.forEach(child => {
 			this.processHeapMemory(child);
@@ -10233,22 +10390,38 @@ class CodeGenerator extends ASTVisitor {
 	/**
 	 * 
 	 * @param {SymbolEntry} symbol 
-	 * @return {Object { instruction: Instruction, name: string }} Instructions to execute BEFORE reading.
+	 * @param {boolean} [duplicate=false]
+	 * @return {Instruction} Instructions to execute BEFORE reading.
 	 * @remark Reading symbol through its original name.
 	 */
-	generateSymbolRead(symbol) {
-		if (symbol.accessThroughPointer) {
-			let temporary = this.getTempVariable();
-			return {
-				instruction: this.memory.outputPointerFetchOf(`${symbol.getAssemblySymbol()}.__pointer`, temporary),
-				name: temporary
-			};
-		} else {
-			return {
-				instruction: new Instruction(),
-				name: symbol.getAssemblySymbol()
-			};
+	generateSymbolRead(symbol, duplicate = false) {
+		let result;
+		if (!duplicate) {
+			return new Instruction([], symbol.getAssemblySymbol());
 		}
+		if (symbol.implementAsPointer) {
+			const temporary = this.getTempVariable();
+			if (symbol.accessThroughPointer) {
+				result = this.memory.outputFetchOf(symbol.memoryLocation, `${temporary}_block`);
+				result.concat(this.memory.outputFetchOf(symbol.memoryLocation.duplicate().forwarding(1), `${temporary}_ptr`))
+				result.instructionReturn = temporary;
+			} else {
+				result = new Instruction([
+					InstructionBuilder.set(`${temporary}_block`, `${symbol.getAssemblySymbol()}_block`),
+					InstructionBuilder.set(`${temporary}_pos`, `${symbol.getAssemblySymbol()}_pos`)
+				]);
+			}
+		} else if (symbol.accessThroughPointer) {
+			let temporary = this.getTempVariable();
+			result = this.memory.outputFetchOf(symbol.memoryLocation, temporary);
+			result.instructionReturn = temporary;
+		}else {
+			let temporary = this.getTempVariable();
+			result = InstructionBuilder.set(temporary, symbol.getAssemblySymbol());
+			result.instructionReturn = temporary;
+		}
+		
+		return result;
 	}
 
 	/**
@@ -10258,15 +10431,63 @@ class CodeGenerator extends ASTVisitor {
 	 * @return {Instruction}
 	 */
 	generateSymbolWrite(symbol, data) {
+		if (symbol.implementAsPointer) {
+			//throw new InternalGenerationFailure(`Pointer can't be directly written: ${symbol.name}`);
+			if (symbol.accessThroughPointer) {
+				return new Instruction([
+					this.memory.outputStorageOf(symbol.memoryLocation, `${data}_block`),
+					this.memory.outputStorageOf(symbol.memoryLocation.duplicate().forwarding(1), `${data}_pos`)
+				]);
+			} else {
+				return new Instruction([
+					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_block`, `${data}_block`),
+					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_ptr`, `${data}_ptr`)
+				]);
+			}
+		}
 		if (symbol.accessThroughPointer) {
-			return this.memory.outputPointerStorageOf(`${symbol.getAssemblySymbol()}.__pointer`, data);
+			return this.memory.outputStorageOf(symbol.memoryLocation, data);
 		} else {
 			return InstructionBuilder.set(symbol.getAssemblySymbol(), data);
 		}
 	}
-    
-	// Convention: Use '__expr_ret' for expression returning
 
+	/**
+	 * 
+	 * @param {ProgramNode} node 
+	 * @returns {Instruction}
+	 * @todo Add main() call!
+	 */
+	visitProgram(node) {
+		let result = new Instruction();
+		let mainSymbol = null;
+		node.functions.forEach(func => {
+			//result.concat();
+			// Check the scope that this function owns
+			const funcSymbol = this.currentScope.lookup(func.name);
+			if (func.name === 'main') {
+				mainSymbol = funcSymbol;
+			}
+			const funcBody = this.visit(func);
+			let stackSymbols = [];
+			funcSymbol.owningScope.getAllSymbols().forEach(symbol => {
+				// Symbol values
+				if (symbol.accessThroughPointer) {
+					stackSymbols.push(symbol.getAssemblySymbol());
+				}
+			});
+			this.functionManagement.addFunction(func.name, funcBody, this.currentScope, stackSymbols, func.name === 'main');
+		});
+		node.globalDeclarations.forEach(decl => result.concat(this.visit(decl)));
+		result.concat(this.functionManagement.getAllFunctionDecl());
+		if (mainSymbol) {
+			result.concat(this.functionManagement.getFunctionCall('main', new Map(), this.memory, true));
+		} else {
+			this.addWarning('No main function in program');
+		}
+		return result;
+	}
+    
 	/**
 	 * 
 	 * @param {FunctionDeclarationNode} node
@@ -10274,21 +10495,64 @@ class CodeGenerator extends ASTVisitor {
 	 * @remark This function doesn't do registration itself. It simply calls for body information.
 	 */
 	visitFunctionDeclaration(node) {
-		return this.visit(node.body);
+		let pushedScope = false;
+		if (node.scope) {
+			pushedScope = true;
+			this.currentScope = node.scope;
+		}
+		let body = this.visit(node.body);
+		body.replace('func_ret', body.size() + 1);
+		if (pushedScope) {
+			this.currentScope = this.currentScope.parent;
+		}
+		this.releaseTempVariable();
+		return body;
+	}
+
+	/**
+	 * 
+	 * @param {ReturnStatementNode} node 
+	 * @return {Instruction}
+	 * @remark '__return' is the result of function return !!
+	 */
+	visitReturnStatement(node) {
+		const result = this.visit(node.argument);
+		let stmt = new Instruction();
+		stmt.concat(result);
+		stmt.concat(InstructionBuilder.set("__return", result.instructionReturn));
+		this.releaseTempVariable();
+		stmt.concat(InstructionBuilder.jump('{func_ret}', 'always'));
+		return stmt;
 	}
 
 	visitCompoundStatement(node) {
 		let instruction = new Instruction();
-		node.statements.forEach(stmt => instruction.concat(this.visit(stmt)));
+		let pushedScope = false;
+		if (node.scope) {
+			pushedScope = true;
+			this.currentScope = node.scope;
+		}
+		node.statements.forEach(stmt => {
+			instruction.concat(this.visit(stmt));
+			this.releaseTempVariable();
+		});
+		if (pushedScope) {
+			this.currentScope = this.currentScope.parent;
+		}
 		return instruction;
 	}
 	/**
 	 * 
 	 * @param {ASTNode} node 
 	 */
-	visitExpression(node) {
+	visitExpressionStatement(node) {
 		let instruction = new Instruction();
-		node.children.forEach(stmt => instruction.concat(this.visit(stmt)));
+		node.children.forEach(stmt => {
+			this.releaseTempVariable();	// Split expressions won't affect each other
+			const result = this.visit(stmt);
+			instruction.concat(result);
+			instruction.instructionReturn = result.instructionReturn;
+		});
 		return instruction;
 	}
 
@@ -10300,25 +10564,502 @@ class CodeGenerator extends ASTVisitor {
 	 */
 	visitIfStatement(node) {
 		let result = new Instruction();
-		let test = this.visit(node.test);
-		result.concat(test);
 		let consequentProcessor = new Instruction();
 		let consequent = this.visit(node.consequent), alternateProcessor = new Instruction();
 		if (node.alternate) {
 			let alternate = this.visit(node.alternate);
-			alternateProcessor.concat(new Instruction({
-				content: `jump {0} always x -1`,
-				referrer: [alternate.size() + 1]
-			}));	// Skip alternate block if executing consequent
+			alternateProcessor.concat(InstructionBuilder.jump('{0}', 'always', null, null, [alternate.size() + 1]))// Skip alternate block if executing consequent
 		}
-		consequentProcessor.concat(new Instruction({
-			content: `jump {0} notEq __expr_ret true`,
-			referrer: [consequent.size() + 1 + (node.alternate != null ? 1 : 0)]
-		}));
+		let test = this.visit(node.test);
+		result.concat(test);
+		this.releaseTempVariable();
+		consequentProcessor.concat(InstructionBuilder.jump('{0}', 'notEq', test.instructionReturn, 'true', [consequent.size() + 1 + (node.alternate != null ? 1 : 0)]));
 		consequentProcessor.concat(consequent);
 		result.concat(consequentProcessor);
 		result.concat(alternateProcessor);
 		return result;
+	}
+
+	/**
+	 * 
+	 * @param {WhileStatementNode} node 
+	 */
+	visitWhileStatement(node) {
+		const test = this.visit(node.test);
+		
+		let connector = new Instruction();
+		let bodyProcessor = new Instruction();
+		bodyProcessor.concat(InstructionBuilder.jump('{0}', 'notEq', test.instructionReturn, 'true', [body.size() + 2]));
+		this.releaseTempVariable();
+		
+		const body = node.body ? this.visit(node.body) : new Instruction();
+		bodyProcessor.concat(body);
+		connector.concat(test);
+		connector.concat(bodyProcessor);
+		connector.concat(InstructionBuilder.jump('{0}', 'always', null, null, [0]));
+		// Replace 'continue' and 'break':
+		connector.replace('loop_continue', 0);
+		connector.replace('loop_break', connector.size() + 1);
+		return connector;
+	}
+
+	/**
+	 * 
+	 * @param {ForStatementNode} node 
+	 */
+	visitForStatement(node) {
+		let loopSystem = new Instruction();
+		const body = node.body ? this.visit(node.body) : new Instruction();
+		const update = node.update ? this.visit(node.update) : new Instruction();
+		this.releaseTempVariable();
+		if (node.init) {
+			loopSystem.concat(this.visit(node.init));
+			this.releaseTempVariable();
+		}
+		let bodyLoop = new Instruction();
+		bodyLoop.concat(body);
+		bodyLoop.concat(update);
+		bodyLoop.concat(InstructionBuilder.jump('{0}', 'always', null, null, [0]));
+		const test = node.test ? this.visit(node.test) : new Instruction();
+		loopSystem.concat(test);
+		loopSystem.concat(InstructionBuilder.jump('{0}', 'notEq', test.instructionReturn, 'true', [bodyLoop.size() + 1]));
+		this.releaseTempVariable();
+		loopSystem.concat(bodyLoop);
+		loopSystem.replace('loop_continue', 0);
+		loopSystem.replace('loop_break', loopSystem.size() + 1);
+		return loopSystem;
+	}
+
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 */
+	visitBreakStatement(node) {
+		return InstructionBuilder.jump('{loop_break}', 'always');
+	}
+
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 */
+	visitContinueStatement(node) {
+		return InstructionBuilder.jump('{loop_continue}', 'always');
+	}
+
+	/**
+	 * 
+	 * @param {VariableDeclarationNode} node 
+	 */
+	visitVariableDeclaration(node) {
+		let instruction = new Instruction();
+		node.declarators.forEach(stmt => {
+			instruction.concat(this.visit(stmt));
+			this.releaseTempVariable();
+		});
+		return instruction;
+	}
+
+	/**
+	 * 
+	 * @param {VariableDeclaratorNode} node 
+	 * @remark This has to do with many operations...
+	 */
+	visitVariableDeclarator(node) {
+		// Simple symbols can have direct lookup in scope
+		const symbol = this.currentScope.lookup(node.name);
+		if (!symbol) {
+			throw new InternalGenerationFailure(`Could not get symbol ${node.name}`, node);
+		}
+		const evaluation = node.initializer ? this.visit(node.initializer) : new Instruction();
+		let result = this.generateSymbolWrite(symbol, evaluation.instructionReturn ?? 'null');
+		this.releaseTempVariable();
+		return result;
+	}
+
+	/**
+	 * 
+	 * @param {string} pointer 
+	 * @returns {Instruction}
+	 */
+	castPointerToValue(pointer) {
+		let result = new Instruction();
+		const returner = this.getTempVariable();
+		result.concat(InstructionBuilder.read(returner, `${pointer}_block`, 4));
+		result.concat(InstructionBuilder.op('add', returner, `${pointer}_ptr`));
+		result.instructionReturn = returner;
+		return result;
+	}
+
+	/**
+	 * 
+	 * @param {BinaryExpressionNode} node 
+	 * @remark MUST CONSIDER: Clear up temporary staff in general expression processor
+	 * @todo Numeric operations should be more complex for pointers!
+	 * @todo !! With this pointer evaluation involved, strcmp() must be provided
+	 */
+	visitBinaryExpression(node) {
+		const operatorTranslation = new Map([['+', 'add'], ['-', 'sub'], ['*', 'mul'], ['/', 'div'], ['%', 'mod']]);
+		const comparerTranslation = new Map([['==', 'equal'], ['!=', 'notEqual'], ['<', 'lessThan'], ['>', 'greaterThan'], ['<=', 'lessThanEq'], ['>=', 'greaterThanEq']]);
+		const right = this.visit(node.right);
+		let result = new Instruction();
+		if (operatorTranslation.has(node.operator)) {
+			const leftIsPointer = node.left.dataType && node.left.dataType.kind === 'pointer';
+			const rightIsPointer = node.right.dataType && node.right.dataType.kind === 'pointer';
+			if (leftIsPointer || rightIsPointer) {
+				// TODO
+				const left = this.visit(node.left);
+				const duplicate = this.getTempVariable();
+				const pointerReferrer = leftIsPointer ? left.instructionReturn : right.instructionReturn;
+				result.concat(InstructionBuilder.set(`${duplicate}_block`, `${pointerReferrer}_block`));
+				result.concat(InstructionBuilder.set(`${duplicate}_ptr`, `${pointerReferrer}_ptr`));
+				switch (node.operator) {
+					case '+':
+						result.concat(this.memory.outputPointerForwardCall(leftIsPointer ? right.instructionReturn : left.instructionReturn, duplicate, this.functionManagement));
+						break;
+					case '-':
+						result.concat(this.memory.outputPointerBackwardCall(leftIsPointer ? right.instructionReturn : left.instructionReturn, duplicate, this.functionManagement));
+						break;
+					default:
+						throw new InternalGenerationFailure(`Unsupported operator for pointers: ${node.operator}`, node);
+				}
+			} else {
+				const left = this.visit(node.left);
+				result.concat(left);
+				result.concat(right);
+				result.concat(InstructionBuilder.op(operatorTranslation.get(node.operator), this.getTempVariable(), left.instructionReturn, right.instructionReturn));
+			}
+		} else if (comparerTranslation.has(node.operator)) {
+			const left = this.visit(node.left);
+			const outlet = this.getTempVariable();
+			let leftComparison = left.instructionReturn;
+			let rightComparison = right.instructionReturn;
+			if (left.dataType && left.dataType.kind === 'pointer') {
+				// Right is also. Convert both
+				// I guess literals can't do this
+				const leftTransform = this.castPointerToValue(leftComparison);
+				result.concat(leftTransform);
+				leftComparison = leftTransform.instructionReturn;
+				const rightTransform = this.castPointerToValue(rightComparison);
+				result.concat(rightTransform);
+				rightComparison = rightComparison.instructionReturn;
+			}
+			let sequence = new Instruction([
+				InstructionBuilder.set(outlet, 'true'),
+				InstructionBuilder.jump('{0}', comparerTranslation.get(node.operator), leftComparison, rightComparison, [3]),
+				InstructionBuilder.set(outlet, 'false')
+			]);
+			sequence.instructionReturn = outlet;
+			result.concat(left);
+			result.concat(right);
+			result.concat(sequence);
+		} else {
+			this.addWarning('Going to assignment through binary expression:', node);
+			result = this.processAssignment(node.left, right);
+		}
+		return result;
+	}
+	
+	/**
+	 * 
+	 * @param {CastExpression} node 
+	 * @todo
+	 */
+	visitCastExpression(node) {
+		return new Instruction({
+			content: '{not_implemented}',
+			referrer: []
+		});
+	}
+	
+	/**
+	 * 
+	 * @param {AssignmentExpressionNode} node 
+	 */
+	visitAssignmentExpression(node) {
+		return this.processAssignment(node.left, this.visit(node.right));
+	}
+
+	/**
+	 * 
+	 * @param {UnaryExpressionNode} node 
+	 * @returns {Instruction}
+	 * @todo
+	 */
+	visitUnaryExpression(node) {
+		let result;
+		switch (node.operator) {
+			case '++': case '--':
+				result = this.visit(node.argument);
+				let duplicate;
+				if (!node.prefix) {
+					duplicate = this.getTempVariable();
+					result.concat(InstructionBuilder.set(duplicate, result.instructionReturn));
+				} else {
+					duplicate = result.instructionReturn;
+				}
+				result.concat(InstructionBuilder.op(node.operator === '++' ? 'add' : 'sub', result.instructionReturn, result.instructionReturn, '1'));
+				result.concat(this.processLValGetter(node.argument).replace('value_entry', result.instructionReturn));
+				result.instructionReturn = duplicate;
+				return result;
+				break;
+			case '&':
+				// Get address of given symbol (thus should be a LValue - and having 'pointer')
+				// Thus demand some small changes of L-value getting.
+				return this.processLValGetter(node.argument, true);
+				break;
+			case '*':
+				// Get value from given address (variable address).
+				// Assume that this is only about RValue (LValue is independently handled.)
+				// ...
+				let collector = this.getTempVariable();
+				result = this.visit(node.argument);
+				result.concat(InstructionBuilder.read(collector, `${result.instructionReturn}_block`, `${result.instructionReturn}_pos`));
+				return result;
+				break;
+		}
+	}
+
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 * @returns {Instruction}
+	 * @todo
+	 */
+	resolveMemberExpression(node) {
+		let finalResult = new Instruction();
+		const leftside = this.visit(node.children[0]);	// Thus it returns a duplicated version of address
+		finalResult.concat(leftside);
+		if (node.getAttribute('computed')) {
+			// Array, continue to get left-side
+			// TODO: The index of the left side should be multiplied by right-side size
+			// The left side must also return a pointer, but the problem is that: what it the right-side size?
+			const index = this.visit(node.children[1]);	// Simple calculation
+			finalResult.concat(index);
+			let ratio = 1, childSize = 0;
+			if (node.children[0].dataType.size > 0 && node.dataType.size > 0) {
+				childSize = node.children[0].dataType.size;
+				ratio = childSize / node.dataType.size;
+			}
+			// Got correction ratio of array index
+			//finalResult.concat(InstructionBuilder.op('mul', index.instructionReturn, index.instructionReturn, ratio));
+			// Get multiplier
+			finalResult.concat(this.memory.outputPointerForwardCall((ratio - 1) * childSize, index.instructionReturn, this.functionManagement));
+		} else {
+			// Struct/union: seek member inside it. Already calculated by SEM.
+			const index = leftside;
+			//finalResult.concat(InstructionBuilder.op('add', index.instructionReturn, index.instructionReturn, node.getAttribute('memberOffset')));
+			finalResult.concat(this.memory.outputPointerForwardCall(node.getAttribute('memberOffset'), index.instructionReturn, this.functionManagement));
+		}
+		return finalResult;
+	}
+
+	/**
+	 * 
+	 * @param {ASTNode} left 
+	 * @param {boolean} [returnOnlyPointer=false] Whether only providing pointer information.
+	 * @returns {Instruction} Instructions to get node as LValue. This function returns an instruction sequence that can assign value (since you're looking for a LValue!) by replacing {value_entry}.
+	 * @throws {InternalGenerationFailure}
+	 * This returns LVal. For a pointer, it reserves the name (and if offset exists, it configures)!
+	 * Left value can't have some really-elegant process.
+	 * @remark Notice if you are configuring a pointer!
+	 * @remark If it's about some addressing, the value must be duplicated!
+	 * @remark Therefore, all 'visit' (e.g. Identifier, MemberExpression) must be implemented!
+	 */
+	processLValGetter(left, returnOnlyPointer = false) {
+		let pointer = "";
+		let finalResult = new Instruction();
+		let isPointer = false;
+		switch (left.type) {
+			case 'Identifier':
+				const identity = this.currentScope.lookup(left.name);
+				if (identity) {
+					if (identity.implementAsPointer) {
+						//pointer = identity.getAssemblySymbol();
+						//isPointer = true;
+						const assemblySymbol = identity.getAssemblySymbol();
+						if (returnOnlyPointer) {
+							return new Instruction([], assemblySymbol);
+						}
+						let finalize = new Instruction();
+						finalize.setAttribute('isPointer', true);
+						finalize.concat(InstructionBuilder.set(`${assemblySymbol}_block`, '{pointer_block_entry}'));
+						finalize.concat(InstructionBuilder.set(`${assemblySymbol}_ptr`, '{pointer_ptr_entry}'));
+						return finalize;
+					} else if (identity.accessThroughPointer) {
+						//pointer = `${identity.getAssemblySymbol()}.__pointer`;
+						if (returnOnlyPointer) {
+							throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable already has memory address. Use '&' to avoid this problem.)`, left);
+						}
+						return this.generateSymbolWrite(identity, '{value_entry}');
+					} else {
+						/*
+						let result = new Instruction();
+						result.instructionReturn = identity.getAssemblySymbol();
+						return result;
+						*/
+						if (returnOnlyPointer) {
+							throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable has no address. Use 'volatile', 'static' or explicit '&' for its address.)`, left);
+						}
+						return new Instruction(InstructionBuilder.set(identity.getAssemblySymbol(), '{value_entry}'));
+					}
+				} else {
+					throw new InternalGenerationFailure(`Unknown variable ${left.name}`, left);
+				}
+				break;
+
+			case 'MemberExpression':
+				const resolution = this.resolveMemberExpression(left);
+				if (left.dataType === 'pointer') {
+					isPointer = true;
+				}
+				pointer = resolution.instructionReturn;
+				break;
+			
+			case 'UnaryExpression':
+				if (left.getAttribute('isDereference')) {
+					const precall = this.visit(left.argument);	// Simple calculation
+					if (left.argument.dataType === 'pointer') {
+						isPointer = true;
+					}
+					pointer = precall.instructionReturn;
+					break;
+				}
+				// Otherwise, DELIBERATELY PASS DOWN
+			default:
+				// TODO: Might be expressions... must get its l-value pointer to process
+				// Unary expression should also be evaluated here.
+				// TODO: Yet I should consider how to deal with unary *, which returns a LValue
+				precall = this.visit(left);
+				pointer = precall.instructionReturn;
+				this.addWarning(`Maybe not a LValue -- regarding the value as an address`, node.location);
+		}
+		finalResult.setAttribute('isPointer', isPointer);
+		if (returnOnlyPointer) {
+			finalResult.instructionReturn = pointer;
+			return finalResult;
+		}
+		// Like 'implementAsPointer'
+		if (isPointer) {
+			// The pointer POINTS TO a pointer
+			finalResult.concat(this.memory.outputPointerStorageOf(pointer, '{pointer_block_entry}'));
+			const temporary = this.getTempVariable();
+			// Jump the address!
+			finalResult.concat(InstructionBuilder.set(`${temporary}_block`, `${pointer}_block`));
+			finalResult.concat(InstructionBuilder.set(`${temporary}_ptr`, `${pointer}_ptr`));
+			finalResult.concat(this.memory.outputPointerForwardCall(1, temporary, this.functionManagement));
+			finalResult.concat(this.memory.outputPointerStorageOf(temporary, '{pointer_ptr_entry}'));
+		} else {
+			// The pointer POINTS TO a value
+			finalResult.concat(this.memory.outputPointerStorageOf(pointer, '{value_entry}'));
+		}
+		return finalResult;
+	}
+
+	/**
+	 * 
+	 * @param {ASTNode} left The identifier shall be reserved.
+	 * @param {Instruction} right The parameters must be pre-processed.
+	 * @return {Instruction}
+	 * @remark We consider NORMAL ASSIGNMENT, STRUCTURAL and POINTER.
+	 * @todo
+	 */
+	processAssignment(left, right) {
+		let result = new Instruction();
+		let lval = this.processLValGetter(left);
+		result.concat(right);
+		if (lval.getAttribute('isPointer')) {
+			result.concat(lval.replace('pointer_block_entry', `${right.instructionReturn}_block`));
+			result.concat(lval.replace('pointer_ptr_entry', `${right.instructionReturn}_ptr`));
+		} else {
+			result.concat(lval.replace('value_entry', right.instructionReturn));
+		}
+		return result;
+	}
+
+	/**
+	 * 
+	 * @param {FunctionCallNode} node 
+	 * @throws {InternalGenerationFailure}
+	 * @returns {Instruction}
+	 * @todo Must also clean temporary variables
+	 */
+	visitFunctionCall(node) {
+		let result = new Instruction();
+		// Prepare for all parameters
+		const relevantFunction = node.callee ? node.callee.symbol : null;
+		if (!relevantFunction) {
+			throw new InternalGenerationFailure(`Unknown function ${node.callee ? node.callee.name : '<error-function>'}`);
+		}
+		for (let i = 0; i < relevantFunction.type.parameters.length && i < node.arguments.length; i++) {
+			const param = this.visit(node.arguments[i]);
+			result.concat(param);
+			result.concat(this.generateSymbolWrite(
+				relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name),
+				param.instructionReturn
+			));
+		}
+		result.concat(this.functionManagement.getFunctionCall(
+			node.callee.name, [], this.memory, 
+			!(this.currentScope.type === 'function' && this.currentScope.name !== 'main')));
+		// Get a copy of function return
+		if (relevantFunction.type.returnType !== 'void') {
+			result.instructionReturn = this.getTempVariable();
+			result.concat(InstructionBuilder.set(result.instructionReturn, '__return'));
+		}
+		return result;
+	}
+
+	/**
+	 * 
+	 * @param {IdentifierNode} node 
+	 */
+	visitIdentifier(node) {
+		return this.generateSymbolRead(this.currentScope.lookup(node.name), true);
+	}
+
+	/**
+	 * 
+	 * @param {NumericLiteralNode} node 
+	 */
+	visitNumericLiteral(node) {
+		return new Instruction([], `${node.value}`);
+	}
+
+	/**
+	 * 
+	 * @param {StringLiteralNode} node 
+	 */
+	visitStringLiteral(node) {
+		return new Instruction([], `"${node.value.replace('"','\\"')}"`);
+	}
+
+	visitCharacterLiteral(node) {
+		return new Instruction([], `"${node.value.replace('"','\\"')}"`);
+	}
+
+	visitNullLiteral(node) {
+		return new Instruction([], 'null');
+	}
+
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 */
+	visitMemberExpression(node) {
+		// It must be a pointer-like, so we directly seek for a LValue
+		return this.resolveMemberExpression(node);
+	}
+
+	/**
+	 * 
+	 * @param {BuiltinCallNode} node 
+	 * @todo <Not completed>
+	 */
+	visitBuiltinCall(node) {
+		return new Instruction({
+			content: '{not_implemented}',
+			referrer: []
+		});
 	}
 
     // 变量管理
@@ -10344,9 +11085,13 @@ class Compiler {
 	/**
 	 * 
 	 * @param {List<Object>} memoryInfo 
+	 * @param {AttributeClass} config 
+	 * @deprecated Currently not working
+	 * @todo
 	 */
-    constructor(memoryInfo) {
+    constructor(memoryInfo, config) {
 		this.memoryInfo = memoryInfo;
+		this.config = config ?? new AttributeClass();
         this.lexer = new Lexer(this);
         this.parser = new Parser(this);
         this.semanticAnalyzer = new SemanticAnalyzer(this);
