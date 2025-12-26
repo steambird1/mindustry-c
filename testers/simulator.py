@@ -3,6 +3,8 @@
 import sys
 from typing import Dict, List, Any, Union, Optional
 
+# 似乎忘记支持 @counter 了
+
 class MindustryLogicSimulator:
     """
     Mindustry 逻辑代码模拟器
@@ -23,6 +25,12 @@ class MindustryLogicSimulator:
         """解析一个值，可以是数字、null、变量或字符串"""
         if token == "null":
             return None
+        if token == "@counter":
+            return self.pc + 1
+        if token == "true":
+            return True
+        if token == "false":
+            return False
         
         # 尝试解析为数字
         try:
@@ -45,6 +53,8 @@ class MindustryLogicSimulator:
     
     def set_variable(self, var_name: str, value: Any):
         """设置变量值"""
+        if var_name == "@counter":
+            self.pc = int(value)
         self.variables[var_name] = value
     
     def read_memory(self, mem_name: str, index: int) -> Any:
@@ -235,6 +245,7 @@ class MindustryLogicSimulator:
             return None
         
         instr = parts[0]
+        result_var = None
         
         if instr == "set":
             # set 变量 值
@@ -269,6 +280,7 @@ class MindustryLogicSimulator:
             
             value = self.read_memory(mem_name, int(index))
             self.set_variable(result_var, value)
+            
             
         elif instr == "write":
             # write 值 存储建筑 索引
@@ -314,7 +326,7 @@ class MindustryLogicSimulator:
         else:
             raise ValueError(f"未知指令: {instr}")
         
-        if instr != "jump":
+        if instr != "jump" and result_var != "@counter":
             self.pc += 1
             
         return instr
@@ -350,8 +362,8 @@ class MindustryLogicSimulator:
                 
                 if self.debug:
                     print(f"  变量状态: {self.variables}")
-                    if self.memory:
-                        print(f"  内存状态: {self.memory}")
+                    #if self.memory:
+                    #    print(f"  内存状态: {self.memory}")
                     print("-" * 30)
                 
                 if result in ["end", "stop"]:
