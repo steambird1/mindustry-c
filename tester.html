@@ -1,0 +1,73 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<script src="mindc.js">
+	
+	</script>
+	<script>
+	
+	function do_compile() {
+		const memory = [
+			new MemoryBlock('cell1', 64),
+			new MemoryBlock('cell2', 64),
+			new MemoryBlock('cell3', 64),
+			new MemoryBlock('cell4', 64)
+		];
+		
+		var txt = document.getElementById('txt').value;
+		var compiler = new Compiler(txt, memory, null);
+		document.getElementById('result').value = compiler.compile().code;
+		// debug..
+		/*
+		var lex = new Lexer(txt);
+		//lex.tokenize();
+		//console.log(lex);
+		var prs = new Parser(lex);
+		var result = prs.parse();
+		console.log(prs.lexer);
+		console.log(result);
+		if (result.success) {
+
+			
+			var further = new SemanticAnalyzer();
+			compiler.SemanticAnalyzer = further;
+			further.analyze(result.ast);
+			console.log(further);
+			
+			if (further.errors.length == 0) {
+				var optm = new Optimizer();
+				var optresult = optm.optimize(further, result.ast);
+				console.log(optresult);
+				console.log(optm);
+				//console.log(result.ast);
+				if (optresult.success) {
+					var cg = new CodeGenerator(compiler);
+					var finalize = cg.generate(optresult.ast);
+					console.log(finalize);
+					console.log("===========================================");
+					finalize.result.isDebug = false;
+					const out = finalize.result.output();
+					console.log(out);
+					document.getElementById('result').value = out.join('\n');
+				}
+			}
+			
+			// TODO: Re-analyze for each successful optimizion
+		}
+			*/
+		
+	}
+	
+	</script>
+</head>
+<body>
+	<textarea id="txt">
+	
+	</textarea>
+	<button onclick="do_compile();">Compile</button>
+	<textarea id="result">
+	
+	</textarea>
+</body>
+</html>

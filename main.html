@@ -1,78 +1,772 @@
-<!DOCTYPE HTML>
-<html>
+<!DOCTYPE html>
+<html lang="zh-CN">
 <head>
-	<meta charset="utf-8" />
-	<script src="mindc.js">
-	
-	</script>
-	<script>
-	
-	function do_compile() {
-		const memory = [
-			new MemoryBlock('cell1', 64),
-			new MemoryBlock('cell2', 64),
-			new MemoryBlock('cell3', 64),
-			new MemoryBlock('cell4', 64)
-		];
-		var compiler = new Compiler(memory);
-		var txt = document.getElementById('txt').value;
-		// debug..
-		
-		var lex = new Lexer(txt);
-		//lex.tokenize();
-		//console.log(lex);
-		var prs = new Parser(lex);
-		var result = prs.parse();
-		console.log(prs.lexer);
-		console.log(result);
-		if (result.success) {
-		/*
-			var further = new SemanticAnalyzer();
-			further.analyze(result.ast);
-			console.log(further);
-			if (further.success) {
-				var optimizer = new Optimizer();
-				optimizer.optimize()
-			}
-		*/
-		
-			
-			var further = new SemanticAnalyzer();
-			compiler.SemanticAnalyzer = further;
-			further.analyze(result.ast);
-			console.log(further);
-			
-			if (further.errors.length == 0) {
-				var optm = new Optimizer();
-				var optresult = optm.optimize(further, result.ast);
-				console.log(optresult);
-				console.log(optm);
-				//console.log(result.ast);
-				if (optresult.success) {
-					var cg = new CodeGenerator(compiler);
-					var finalize = cg.generate(optresult.ast);
-					console.log(finalize);
-					console.log("===========================================");
-					finalize.result.isDebug = false;
-					const out = finalize.result.output();
-					console.log(out);
-					document.getElementById('result').value = out.join('\n');
-				}
-			}
-			
-			// TODO: Re-analyze for each successful optimizion
-		}
-	}
-	
-	</script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C语言编译器</title>
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.8/css/bootstrap.min.css" rel="stylesheet">
+    <!-- 代码高亮样式 -->
+    <script src="mindc.js"></script>
+    <style>
+        :root {
+            --primary-color: #4361ee;
+            --secondary-color: #3a0ca3;
+            --light-bg: #f8f9fa;
+            --dark-bg: #212529;
+            --code-bg: #1e1e1e;
+            --border-color: #dee2e6;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--light-bg);
+            color: #333;
+            padding-bottom: 20px;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            color: white;
+            padding: 20px 0;
+            margin-bottom: 30px;
+            border-radius: 0 0 10px 10px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        
+        .header h1 {
+            font-weight: 700;
+            font-size: 2.2rem;
+        }
+        
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1rem;
+        }
+        
+        .card {
+            border: none;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.08);
+            margin-bottom: 25px;
+            overflow: hidden;
+        }
+        
+        .card-header {
+            background-color: var(--primary-color);
+            color: white;
+            font-weight: 600;
+            border-bottom: none;
+            padding: 15px 20px;
+        }
+        
+        .code-container {
+            position: relative;
+            height: 400px;
+            border: 1px solid var(--border-color);
+            border-radius: 5px;
+            overflow: hidden;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+        
+        .line-numbers {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 50px;
+            height: 100%;
+            background-color: #f5f5f5;
+            color: #666;
+            text-align: right;
+            padding: 10px 8px;
+            overflow-y: hidden;
+            border-right: 1px solid var(--border-color);
+            user-select: none;
+        }
+        
+        .code-editor {
+            position: absolute;
+            left: 50px;
+            top: 0;
+            width: calc(100% - 50px);
+            height: 100%;
+            border: none;
+            padding: 10px;
+            resize: none;
+            outline: none;
+            white-space: pre;
+            overflow-wrap: normal;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.4;
+            background-color: transparent;
+        }
+        
+        .code-highlight {
+            position: absolute;
+            left: 50px;
+            top: 0;
+            width: calc(100% - 50px);
+            height: 100%;
+            padding: 10px;
+            pointer-events: none;
+            white-space: pre;
+            overflow-wrap: normal;
+            overflow: hidden;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.4;
+            background-color: transparent;
+        }
+        
+        /* 语法高亮颜色 */
+        .keyword { color: #569cd6; font-weight: bold; }
+        .identifier { color: #d4d4d4; }
+        .number { color: #b5cea8; }
+        .string { color: #ce9178; }
+        .operator { color: #d4d4d4; }
+        .punctuator { color: #d4d4d4; }
+        .comment { color: #6a9955; }
+        .special { color: #c586c0; }
+        .predefined { color: #9cdcfe; }
+        
+        .output-container {
+            height: 300px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.3;
+            white-space: pre;
+            overflow-wrap: normal;
+            overflow-x: auto;
+        }
+        
+        .memory-block-item {
+            background-color: #f8f9fa;
+            border: 1px solid var(--border-color);
+            border-radius: 5px;
+            padding: 10px 15px;
+            margin-bottom: 10px;
+        }
+        
+        .btn-compile {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            font-weight: 600;
+            font-size: 1.1rem;
+            border-radius: 8px;
+            transition: all 0.3s;
+        }
+        
+        .btn-compile:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(67, 97, 238, 0.3);
+        }
+        
+        .btn-add-memory {
+            background-color: #20c997;
+            color: white;
+            border: none;
+        }
+        
+        .status-success {
+            color: #198754;
+            font-weight: 600;
+        }
+        
+        .status-error {
+            color: #dc3545;
+            font-weight: 600;
+        }
+        
+        .example-code {
+            cursor: pointer;
+            color: var(--primary-color);
+            text-decoration: underline;
+        }
+        
+        .example-code:hover {
+            color: var(--secondary-color);
+        }
+        
+        footer {
+            text-align: center;
+            margin-top: 30px;
+            color: #6c757d;
+            font-size: 0.9rem;
+        }
+        
+        @media (max-width: 768px) {
+            .code-container, .output-container {
+                height: 300px;
+            }
+        }
+    </style>
 </head>
 <body>
-	<textarea id="txt">
-	
-	</textarea>
-	<button onclick="do_compile();">Compile</button>
-	<textarea id="result">
-	
-	</textarea>
+    <div class="header">
+        <div class="container">
+            <div class="row">
+                <div class="col-12">
+                    <h1>Mindustry-C 编译器</h1>
+                    <p>一个基于 JavaScript 的 C 语言编译器，可将 C 代码编译为 Mindustry 汇编指令</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="container">
+        <div class="row">
+            <!-- 代码编辑器 -->
+            <div class="col-lg-7">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span>C 源代码编辑器</span>
+                        <div>
+                            <button type="button" class="btn btn-sm btn-outline-light me-2" id="example-btn">示例代码</button>
+                            <button type="button" class="btn btn-sm btn-outline-light" id="clear-btn">清空</button>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="code-container">
+                            <div class="line-numbers" id="line-numbers">1</div>
+                            <textarea class="code-editor" id="code-input" placeholder="输入C代码...">// 简单的C程序示例
+void main() {
+    int a = 10;
+    int b = 20;
+    int sum = a + b, i;
+
+    // 条件语句示例
+    if (sum > 25) {
+        print("和大于25\n");
+    } else {
+        print("和小于等于25\n");
+    }
+    
+    // 循环示例
+    for (i = 0; i < 5; i++) {
+        print("循环计数:", i);
+    }
+    
+}</textarea>
+                            <div class="code-highlight" id="code-highlight"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 内存块配置 -->
+                <div class="card">
+                    <div class="card-header">
+                        内存块配置
+                        <!--<small class="float-end">用于MemoryBlock列表传递给Compiler</small>-->
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-3">
+                            <div class="col-12">
+                                <p class="text-muted">配置每个内存块的编号和大小（以字节为单位）：</p>
+                            </div>
+                        </div>
+                        
+                        <div id="memory-blocks-container">
+                            <div class="memory-block-item">
+                                <div class="row align-items-center">
+                                    <div class="col-md-5">
+                                        <label class="form-label">内存块名称</label>
+                                        <input type="text" class="form-control memory-block-name" value="block0" required>
+                                    </div>
+                                    <div class="col-md-5">
+                                        <label class="form-label">内存块大小</label>
+                                        <div class="input-group">
+                                            <input type="number" class="form-control memory-block-size" min="1" value="4096" required>
+                                            <span class="input-group-text">字节</span>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2 text-center">
+                                        <button type="button" class="btn btn-danger btn-sm mt-md-4 remove-memory-btn" disabled>
+                                            删除
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="row mt-3">
+                            <div class="col-12">
+                                <button type="button" class="btn btn-add-memory" id="add-memory-btn">
+                                    <i class="fas fa-plus"></i> 添加内存块
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 编译控制与输出 -->
+            <div class="col-lg-5">
+                <div class="card">
+                    <div class="card-header">
+                        编译控制
+                    </div>
+                    <div class="card-body">
+                        <div class="d-grid gap-2">
+                            <button class="btn btn-compile" id="compile-btn">
+                                编译代码
+                            </button>
+                        </div>
+                        
+                        <div class="mt-4">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <h6 class="mb-0">编译状态</h6>
+                                <span id="compile-status" class="badge bg-secondary">未编译</span>
+                            </div>
+                            <div id="status-details">
+                                <p class="text-muted mb-1">点击上方按钮开始编译</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span>汇编输出</span>
+                        <button type="button" class="btn btn-sm btn-outline-primary" id="copy-output-btn">复制</button>
+                    </div>
+                    <div class="card-body p-0">
+                        <pre class="output-container p-3 mb-0" id="output-text">汇编代码将显示在这里...</pre>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">
+                        使用说明
+                    </div>
+                    <div class="card-body">
+                        <ol class="mb-0">
+                            <li>在左侧编辑器中输入C代码</li>
+                            <li>配置所需的内存块（编号和大小）</li>
+                            <li>点击"编译代码"按钮开始编译</li>
+                            <li>查看右侧的汇编输出结果</li>
+                            <li>对于建筑，使用形如 <code>auto volatile device conveyor1;</code> 在开头声明</li>
+                            <li>目前支持 print, printflush, draw 等一部分内置调用，unit 相关函数和 asm 还在进行中。</li>
+                        </ol>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <footer>
+            <p>MindustryC by steambird 2025-2026 (with the help of Deepseek)</p>
+        </footer>
+    </div>
+
+    <!-- Bootstrap JS Bundle with Popper -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Font Awesome for icons -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/js/all.min.js"></script>
+    
+    <script>
+        // 等待DOM加载完成
+        document.addEventListener('DOMContentLoaded', function() {
+            // 获取关键DOM元素
+            const codeInput = document.getElementById('code-input');
+            const lineNumbers = document.getElementById('line-numbers');
+            const codeHighlight = document.getElementById('code-highlight');
+            const compileBtn = document.getElementById('compile-btn');
+            const outputText = document.getElementById('output-text');
+            const compileStatus = document.getElementById('compile-status');
+            const statusDetails = document.getElementById('status-details');
+            const addMemoryBtn = document.getElementById('add-memory-btn');
+            const memoryBlocksContainer = document.getElementById('memory-blocks-container');
+            const exampleBtn = document.getElementById('example-btn');
+            const clearBtn = document.getElementById('clear-btn');
+            const copyOutputBtn = document.getElementById('copy-output-btn');
+            
+            // 初始化行号显示
+            updateLineNumbers();
+            
+            // 监听代码输入变化
+            codeInput.addEventListener('input', function() {
+                updateLineNumbers();
+                applySyntaxHighlighting();
+            });
+            
+            // 监听代码滚动，同步行号和高亮区域
+            codeInput.addEventListener('scroll', function() {
+                lineNumbers.scrollTop = codeInput.scrollTop;
+                codeHighlight.scrollTop = codeInput.scrollTop;
+                codeHighlight.scrollLeft = codeInput.scrollLeft;
+            });
+            
+            // 编译按钮点击事件
+            compileBtn.addEventListener('click', function() {
+                compileCode();
+            });
+            
+            // 添加内存块按钮
+            addMemoryBtn.addEventListener('click', function() {
+                addMemoryBlock();
+            });
+            
+            // 示例代码按钮
+            exampleBtn.addEventListener('click', function() {
+                loadExampleCode();
+            });
+            
+            // 清空按钮
+            clearBtn.addEventListener('click', function() {
+                codeInput.value = '';
+                updateLineNumbers();
+                applySyntaxHighlighting();
+            });
+            
+            // 复制输出按钮
+            copyOutputBtn.addEventListener('click', function() {
+                copyOutputToClipboard();
+            });
+            
+            // 初始化语法高亮
+            applySyntaxHighlighting();
+            
+            // 函数：更新行号显示
+            function updateLineNumbers() {
+                const lines = codeInput.value.split('\n').length;
+                let lineNumbersHTML = '';
+                
+                for (let i = 1; i <= lines; i++) {
+                    lineNumbersHTML += i + '<br>';
+                }
+                
+                lineNumbers.innerHTML = lineNumbersHTML;
+            }
+            
+            // 函数：应用语法高亮
+            function applySyntaxHighlighting() {
+                const code = codeInput.value;
+                
+                // 如果没有代码，清空高亮区域
+                if (!code.trim()) {
+                    codeHighlight.innerHTML = '';
+                    return;
+                }
+                //console.log('SyntaxHighlight!')
+                // 创建词法分析器实例
+                try {
+                    const lexer = new Lexer(code);
+                    const result = lexer.tokenize();
+                    console.log(result);
+                    // 处理高亮HTML
+                    let highlightedHTML = '';
+                    let currentPosition = 0;
+                    
+                    // 对每个token进行高亮处理
+                    for (const token of result.tokens) {
+                        // 添加token之前的普通文本
+                        if (token.location.index > currentPosition) {
+                            const plainText = code.substring(currentPosition, token.location.index);
+                            highlightedHTML += escapeHtml(plainText);
+                        }
+                        
+                        // 根据token类型添加高亮类
+                        let tokenText = token.value || '';
+                        const tokenType = token.type;
+                        
+                        let cssClass = '';
+                        if (tokenType.includes('KEYWORD') || 
+                            Object.values(TokenType).slice(4, 34).includes(tokenType)) { // 关键字范围
+                            cssClass = 'keyword';
+                        } else if (tokenType === TokenType.IDENTIFIER) {
+                            cssClass = 'identifier';
+                        } else if (tokenType === TokenType.NUMBER) {
+                            cssClass = 'number';
+                        } else if (tokenType === TokenType.STRING || tokenType === TokenType.CHARACTER) {
+                            tokenText = token.raw ?? token.value;
+                            console.log(tokenText);
+                            cssClass = 'string';
+                        } else if (tokenType.includes('OPERATOR') || 
+                                   Object.values(TokenType).slice(34, 70).includes(tokenType)) { // 运算符范围
+                            cssClass = 'operator';
+                        } else if (tokenType.includes('PUNCTUATOR') || 
+                                   Object.values(TokenType).slice(70, 85).includes(tokenType)) { // 标点符号范围
+                            cssClass = 'punctuator';
+                        } else if (Object.values(TokenType).slice(85, 110).includes(tokenType)) { // 特殊指令
+                            cssClass = 'special';
+                        } else if (tokenType === TokenType.PREDEFINED_CONSTANT) {
+                            cssClass = 'predefined';
+                        } else if (tokenType === TokenType.COMMENT) {
+                            cssClass = 'comment';
+                        }
+                        
+                        if (cssClass) {
+                            highlightedHTML += `<span class="${cssClass}">${escapeHtml(tokenText)}</span>`;
+                        } else {
+                            highlightedHTML += escapeHtml(tokenText);
+                        }
+                        
+                        currentPosition = token.location.index + tokenText.length;
+                    }
+                    
+                    // 添加剩余的文本
+                    if (currentPosition < code.length) {
+                        highlightedHTML += escapeHtml(code.substring(currentPosition));
+                    }
+                    
+                    codeHighlight.innerHTML = highlightedHTML;
+                    
+                } catch (error) {
+                    console.error('语法高亮出错:', error);
+                    // 如果词法分析失败，显示原始文本
+                    codeHighlight.innerHTML = escapeHtml(code);
+                }
+            }
+            
+            // 函数：转义HTML特殊字符
+            function escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+            
+            // 函数：添加内存块
+            function addMemoryBlock() {
+                const blockCount = document.querySelectorAll('.memory-block-item').length;
+                const newBlock = document.createElement('div');
+                newBlock.className = 'memory-block-item';
+                
+                newBlock.innerHTML = `
+                    <div class="row align-items-center">
+                        <div class="col-md-5">
+                            <label class="form-label">内存块名称</label>
+                            <input type="text" class="form-control memory-block-name" value="block${blockCount}" required>
+                        </div>
+                        <div class="col-md-5">
+                            <label class="form-label">内存块大小</label>
+                            <div class="input-group">
+                                <input type="number" class="form-control memory-block-size" min="1" value="4096" required>
+                                <span class="input-group-text">字节</span>
+                            </div>
+                        </div>
+                        <div class="col-md-2 text-center">
+                            <button type="button" class="btn btn-danger btn-sm mt-md-4 remove-memory-btn">
+                                删除
+                            </button>
+                        </div>
+                    </div>
+                `;
+                
+                memoryBlocksContainer.appendChild(newBlock);
+                
+                // 为删除按钮添加事件监听
+                newBlock.querySelector('.remove-memory-btn').addEventListener('click', function() {
+                    if (document.querySelectorAll('.memory-block-item').length > 1) {
+                        newBlock.remove();
+                        // 更新第一个内存块的删除按钮状态
+                        updateFirstMemoryBlockDeleteButton();
+                    }
+                });
+                
+                // 启用第一个内存块的删除按钮（如果有多个内存块）
+                updateFirstMemoryBlockDeleteButton();
+            }
+
+            // 函数：更新第一个内存块删除按钮状态
+            function updateFirstMemoryBlockDeleteButton() {
+    const memoryBlockItems = document.querySelectorAll('.memory-block-item');
+    const firstDeleteBtn = document.querySelector('.remove-memory-btn');
+    
+    if (memoryBlockItems.length > 1 && firstDeleteBtn) {
+        firstDeleteBtn.disabled = false;
+    } else if (firstDeleteBtn) {
+        firstDeleteBtn.disabled = true;
+    }
+}
+            // 函数：编译代码
+            function compileCode() {
+                const code = codeInput.value;
+                
+                // 检查代码是否为空
+                if (!code.trim()) {
+                    showCompileStatus('error', '错误', '请输入C代码');
+                    outputText.textContent = '错误：请输入C代码';
+                    return;
+                }
+                
+                // 获取内存块配置并创建 MemoryBlock 对象数组
+                const memoryBlocks = [];
+                const memoryBlockItems = document.querySelectorAll('.memory-block-item'); // 在这里定义
+                
+                memoryBlockItems.forEach((item, index) => {
+                    const nameInput = item.querySelector('.memory-block-name');
+                    const sizeInput = item.querySelector('.memory-block-size');
+                    
+                    const name = nameInput ? nameInput.value : `block${index}`;
+                    const size = sizeInput ? parseInt(sizeInput.value) : 4096;
+                    
+                    // 创建 MemoryBlock 对象 - 使用 (name, size) 参数
+                    memoryBlocks.push(new MemoryBlock(name, size));
+                });
+                
+                // 显示编译中状态
+                showCompileStatus('compiling', '编译中', '正在编译代码...');
+                outputText.textContent = '编译中...';
+                
+                // 使用 setTimeout 确保 UI 能够更新状态
+                setTimeout(() => {
+                    try {
+                        // 创建编译器实例
+                        // 根据 Compiler 类构造函数的参数说明：
+                        // 1. sourceCode: C 源代码字符串
+                        // 2. memoryInfo: MemoryBlock 对象组成的列表
+                        // 3. config: 始终传入 null
+                        const compiler = new Compiler(code, memoryBlocks, null);
+                        
+                        // 执行编译
+                        const result = compiler.compile();
+                        
+                        // 显示编译结果
+                        if (result.success) {
+                            showCompileStatus('success', '成功', '编译成功完成');
+                            outputText.textContent = result.code || '编译成功，但未生成代码';
+                            
+                            // 显示错误和警告信息（如果有）
+                            if (result.errors && result.errors.length > 0) {
+                                outputText.textContent += '\n\n--- 编译错误 ---\n';
+                                result.errors.forEach(error => {
+                                    // 错误对象可能有 line 和 column 属性
+                                    if (error.line && error.column) {
+                                        outputText.textContent += `第${error.line}行，第${error.column}列: ${error.message || error}\n`;
+                                    } else {
+                                        outputText.textContent += `${error.message || error}\n`;
+                                    }
+                                });
+                            }
+                            
+                            if (result.warnings && result.warnings.length > 0) {
+                                outputText.textContent += '\n\n--- 编译警告 ---\n';
+                                result.warnings.forEach(warning => {
+                                    if (!warning) return;
+                                    if (warning.line && warning.column) {
+                                        outputText.textContent += `第${warning.line}行，第${warning.column}列: ${warning.message || warning}\n`;
+                                    } else {
+                                        outputText.textContent += `${warning.message || warning}\n`;
+                                    }
+                                });
+                            }
+                        } else {
+                            showCompileStatus('error', '失败', '编译失败');
+                            outputText.textContent = '编译失败:\n';
+                            
+                            // 显示致命错误（如果有）
+                            if (result.fatalError) {
+                                outputText.textContent += result.fatalError + '\n';
+                            }
+                            
+                            // 显示错误信息
+                            if (result.errors && result.errors.length > 0) {
+                                outputText.textContent += '\n错误详情:\n';
+                                result.errors.forEach(error => {
+                                    if (error.line && error.column) {
+                                        outputText.textContent += `第${error.line}行，第${error.column}列: ${error.message || error}\n`;
+                                    } else {
+                                        outputText.textContent += `${error.message || error}\n`;
+                                    }
+                                });
+                            }
+                        }
+                    // 在编译函数的 catch 块中，添加更详细的错误信息：
+                    } catch (error) {
+                        // 捕获编译过程中的异常
+                        console.error('编译过程中出现异常:', error);
+                        showCompileStatus('error', '异常', '编译过程中出现异常');
+                        
+                        let errorMessage = `编译异常:\n${error.message}\n`;
+                        
+                        // 检查是否是 Compiler 类未定义的错误
+                        if (error.message.includes('Compiler is not defined') || 
+                            error.message.includes('Compiler is not a constructor')) {
+                            errorMessage += '\n提示：请确保编译器脚本已正确引入\n';
+                            errorMessage += '确保在HTML中引入了包含Compiler类的脚本文件\n';
+                        }
+                        
+                        // 检查是否是 MemoryBlock 类未定义的错误
+                        if (error.message.includes('MemoryBlock is not defined') || 
+                            error.message.includes('MemoryBlock is not a constructor')) {
+                            errorMessage += '\n提示：MemoryBlock类未定义\n';
+                            errorMessage += '请确保编译器中包含MemoryBlock类的定义\n';
+                        }
+                        
+                        outputText.textContent = errorMessage;
+                    }
+                }, 10); // 使用很短的延迟确保 UI 更新
+            }
+
+            // 函数：显示编译状态
+            function showCompileStatus(status, text, details) {
+                compileStatus.textContent = text;
+                compileStatus.className = 'badge';
+                
+                switch(status) {
+                    case 'compiling':
+                        compileStatus.classList.add('bg-warning');
+                        break;
+                    case 'success':
+                        compileStatus.classList.add('bg-success');
+                        break;
+                    case 'error':
+                        compileStatus.classList.add('bg-danger');
+                        break;
+                    default:
+                        compileStatus.classList.add('bg-secondary');
+                }
+                
+                statusDetails.innerHTML = `<p class="mb-0 ${status === 'success' ? 'status-success' : status === 'error' ? 'status-error' : ''}">${details}</p>`;
+            }
+            
+            
+            // 函数：加载示例代码
+            function loadExampleCode() {
+                const exampleCode = ``; // leave it blank now
+                
+                codeInput.value = exampleCode;
+                updateLineNumbers();
+                applySyntaxHighlighting();
+                showCompileStatus('info', '已加载', '示例代码已加载到编辑器');
+            }
+            
+            // 函数：复制输出到剪贴板
+            function copyOutputToClipboard() {
+                const text = outputText.textContent;
+                
+                navigator.clipboard.writeText(text).then(() => {
+                    // 显示复制成功提示
+                    const originalText = copyOutputBtn.textContent;
+                    copyOutputBtn.textContent = '已复制!';
+                    copyOutputBtn.classList.remove('btn-outline-primary');
+                    copyOutputBtn.classList.add('btn-success');
+                    
+                    setTimeout(() => {
+                        copyOutputBtn.textContent = originalText;
+                        copyOutputBtn.classList.remove('btn-success');
+                        copyOutputBtn.classList.add('btn-outline-primary');
+                    }, 2000);
+                }).catch(err => {
+                    console.error('复制失败: ', err);
+                    alert('复制失败，请手动选择并复制文本');
+                });
+            }
+            
+            // 为现有内存块的删除按钮添加事件监听
+            document.querySelectorAll('.remove-memory-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    if (document.querySelectorAll('.memory-block-item').length > 1) {
+                        btn.closest('.memory-block-item').remove();
+                    }
+                });
+            });
+        });
+    </script>
 </body>
 </html>

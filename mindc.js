@@ -9,66 +9,6 @@ This code is only tested by some very small and simple samples
 so far.
 */
 
-class C89ToMindustryCompiler {
-    constructor() {
-        // 编译器配置
-        this.config = {
-            targetLanguage: 'mindustry_low_level',
-            standard: 'C89',
-            memoryBlocks: ['cell1', 'cell2', 'cell3', 'cell4'], // 可扩展
-            maxMemorySize: 1024
-        };
-        
-        // 编译状态
-        this.state = {
-            currentScope: null,
-            variables: new Map(),      // 变量符号表
-            functions: new Map(),      // 函数符号表
-            labels: new Map(),         // 标签管理
-            memoryAllocations: new Map(), // 内存分配
-            tempVarCounter: 0,         // 临时变量计数
-            labelCounter: 0            // 标签计数
-        };
-        
-        // 类型系统
-        this.types = {
-            'int': { size: 1, baseType: 'numeric' },
-            'float': { size: 1, baseType: 'numeric' },
-            'char': { size: 1, baseType: 'numeric' },
-            'char*': { size: 1, baseType: 'pointer' },
-            'void': { size: 0, baseType: 'void' },
-            'device': { size: 1, baseType: 'device' },
-            'null_t': { size: 1, baseType: 'null' }
-        };
-        
-        // 操作符映射
-        this.operatorMap = {
-            '+': 'add',
-            '-': 'sub',
-            '*': 'mul',
-            '/': 'div',
-            '%': 'mod',
-            '&': 'and',
-            '|': 'or',
-            '^': 'xor',
-            '<<': 'shl',
-            '>>': 'shr',
-            '==': 'equal',
-            '!=': 'notEqual',
-            '<': 'lessThan',
-            '>': 'greaterThan',
-            '<=': 'lessThanEq',
-            '>=': 'greaterThanEq'
-        };
-        
-        // 内建函数映射
-        this.builtinFunctions = new Set([
-            'draw', 'print', 'drawflush', 'printflush', 'control',
-            'radar', 'sensor', 'lookup', 'wait', 'stop', 'end', 'asm'
-        ]);
-    }
-}
-
 // 抽象语法树节点类型
 // AST节点类型枚举
 const ASTNodeType = {
@@ -824,10 +764,11 @@ const TokenType = {
 
 // Token类
 class Token {
-    constructor(type, value, location = null) {
+    constructor(type, value, location = null, raw = "") {
         this.type = type;
         this.value = value;
         this.location = location; // { line, column, index }
+		this.raw = raw;
     }
     
     toString() {
@@ -1093,13 +1034,14 @@ class Lexer {
 
     readString() {
         const startLocation = this.getLocation();
+		let rawValue = '"';	// Used for highlighter!
         this.advance(); // 跳过开头的 '"'
         let value = '';
         let escaped = false;
 
         while (this.position < this.sourceCode.length) {
             const char = this.sourceCode[this.position];
-            
+            rawValue += char;
             if (escaped) {
                 switch (char) {
                     case 'n': value += '\n'; break;
@@ -1115,7 +1057,7 @@ class Lexer {
                 escaped = true;
             } else if (char === '"') {
                 this.advance(); // 跳过结尾的 '"'
-                this.tokens.push(new Token(TokenType.STRING, value, startLocation));
+                this.tokens.push(new Token(TokenType.STRING, value, startLocation, rawValue));
                 return;
             } else {
                 value += char;
@@ -1125,7 +1067,7 @@ class Lexer {
         }
 
         this.addError('Unterminated string literal', startLocation);
-        this.tokens.push(new Token(TokenType.STRING, value, startLocation));
+        this.tokens.push(new Token(TokenType.STRING, value, startLocation, rawValue));
     }
 
     readCharacter() {
@@ -2253,17 +2195,6 @@ class Parser {
 		varDecl.declarators = declarators;
 		type.parent = varDecl;
         return varDecl;
-    }
-
-    // 更新isBuiltinFunction方法，添加更多内建函数
-    isBuiltinFunction(name) {
-        const builtins = [
-            'draw', 'print', 'drawflush', 'printflush', 'getlink',
-            'control', 'radar', 'sensor', 'unitbind', 'unitlocate', 'unitcontrol', 'unitradar',
-			'set', 'op', 'lookup',
-            'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm'
-        ];
-        return builtins.includes(name);
     }
 
     // 修改函数声明解析中的参数列表处理
@@ -3619,7 +3550,7 @@ class MemberInfo {
 
 class SemanticAnalyzer extends ASTVisitor {
 	// !! Global scope is being manually established !!
-    constructor() {
+    constructor(compiler = null) {
         super();
         this.errors = [];
         this.warnings = [];
@@ -5394,7 +5325,7 @@ class ContinueException {
 }
 
 class Optimizer {
-    constructor() {
+    constructor(compiler = null) {
         this.modified = false;
         this.errors = [];
         this.warnings = [];
@@ -10725,7 +10656,7 @@ class CodeGenerator extends ASTVisitor {
 	 */
     constructor(compiler) {
         super(compiler);
-		this.semantic = compiler.SemanticAnalyzer;
+		this.semantic = compiler.semanticAnalyzer;
 		this.registryId = 0;
         this.outputCode = new Instruction();
 		this.memory = new MemoryManager(compiler.memoryInfo);
@@ -11018,6 +10949,8 @@ class CodeGenerator extends ASTVisitor {
 	 * @param {IfStatementNode} node 
 	 * @remark The problem is that the comparers are all in the jumpers.
 	 * To handle this, we still make them values.
+	 * @todo I think we can simplify 'test' generation (judge whether it's a binary expression)
+	 * -- and if it is, directly use it!
 	 */
 	visitIfStatement(node) {
 		let result = new Instruction();
@@ -11313,6 +11246,7 @@ class CodeGenerator extends ASTVisitor {
 	/**
 	 * 
 	 * @param {AssignmentExpressionNode} node 
+	 * @todo Make simple numeric operations simplified (direct operation through op, etc.)
 	 */
 	visitAssignmentExpression(node) {
 		let value;
@@ -11331,7 +11265,7 @@ class CodeGenerator extends ASTVisitor {
 	 * 
 	 * @param {UnaryExpressionNode} node 
 	 * @returns {Instruction}
-	 * @todo
+	 * @todo Similar to the simplifier of assignment expressions
 	 */
 	visitUnaryExpression(node) {
 		let result;
@@ -11723,6 +11657,9 @@ class CodeGenerator extends ASTVisitor {
 			},
 			sensor: ast => {
 				return packer(`sensor`, ast.arguments, true);
+			},
+			lookup: ast => {
+				return packer(`lookup`, ast.arguments, true);
 			}
 			// TODO: unit control, etc.
 		};
@@ -11762,38 +11699,61 @@ class Compiler {
 	 * 
 	 * @param {List<Object>} memoryInfo 
 	 * @param {AttributeClass} config 
-	 * @deprecated Currently not working
-	 * @todo
 	 */
-    constructor(memoryInfo, config) {
+    constructor(sourceCode, memoryInfo, config) {
 		this.memoryInfo = memoryInfo;
 		this.config = config ?? new AttributeClass();
-        this.lexer = new Lexer(this);
-        this.parser = new Parser(this);
+        this.lexer = new Lexer(sourceCode);
+        this.parser = new Parser(this.lexer);
         this.semanticAnalyzer = new SemanticAnalyzer(this);
         this.optimizer = new Optimizer(this);
         this.codeGenerator = new CodeGenerator(this);
     }
     
-    compile(sourceCode) {
+    compile() {
         try {
             // 编译管道
-            const tokens = this.lexer.tokenize(sourceCode);
-            const ast = this.parser.parse(tokens);
-            const analyzedAst = this.semanticAnalyzer.analyze(ast);
-            const optimizedAst = this.optimizer.optimize(analyzedAst);
-            const targetCode = this.codeGenerator.generate(optimizedAst);
+            const tokens = this.lexer.tokenize();
+            const ast = this.parser.parse();
+			if (ast.errors.length) {
+				return {
+					success: false,
+					code: "",
+					errors: this.getAllErrors(),
+                	warnings: this.getAllWarnings()
+				}
+			}
+            const analyzed = this.semanticAnalyzer.analyze(ast.ast);
+			if (analyzed.errors.length) {
+				return {
+					success: false,
+					code: "",
+					errors: this.getAllErrors(),
+                	warnings: this.getAllWarnings()
+				}
+			}
+            const optimizedAst = this.optimizer.optimize(this.semanticAnalyzer, analyzed.ast);
+			if (optimizedAst.errors.length) {
+				return {
+					success: false,
+					code: "",
+					errors: this.getAllErrors(),
+                	warnings: this.getAllWarnings()
+				}
+			}
+            const targetCode = this.codeGenerator.generate(optimizedAst.ast);
             
             return {
                 success: true,
-                code: targetCode,
+                code: targetCode.result.output().join('\n'),
                 errors: this.getAllErrors(),
                 warnings: this.getAllWarnings()
             };
         } catch (error) {
             return {
                 success: false,
-                error: error.message,
+				code: "",
+                fatalError: error.message + "\n" + error.stack,
                 errors: this.getAllErrors(),
                 warnings: this.getAllWarnings()
             };
@@ -11802,10 +11762,16 @@ class Compiler {
     
     getAllErrors() {
         // 收集所有阶段的错误
+		return [ ...this.lexer.errors, ...this.parser.errors, ...this.semanticAnalyzer.errors,
+			...this.optimizer.errors, ...this.codeGenerator.errors
+		]
     }
     
     getAllWarnings() {
         // 收集所有阶段的警告
+		return [ ...this.semanticAnalyzer.warnings,
+			...this.optimizer.warnings, ...this.codeGenerator.warnings
+		]
     }
 }
 
