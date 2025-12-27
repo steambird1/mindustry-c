@@ -431,7 +431,8 @@ class TypeSpecifierNode extends ASTNode {
     constructor(typeName) {
         super(ASTNodeType.TYPE_SPECIFIER);
         this.typeName = typeName;
-        this.qualifiers = []; // 类型限定符（const, volatile）
+		// qualifiers are in attributes
+        //this.qualifiers = []; // 类型限定符（const, volatile）
 		this.storageClass = null;
         this.pointerDepth = 0; // 指针深度
         this.pointerQualifiers = []; // 指针限定符
@@ -1567,7 +1568,7 @@ class Parser {
 			// TODO: Currently, only single name is implemented for function pointer:
 			const parsedFunction = this.parseFunctionDeclaration(true);
 			let typeSpecifier = new TypeSpecifierNode();
-			typeSpecifier.qualifiers = parsedFunction.storageClass;
+			typeSpecifier.setAttribute('qualifiers', parsedFunction.storageClass);
 			typeSpecifier.pointerDepth = parsedFunction.pointerDepth; //functionLookahead.pointerDepth;
 			typeSpecifier.pointerQualifiers = parsedFunction.pointerQualifiers;
 			
@@ -3051,7 +3052,8 @@ class Parser {
 					typeNode = ASTBuilder.typeSpecifier(token.value);
 					typeNode.setAttribute('location', token.location);
 					typeNode.setAttribute('qualifiers', qualifiers);
-					
+					//typeNode.qualifiers = qualifiers;
+
 					// 处理struct/union/enum类型
 					if (token.type === TokenType.STRUCT || token.type === TokenType.UNION) {
 						this.parseStructOrUnionType(typeNode);
@@ -3071,6 +3073,7 @@ class Parser {
 					typeNode = ASTBuilder.typeSpecifier(token.value);
 					typeNode.setAttribute('location', token.location);
 					typeNode.setAttribute('qualifiers', qualifiers);
+					//typeNode.qualifiers = qualifiers;
 					typeNode.setAttribute('isCustomType', true);
 				}
 			}
@@ -3094,7 +3097,7 @@ class Parser {
 						const castExpr = new CastExpression(typeNode, expression);
 						//castExpr.addChild(typeNode);
 						castExpr.setAttribute('pointerDepth', typeNode.pointerDepth);
-						castExpr.setAttribute('qualifiers', typeNode.pointerQualifiers);
+						castExpr.setAttribute('qualifiers', typeNode.pointerQualifiers);	// Because they are pointer qualifiers
 						//castExpr.addChild(expression);
 						castExpr.location = typeNode.location;
 						typeNode.parent = castExpr;
@@ -3360,7 +3363,7 @@ class Parser {
         const builtins = [
 			'draw', 'print', 'drawflush', 'printflush', 'getlink',
 			'control', 'radar', 'sensor', 'set', 'op', 'lookup', 'unitbind', 'unitlocate', 'unitcontrol', 'unitradar',
-			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm'
+			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'adiff'
 		];
         return builtins.includes(name);
     }
@@ -3373,18 +3376,21 @@ class Parser {
 
 		this.expectToken(TokenType.LEFT_PAREN);
 		
-		// 根据不同的内建函数处理参数
+		// I don't think this is really necessary...
 		switch (functionName) {
 			case 'draw':
 			case 'control':
+			case 'ucontrol':
+			case 'ulocate':
 				// 第一个参数是操作名称（字符串）
 				const opNameToken = this.expectToken(TokenType.STRING);
 				if (opNameToken) {
 					builtinCall.arguments.push(ASTBuilder.stringLiteral(opNameToken.value));
 				}
 				break;
-				
+
 			case 'radar':
+			case 'uradar':
 				// 四个操作名称参数
 				for (let i = 0; i < 4; i++) {
 					const radarOpToken = this.expectToken(TokenType.STRING);
@@ -3487,6 +3493,12 @@ class SymbolEntry {
 		} else {
 			return this.name;
 		}
+	}
+
+	duplicate() {
+		let result = new SymbolEntry(this.name, this.type, this.scope, this.kind);
+		Object.assign(result, this);
+		return result;
 	}
 }
 
@@ -3738,6 +3750,14 @@ class SemanticAnalyzer extends ASTVisitor {
                     }
                 });
                 break;
+
+			case 'FunctionCall':
+			case 'BuiltinCall':
+				node.arguments.forEach(arg => {
+					arg.scope = this.currentScope;
+					this.linkScopesToAST(arg);
+				});
+				break;
         }
         
         // 退出作用域
@@ -3782,6 +3802,8 @@ class SemanticAnalyzer extends ASTVisitor {
 					// 检查是否是结构体/联合体类型
 					const typeName = this.getTypeNameFromTypeNode(decl.type);
 					if (typeName === 'struct' || typeName === 'union') {
+						// I don't know, but I guess this means that this type is still not
+						// initialized.
 						this.processTypeFromDeclaration(decl.type);
 					}
 				}
@@ -3819,12 +3841,12 @@ class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'printflush', returnType: 'void', parameters: ['device'] },
 			{ name: 'getlink', returnType: 'device', parameters: ['int'] },
 			{ name: 'control', returnType: 'void', parameters: ['char*', 'device'], hasVarArgs: true }, // 操作名称 + 设备 + 变长参数
-			{ name: 'radar', returnType: 'int', parameters: ['char*', 'char*', 'char*', 'char*', 'int'] },
+			{ name: 'radar', returnType: 'device', parameters: ['char*', 'char*', 'char*', 'char*', 'int'] },
 			{ name: 'sensor', returnType: 'int', parameters: ['device', 'int'] },
 			{ name: 'set', returnType: 'void', parameters: [], hasVarArgs: true, special: 'set' }, // 特殊处理
 			{ name: 'op', returnType: 'void', parameters: [], hasVarArgs: true, special: 'op' }, // 特殊处理
 			{ name: 'lookup', returnType: 'int', parameters: ['char*', 'int'] },
-			{ name: 'wait', returnType: 'void', parameters: ['int'] },
+			{ name: 'wait', returnType: 'void', parameters: ['float'] },
 			{ name: 'stop', returnType: 'void', parameters: [] },
 			{ name: 'end', returnType: 'void', parameters: [] },
 			{ name: 'jump', returnType: 'void', parameters: [], hasVarArgs: true, special: 'jump' }, // 特殊处理
@@ -3833,9 +3855,16 @@ class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'unitbind', returnType: 'void', parameters: ['int']},
 			{ name: 'unitcontrol', returnType: 'void', parameters: [], hasVarArgs: true},
 			{ name: 'unitradar', returnType: 'device', parameters: ['char*', 'char*', 'char*', 'char*', 'int', 'int'] },
-			{ name: 'unitlocate', returnType: 'device', parameters: [], hasVarArgs: true},
-			{ name: 'asm', returnType: 'void', parameters: ['char*'], special: 'asm'} // TODO: I'm unsure about whether this can be correctly done now.
-        ];
+			{ name: 'unitlocate', returnType: 'int', parameters: [], hasVarArgs: true},
+			{ name: 'asm', returnType: 'void', parameters: ['char*'], special: 'asm'}, // TODO: I'm unsure about whether this can be correctly done now.
+			{ name: 'sin', returnType: 'float', parameters: ['float'] },	// These are in [op] instruction
+			{ name: 'cos', returnType: 'float', parameters: ['float'] },
+			{ name: 'tan', returnType: 'float', parameters: ['float'] },
+			{ name: 'asin', returnType: 'float', parameters: ['float'] },
+			{ name: 'acos', returnType: 'float', parameters: ['float'] },
+			{ name: 'atan', returnType: 'float', parameters: ['float'] },
+			{ name: 'adiff', returnType: 'float', parameters: ['float', 'float'] }
+		];
 
         builtins.forEach(func => {
             const symbol = new SymbolEntry(
@@ -4014,7 +4043,7 @@ class SemanticAnalyzer extends ASTVisitor {
 	createTypeInfoFromNode(typeNode) {
         const typeName = this.getTypeNameFromTypeNode(typeNode);
         const qualifiers = typeNode.getAttribute('qualifiers') || [];
-        
+
         // 检查是否是结构体/联合体类型
         if (typeName === 'struct' || typeName === 'union') {
             const structName = typeNode.getAttribute('structOrUnionName');
@@ -4081,6 +4110,10 @@ class SemanticAnalyzer extends ASTVisitor {
 	 * @returns {TypeInfo}
 	 */
 	getTypeInfo(typeNameRaw) {
+
+		if (typeof typeNameRaw !== 'string') {
+			return typeNameRaw;
+		}
 		
 		let typeName = typeNameRaw;
 		const ptrLocate = typeName.indexOf('*');
@@ -4089,19 +4122,38 @@ class SemanticAnalyzer extends ASTVisitor {
 			typeName = typeName.slice(0, ptrLocate);
 		}
 		let result = null;
+
+		// Get qualifiers from typeNameRaw string:
+		const checkQualifiers = ['const', 'volatile'];
+		let existQualifiers = [];
+		const splitResult = typeName.split(' ');
+		if (splitResult.length <= 0) {
+			return null;
+		}
+		for (const qualifier of checkQualifiers) {
+			if (splitResult.includes(qualifier)) {
+				existQualifiers.push(qualifier);
+			}
+		}
+
+		typeName = splitResult[splitResult.length - 1];
 		
         // 从类型表获取类型信息
         if (this.typeTable.has(typeName)) {
             result = this.typeTable.get(typeName);
         } else if (this.structTable.has(typeName)) {
             result = this.structTable.get(typeName);
-        }
+        } else {
+			return null;	// Unable to fetch information
+		}
 		
 		for (let i = 0; i < ptrSize; i++) {
 			const ptrType = new TypeInfo('', 'pointer', '2');
 			ptrType.pointerTo = result;
 			result = ptrType;
 		}
+
+		result.qualifiers = existQualifiers;
         
         return result;
     }
@@ -4202,7 +4254,7 @@ class SemanticAnalyzer extends ASTVisitor {
         node.parameters.forEach(param => {
             const paramSymbol = new SymbolEntry(
                 param.name,
-                { type: param.type.typeName },
+                { type: this.getTypeInfo(this.getTypeNameFromTypeNode(param.type)) },
                 this.currentScope,
                 'parameter',
                 param.location
@@ -4365,7 +4417,12 @@ class SemanticAnalyzer extends ASTVisitor {
 	 * @param {NumericLiteralNode} node 
 	 */
 	visitNumericLiteral(node) {
-		node.dataType = this.typeTable.get('int');
+		//node.dataType = this.typeTable.get('int');
+		if (node.raw.indexOf('.') !== -1 || node.raw.slice(-1) === 'f') {
+			node.dataType = this.typeTable.get('float');
+		} else {
+			node.dataType = this.typeTable.get('int');
+		}
 	}
 
 	/**
@@ -4394,18 +4451,25 @@ class SemanticAnalyzer extends ASTVisitor {
     getTypeNameFromTypeNode(typeNode) {
         if (!typeNode) return null;
         
+		let prefix = "";
 		const ptrSuffix = "*".repeat(typeNode.pointerDepth);
 		
+		if (typeNode.type === 'TypeSpecifier' && typeNode.getAttribute('qualifiers')) {
+			const attributes = typeNode.getAttribute('qualifiers');
+			if (attributes.length > 0)
+				prefix = attributes.join(' ') + ' ';
+		}
+
 		// 处理结构体/联合体类型
         if (typeNode.type === 'TypeSpecifier' && 
             (typeNode.typeName === 'struct' || typeNode.typeName === 'union')) {
             const structName = typeNode.getAttribute('structOrUnionName');
-            return (structName || typeNode.typeName) + ptrSuffix;
+            return prefix + (structName || typeNode.typeName) + ptrSuffix;
         }
 		
         // 如果是TypeSpecifier节点
         if (typeNode.typeName) {
-            return typeNode.typeName + ptrSuffix;
+            return prefix + typeNode.typeName + ptrSuffix;
         }
         
         // 如果是标识符节点（处理typedef定义的类型）
@@ -4435,7 +4499,7 @@ class SemanticAnalyzer extends ASTVisitor {
 
         // 设置节点类型
         if (symbol.kind === 'variable' || symbol.kind === 'parameter') {
-            node.dataType = symbol.type.type;
+            node.dataType = this.getTypeInfo(symbol.type.type);
         }
     }
 
@@ -4444,6 +4508,7 @@ class SemanticAnalyzer extends ASTVisitor {
 	 * @param {CastExpression} node 
 	 */
 	visitCastExpression(node) {
+		this.visit(node.expression);
 		node.dataType = this.getExpressionType(node);
 	}
 
@@ -4613,8 +4678,22 @@ class SemanticAnalyzer extends ASTVisitor {
             return;
         }
 
+		let compatible = false;
+		let resultType = leftType;
+		if (node.operator === '=') {
+			compatible = this.isTypeCompatible(leftType, rightType);
+		} else {
+			const operation = node.operator.slice(null, -1);
+			compatible = this.isTypeCompatibleForOperator(operation, leftType, rightType);
+			if (compatible) {
+				const probableResult = this.getResultType(operation, leftType, rightType);
+				compatible = compatible && this.isTypeCompatible(leftType, probableResult);
+				resultType = probableResult;
+			}
+		}
+
         // 检查赋值兼容性
-        if (!this.isTypeCompatible(leftType, rightType)) {
+        if (!compatible) {
 			let funcFlag = false;
 			if (node.right.type === 'Identifier' && node.right.symbol.kind === 'function') {
 				// Try function pointer
@@ -4662,7 +4741,7 @@ class SemanticAnalyzer extends ASTVisitor {
             this.addError(`Assignment requires lvalue`, node.location);
         }
 
-        node.dataType = leftType;
+        node.dataType = resultType;
     }
 	
 	// 添加成员访问支持
@@ -5449,6 +5528,35 @@ class Optimizer {
     getCurrentScopePath() {
         return this.currentScope ? this.currentScope.getPath() : 'global';
     }
+
+	/**
+	 * 
+	 * @param {Scope} scope 
+	 * @param {string} varName 
+	 * @param {Scope} targetScope
+	 * @param {string} targetName 
+	 */
+	duplicateVariable(scope, varName, targetScope, targetName) {
+		let varRef = scope.lookupCurrent(varName);
+		if (!varRef) {
+			return;
+		}
+		varRef = varRef.duplicate();
+		varRef.name = targetName;
+		targetScope.addSymbol(varRef);
+		const scopePath = scope.getPath();
+		const targetPath = targetScope.getPath();
+		const variableScope = this.variableUses.get(scopePath);
+		let targetVariableScope = this.variableUses.get(targetPath);
+		if (!variableScope) {
+			return;
+		}
+		if (!targetVariableScope) {
+			targetVariableScope = new Map();
+			this.variableUses.set(targetPath, targetVariableScope);
+		}
+		targetVariableScope.set(targetName, { ...variableScope.get(varName) });
+	}
 
     // =============== 节点分析 ===============
 
@@ -8348,6 +8456,22 @@ class Optimizer {
             if (node.children) {
                 node.children.forEach(child => countStatements(child));
             }
+
+			const fieldsToCheck = [
+				'functions', 'globalDeclarations', 'typeDefinitions',
+				'statements', 'expression', 'test', 'consequent', 'alternate',
+				'body', 'init', 'update', 'argument', 'left', 'right',
+				'declarators', 'arguments', 'callee', 'initializer'
+			];
+
+			for (const field of fieldsToCheck) {
+				if (Array.isArray(node[field])) {
+					node[field].forEach(item => countStatements(item));
+				} else if (node[field] && typeof node[field] === 'object') {
+					countStatements(node[field]);
+				}
+			}
+
         };
         
         countStatements(funcNode.body);
@@ -8454,8 +8578,12 @@ class Optimizer {
 	}
 
 	/**
-	 * 在特定调用点内联函数
-	 * @remark Manually modified !
+	 * 
+	 * @param {FunctionDeclarationNode} funcNode 
+	 * @param {FunctionCallNode} callNode 
+	 * @param {ASTNode} parentNode 
+	 * @param {any} context 
+	 * @returns 
 	 */
 	inlineFunctionAtSite(funcNode, callNode, parentNode, context) {
 		// Cloned body must be a compound statement
@@ -8465,6 +8593,9 @@ class Optimizer {
 		}
 		
 		// 复制函数体
+		if (funcNode.body.type !== 'CompoundStatement') {
+			return;
+		}
 		const clonedBody = this.cloneAST(funcNode.body);
 		if (!clonedBody) return;
 		
@@ -8472,12 +8603,28 @@ class Optimizer {
 		const paramMap = new Map();
 		funcNode.parameters.forEach((param, index) => {
 			if (index < callNode.arguments.length && param.name) {
-				paramMap.set(param.name, callNode.arguments[index]);
+				const symbolName = funcNode.name + ':' + param.name;
+				const ident = ASTBuilder.identifier(symbolName);
+				const value = this.cloneAST(callNode.arguments[index]);
+				const assigner = ASTBuilder.assignmentExpression('=', ident, value);
+				ident.dataType = callNode.arguments[index].dataType;
+				ident.parent = assigner;
+				value.parent = assigner;
+				clonedBody.statements.unshift(assigner);
+				assigner.parent = clonedBody;
+				assigner.dataType = ident.dataType;
+				//paramMap.set(param.name, callNode.arguments[index]);
+				paramMap.set(param.name, ident);
+
+				if (callNode.scope) {
+					// TODO: Add new symbol into caller's symbol table!
+					this.duplicateVariable(funcNode.scope, param.name, callNode.scope, symbolName);
+				}
 			}
 		});
 		
 		// 替换参数
-		this.replaceParametersInAST(clonedBody, paramMap);
+		this.replaceParametersInAST(clonedBody, paramMap, funcNode);
 		
 		// 处理返回语句
 		// (This function is no longer used)
@@ -8625,9 +8772,13 @@ class Optimizer {
 	}
 
 	/**
-	 * 替换AST中的参数引用
+	 * 
+	 * @param {ASTNode} node 
+	 * @param {Map} paramMap 
+	 * @param {FunctionDeclarationNode} funcNode 
+	 * @returns 
 	 */
-	replaceParametersInAST(node, paramMap) {
+	replaceParametersInAST(node, paramMap, funcNode) {
 		if (!node || !paramMap) return;
 		
 		switch (node.type) {
@@ -8962,6 +9113,7 @@ class Optimizer {
 				clone.raw = node.raw;
 				break;
 				
+			case 'AssignmentExpression':
 			case 'BinaryExpression':
 				clone.operator = node.operator;
 				clone.left = node.left ? this.cloneAST(node.left) : null;
@@ -9023,10 +9175,11 @@ class Optimizer {
 				
 			default:
 				// 默认处理：复制子节点
-				if (node.children) {
-					node.children.forEach(child => clone.addChild(this.cloneAST(child)));
-				}
 				break;
+		}
+
+		if (node.children) {
+			node.children.forEach(child => clone.addChild(this.cloneAST(child)));
 		}
 		
 		const fieldsToCheck = [
@@ -9037,16 +9190,19 @@ class Optimizer {
 			];
 			
 		for (const field of fieldsToCheck) {
-			if (Array.isArray(clone[field])) {
-				for (const item of clone[field]) {
-					if (item && typeof item === 'object') {
-						item.parent = clone;
-					}
-				}
-			} else if (clone[field] && typeof clone[field] === 'object') {
+			if (Array.isArray(node[field])) {
+				clone[field] = node[field].map(elem => {
+					const result = this.cloneAST(elem);
+					result.parent = clone;
+					return result;
+				});
+			} else if (node[field] && typeof node[field] === 'object') {
+				clone[field] = this.cloneAST(node[field]);
 				clone[field].parent = clone;
 			}
 		}
+
+		clone.dataType = node.dataType;
 		
 		return clone;
 	}
@@ -10049,6 +10205,12 @@ class InstructionBuilder {
 			referrer: []
 		});
 	}
+	static end() {
+		return new SingleInstruction({
+			content: `end`,
+			referrer: []
+		});
+	}
 	static print(data) {
 		return new SingleInstruction({
 			content: `print ${data}`,
@@ -10058,6 +10220,12 @@ class InstructionBuilder {
 	static printflush(target) {
 		return new SingleInstruction({
 			content: `printflush ${target}`,
+			referrer: []
+		});
+	}
+	static drawflush(target) {
+		return new SingleInstruction({
+			content: `drawflush ${target}`,
 			referrer: []
 		});
 	}
@@ -10132,7 +10300,12 @@ class FunctionRegisterer {
 			let connector = new Instruction();
 			connector.concat(jumper);
 			connector.concat(func.body);
-			connector.concat(returner);	// As a component of cunction body
+			if (name === 'main') {
+				connector.concat(InstructionBuilder.end());
+			} else {
+				connector.concat(returner);	// As a component of cunction body
+			}
+			
 			connector.concat(new InstructionReferrer(jumper, 'end_of_body'));
 			// ...
 			let header = new Instruction([
@@ -10421,7 +10594,7 @@ class MemoryManager {
 		let process = new Instruction();
 		if (doReset) {
 			process.concat(InstructionBuilder.set(variable + '_pos', this.reservedSize));
-			process.concat(InstructionBuilder.set(variable + '_block', this.memoryBlocks[0]));
+			process.concat(InstructionBuilder.set(variable + '_block', this.memoryBlocks[0].name));
 		}
 		const caller = funcReg.getFunctionCall('__pointerForward', new Map([["__ptrpos", variable + '_pos'], ["__ptrblock", variable + '_block'], ["__step", step]]), this);
 		caller.concat(InstructionBuilder.set(variable + '_pos', "__ptrpos"));
@@ -11054,16 +11227,22 @@ class CodeGenerator extends ASTVisitor {
 	 */
 	visitCastExpression(node) {
 		const casting = this.visit(node.expression);
+		if (node.dataType.qualifiers.indexOf('volatile') != -1) {
+			if (node.expression.type === 'Identifier') {
+				// Directly return it.
+				const symbol = this.currentScope.lookup(node.expression.name);
+				return new Instruction([], symbol.getAssemblySymbol());
+			}
+			return casting;
+		}
 		if (node.dataType && node.expression && node.expression.dataType) {
-			if (node.expression.kind === 'pointer' && node.dataType.name === 'int') {
-				
+			if (node.expression.dataType.kind === 'pointer' && node.dataType.name === 'int') {
 				const receiver = this.getTempVariable();
 				const result = this.memory.outputPointerValueCall(casting.instructionReturn, this.functionManagement);
 				casting.concat(result);
 				casting.concat(InstructionBuilder.set(receiver, '__builtin_return'));
 				casting.instructionReturn = receiver;
-				
-			} else if (node.expression.kind === 'int' && node.dataType.kind === 'pointer') {
+			} else if (node.expression.dataType.name === 'int' && node.dataType.kind === 'pointer') {
 				const receiver = this.getTempVariable();
 				const result = this.memory.outputPointerForwardCall(casting.instructionReturn, receiver, this.functionManagement, true);
 				casting.concat(result);
@@ -11078,7 +11257,16 @@ class CodeGenerator extends ASTVisitor {
 	 * @param {AssignmentExpressionNode} node 
 	 */
 	visitAssignmentExpression(node) {
-		return this.processAssignment(node.left, this.visit(node.right));
+		let value;
+		if (node.operator !== '=') {
+			value = this.visitBinaryExpression(ASTBuilder.binaryExpression(
+				node.operator.slice(null, -1),
+				node.left, node.right
+			));
+		} else {
+			value = this.visit(node.right);
+		}
+		return this.processAssignment(node.left, value);
 	}
 
 	/**
@@ -11173,6 +11361,7 @@ class CodeGenerator extends ASTVisitor {
 		let pointer = "";
 		let finalResult = new Instruction();
 		let isPointer = false;
+		let precall = new Instruction();
 		switch (left.type) {
 			case 'Identifier':
 				const identity = this.currentScope.lookup(left.name);
@@ -11222,7 +11411,7 @@ class CodeGenerator extends ASTVisitor {
 			
 			case 'UnaryExpression':
 				if (left.getAttribute('isDereference')) {
-					const precall = this.visit(left.argument);	// Simple calculation
+					precall = this.visit(left.argument);	// Simple calculation
 					if (left.argument.dataType === 'pointer') {
 						isPointer = true;
 					}
@@ -11234,10 +11423,11 @@ class CodeGenerator extends ASTVisitor {
 				// TODO: Might be expressions... must get its l-value pointer to process
 				// Unary expression should also be evaluated here.
 				// TODO: Yet I should consider how to deal with unary *, which returns a LValue
-				precall = this.visit(left);
+				let precall = this.visit(left);
 				pointer = precall.instructionReturn;
-				this.addWarning(`Maybe not a LValue -- regarding the value as an address`, node.location);
+				this.addWarning(`Maybe not a LValue -- regarding the value as an address`, left.location);
 		}
+		finalResult.concat(precall);
 		finalResult.setAttribute('isPointer', isPointer);
 		if (returnOnlyPointer) {
 			finalResult.instructionReturn = pointer;
@@ -11364,45 +11554,117 @@ class CodeGenerator extends ASTVisitor {
 	 * @todo <Not completed>
 	 */
 	visitBuiltinCall(node) {
+
+		const packer = (prefix, params, hasReturn = false, parameterSize = -1) => {
+			let varNames = [];
+			let result = new Instruction(params.map(ast => {
+				const fetcher = this.visit(ast);
+				varNames.push(fetcher.instructionReturn);
+				return fetcher;
+			}));
+			let returner = "";
+			if (hasReturn) {
+				returner = this.getTempVariable();
+				varNames.push(returner);
+			}
+			for (let i = varNames.length; i < parameterSize; i++) {
+				varNames.push('x');	// null filler
+			}
+			result.concat(new SingleInstruction({
+				content: prefix + ' ' + varNames.join(' ') + (hasReturn ? ` ${returner}` : ''),
+				referrer: []
+			}));
+			if (hasReturn) result.instructionReturn = returner;
+			return result;
+		};
+
 		const handlers = {
 			print: ast => {
 				//const result = this.visit(ast.arguments[0]);
 				let result = new Instruction();
 				ast.arguments.forEach(arg => {
-					const printing = this.visit(ast.arguments[0]);
+					const printing = this.visit(arg);
 					result.concat(printing);
 					result.concat(InstructionBuilder.print(printing.instructionReturn));
 				});
 				return result;
 			},
 			printflush: ast => {
-				const result = this.visit(ast.arguments[0]);
-				result.concat(InstructionBuilder.printflush(result.instructionReturn));
-				return result;
+				return packer(`printflush`, ast.arguments);
 			},
-			sensor: ast => {
-				const receiver = this.getTempVariable();
-				const source = this.visit(ast.arguments[0]);
-				const category = this.visit(ast.arguments[1]);
-				let result = new Instruction();
-				result.concat(source);
-				result.concat(category);
-				result.concat(InstructionBuilder.sensor(receiver, source.instructionReturn, category.instructionReturn));
-				result.instructionReturn = receiver;
-				return result;
+			drawflush: ast => {
+				return packer(`drawflush`, ast.arguments);
 			},
 			getlink: ast => {
-				const receiver = this.getTempVariable();
-				const id = this.visit(ast.argments[0]);
-				let result = new Instruction();
-				result.concat(id);
-				result.concat(InstructionBuilder.getlink(receiver, id.instructionReturn));
-				return result;
+				return packer(`getlink`, ast.arguments, true);
+			},
+			wait: ast => {
+				return packer(`wait`, ast.arguments, true);
+			},
+			ubind: ast => {
+				return packer(`ubind`, ast.arguments, true);
+			},
+			draw: ast => {
+
+				const draw_lengths = new Map([
+					['color', 4], ['stroke', 2], ['line', 5], ['rect', 5],
+					['lineRect', 5], ['poly', 6], ['linePoly', 6], ['triangle', 7], ['image', 6]
+				]);
+
+				if (ast.arguments[0].type === 'StringLiteral') {
+					const instruction = ast.arguments[0].value;
+					if (draw_lengths.has(instruction) && draw_lengths.get(instruction) === ast.arguments.length) {
+						return packer(`draw ${instruction}`, ast.arguments.slice(1), false, 6);
+					} else {
+						throw `Unsupported parameter 1 for draw()`;
+					}
+				} else {
+					throw `Parameter 1 for draw() must be a string literal`;
+				}
+
+			},
+			control: ast => {
+
+				const draw_lengths = new Map([
+					['enabled', 3], ['shoot', 5], ['shootp', 4], ['configure', 3],
+					['color', 5]
+				]);
+
+				if (ast.arguments[0].type === 'StringLiteral') {
+					const instruction = ast.arguments[0].value;
+					if (draw_lengths.has(instruction) && draw_lengths.get(instruction) === ast.arguments.length) {
+						return packer(`control ${instruction}`, ast.arguments.slice(1), false, 4);
+					} else {
+						throw `Unsupported parameter 1 for control()`;
+					}
+				} else {
+					throw `Parameter 1 for control() must be a string literal`;
+				}
+
+			},
+			radar: ast => {
+				// The first 4 parameters must all be string literal
+				for (let i = 0; i < 4; i++) {
+					if (ast.arguments[i].type !== 'StringLiteral') {
+						throw `Parameter ${i} for radar() must be a string literal`;
+					}
+				}
+				const processSequence = ast.arguments[i].slice(0, 4).map(arg => arg.value).join(" ");
+				return packer(`radar ${processSequence}`, ast.arguments.slice(4), true);
+			},
+			sensor: ast => {
+				return packer(`sensor`, ast.arguments, true);
 			}
+			// TODO: unit control, etc.
 		};
 
 		if (handlers[node.functionName]) {
-			return handlers[node.functionName](node);
+			try {
+				return handlers[node.functionName](node);
+			} catch (err) {
+				this.addError(err, node.getAttribute('location'));
+				return new Instruction();
+			}
 		}
 
 		return new Instruction({
@@ -11422,10 +11684,6 @@ class CodeGenerator extends ASTVisitor {
 		this.registryId = 0;
 	}
     
-    // 标签管理
-    generateLabel(prefix = 'label') {
-        // 生成唯一标签
-    }
 }
 
 
