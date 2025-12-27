@@ -6,9 +6,11 @@
 
 ## Current Plan
 
-The two parts of the compiler is expected to be done at the same time: the optimizer and the final code generator.
+Incomplete parts:
 
-The latter is without doubt easier.
+- Testing
+- `asm`
+- Unit-relevant instructions
 
 ----
 
@@ -25,7 +27,7 @@ There have been many similar softwares aiming at using languages like C/C++ (ali
 
 - Reserving most of C89 features
   - Yes, you'll have structs, pointers, unions, and `typedef`!
-  - But you won't have `#pragma`
+  - But you won't have `#pragma` or `#include`
   - Also, support for function pointers might be limited
 
 - Adding special types for Mindustry:
@@ -61,3 +63,8 @@ Following functions **rely on** memory allocation:
 A pointer takes up 2 units of spaces, respectively storing the memory cell and address of the element it points to.
 
 Arrays might also take up additional spaces to store its previous/next cell of storage. Designing memory structure for this strange "cyber-" hardware is hard.
+
+## Special Grammar
+
+- Use `auto volatile device conveyor1;` to register a connected device.
+- Use `(volatile int*)` (or similar) to force to transmit registry variables to some functions (reserved for builtin calls).
