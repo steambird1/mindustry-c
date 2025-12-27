@@ -5996,13 +5996,9 @@ class Optimizer {
 			
 			// 记录条件信息用于优化
 			if (conditionValue !== undefined) {
-				node.setAttribute('constantCondition', conditionValue);
+				//node.setAttribute('constantCondition', conditionValue);
 				
-				if (conditionValue) {
-					// 条件总是为真，是无限循环
-					node.setAttribute('infiniteLoop', true);
-					
-				} else {
+				if (conditionValue == 0) {
 					// 条件总是为假，循环永远不会执行
 					node.setAttribute('neverExecuted', true);
 					this.warnings.push(`Loop never executed (while(false))`, node.test.location);
@@ -6034,7 +6030,7 @@ class Optimizer {
 			}
 			
 			// 检查循环体是否有副作用
-			node.setAttribute('bodyHasSideEffects', this.hasSideEffects(node.body));
+			node.setAttribute('bodyHasSideEffects', node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
 			
 			
 			// 记录是否有break/continue
@@ -6046,7 +6042,7 @@ class Optimizer {
 				node.setAttribute('hasContinue', true);
 			}
 		}
-		
+
 		// 尝试分析while循环是否可以优化
 		if (!node.getAttribute('bodyHasSideEffects')) {
 			if (!info || !info.isLoop) {
@@ -6244,7 +6240,7 @@ class Optimizer {
 			
 			// 记录条件信息用于优化
 			if (conditionValue !== undefined) {
-				node.setAttribute('constantCondition', conditionValue);
+				//node.setAttribute('constantCondition', conditionValue);
 				
 				if (conditionValue) {
 					// 条件总是为真
@@ -6282,7 +6278,7 @@ class Optimizer {
 			this.analyzeNode(node.body, loopInfo);// Don't do changes
 			
 			// 检查循环体是否有副作用
-			node.setAttribute('bodyHasSideEffects', this.hasSideEffects(node.body));
+			node.setAttribute('bodyHasSideEffects', node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
 			
 			// 记录是否有break/continue
 			if (loopInfo.hasBreak) {
@@ -6410,7 +6406,7 @@ class Optimizer {
 					// 循环次数为0，永远不会执行
 					forNode.setAttribute('neverExecuted', true);
 				}
-				forNode.setAttribute('iterationOptimized', true);
+				forNode.setAttribute('iterationOptimized', !forNode.getAttribute('maybeHasSideEffects'));
 				return true;
 			} else {
 				// 循环次数太多，不进行优化，但标记为可确定循环次数
@@ -6809,9 +6805,13 @@ class Optimizer {
 		modifiedVars.forEach(varName => {
 			const scopePath = this.currentScope.lookupScopeOf(varName).getPath();
 			const variableUses = this.variableUses.get(scopePath);
+			const constantList = this.localConstants.get(scopePath);
 			const usage = variableUses.get(varName);
 			if (usage) {
 				usage.canOptimize = false;
+			}
+			if (constantList.has(varName)) {
+				constantList.delete(varName);
 			}
 		});
 		
@@ -7052,6 +7052,7 @@ class Optimizer {
 		const iterationCount = whileNode.getAttribute('iterationCount');
 		const hasSideEffects = whileNode.getAttribute('hasSideEffects');
 		const neverExecuted = whileNode.getAttribute('neverExecuted');
+		const loopVarName = whileNode.getAttribute('loopVarName');
 		
 		if (!canOptimize && !neverExecuted) return false;
 		
@@ -7205,15 +7206,19 @@ class Optimizer {
 			return false;
 		}
 		
+		// TODO: In fact, it might be because of UNEXPECTED CONDITION CHANGE INSIDE THE LOOP!
+		/*
 		if (firstSideEffectIteration >= totalIterations) {
 			// 所有迭代都没有副作用，可以完全优化
 			// Debug:
 			console.log('unexpected side effect call');
 			return this.fullyOptimizeDeterministicLoop(loopNode, totalIterations);
 		}
-		
+		*/
 		// 部分优化：展开没有副作用的部分，保留有副作用的部分
-		return this.partiallyUnrollLoop(loopNode, loopVariable, totalIterations, firstSideEffectIteration, modifiedVars);
+		const newLoopState = this.partiallyUnrollLoop(loopNode, loopVariable, totalIterations, firstSideEffectIteration, modifiedVars);
+		this.markLoopAsPotentiallyWithSideEffects(loopNode);
+		return newLoopState;
 	}
 
 
@@ -7275,22 +7280,18 @@ class Optimizer {
 		}
 		
 		// 修改原循环，减少迭代次数
-		const remainingIterations = totalIterations - firstSideEffect;
-		
-		if (remainingIterations > 0) {
-			// 需要创建一个新的循环，执行剩余的有副作用迭代
-			
-			let modifiedLoop;
-			if (loopNode.type === 'ForStatement') {
-				modifiedLoop = this.createModifiedForLoop(loopNode, loopVariable, indexAtSideEffect);
-			} else {
-				modifiedLoop = this.createModifiedWhileLoop(loopNode, loopVariable, indexAtSideEffect);
-			}
-			
-			if (modifiedLoop) {
-				replacementStatements.push(modifiedLoop);
-			}
+		// 需要创建一个新的循环，执行剩余的有副作用迭代
+		let modifiedLoop;
+		if (loopNode.type === 'ForStatement') {
+			modifiedLoop = this.createModifiedForLoop(loopNode, loopVariable, indexAtSideEffect);
+		} else {
+			modifiedLoop = this.createModifiedWhileLoop(loopNode, loopVariable, indexAtSideEffect);
 		}
+		
+		if (modifiedLoop) {
+			replacementStatements.push(modifiedLoop);
+		}
+		
 		
 		// 创建替换节点
 		let replacementNode;
@@ -7301,6 +7302,9 @@ class Optimizer {
 		} else {
 			const compoundStmt = ASTBuilder.compoundStatement();
 			compoundStmt.statements = replacementStatements;
+			replacementStatements.forEach(stmt => {
+				stmt.parent = compoundStmt;
+			});
 			replacementNode = compoundStmt;
 		}
 		
@@ -7316,42 +7320,79 @@ class Optimizer {
 	 * @param {number} remainingIterations - 剩余迭代次数
 	 * @returns {ASTNode} - 修改后的循环
 	 * @remark <NOTICE> WE MUST DEAL WITH SPECIAL INITIALIZATIONS !!!
+	 * @remark Warning: data types there are not considered, which may result in problems.
 	 */
 	createModifiedForLoop(originalLoop, loopVariable, newInitValue) {
 		// 复制原始循环
+		const typeReference = this.currentScope.lookup(loopVariable).type.type;
 		const newLoop = new ASTNode('ForStatement');
 		newLoop.init = originalLoop.init;
 		newLoop.test = originalLoop.test;
 		newLoop.update = originalLoop.update;
 		newLoop.body = originalLoop.body;
+		// Shallow copy only!!!
 		
 		// 修改初始化部分：将循环变量设置为已完成的迭代后的值
 		if (loopVariable) {
-			const initValue = this.getVariableInitialValue(loopVariable);
+			const initValue = newInitValue;
 			if (initValue !== undefined) {
 				const numericLiteral = ASTBuilder.numericLiteral(newInitValue);
 				const identifier = ASTBuilder.identifier(loopVariable);
+				numericLiteral.dataType = typeReference;
+				identifier.dataType = typeReference;
 				const assignmentExpr = ASTBuilder.assignmentExpression('=', identifier, numericLiteral);
-				
+				numericLiteral.parent = assignmentExpr;
+				identifier.parent = assignmentExpr;
+
 				if (originalLoop.init.type === 'VariableDeclaration') {
 					// 修改变量声明的初始值
 					const newDeclarator = ASTBuilder.variableDeclarator(loopVariable);
 					newDeclarator.initializer = numericLiteral;
+					numericLiteral.parent = newDeclarator;
 					newLoop.init.declarators = [newDeclarator];
+					newDeclarator.parent = newLoop;
 				} else if (originalLoop.init.type === 'ExpressionStatement') {
 					// To be verified
-					originalLoop.addChild(assignmentExpr);
+					originalLoop.init.addChild(assignmentExpr);
+					assignmentExpr.parent = originalLoop;
 				} else {
 					// 创建赋值表达式语句
 					const exprStmt = new ASTNode('ExpressionStatement');
 					exprStmt.addChild(assignmentExpr);
 					newLoop.init = exprStmt;
+					exprStmt.parent = newLoop;
 				}
 			}
 		}
 		
-		
+		newLoop.setAttribute('confirmedSideEffects', true);
 		return newLoop;
+	}
+
+	/**
+	 * 
+	 * @param {WhileStatementNode} originalLoop 
+	 * @param {string} loopVariable 
+	 * @param {number} newInitValue 
+	 * @remark Scheisse! Deepseek had an illusion and didn't implement this
+	 */
+	createModifiedWhileLoop(originalLoop, loopVariable, newInitValue) {
+		const typeReference = this.currentScope.lookup(loopVariable).type.type;
+		const clonedLoop = this.cloneAST(originalLoop);
+		const packer = ASTBuilder.compoundStatement();
+		const ident = ASTBuilder.identifier(loopVariable);
+		const numeric = ASTBuilder.numericLiteral(newInitValue);
+		const assigner = ASTBuilder.assignmentExpression('=', ident, numeric);
+		ident.parent = assigner;
+		numeric.parent = assigner;
+		ident.dataType = typeReference;
+		numeric.dataType = typeReference;
+		packer.statements.push(assigner);
+		packer.statements.push(originalLoop);
+		assigner.parent = packer;
+		originalLoop.parent = packer;
+		originalLoop.setAttribute('confirmedSideEffects', true);
+		return packer;
 	}
 
 	
@@ -10154,8 +10195,25 @@ class SingleInstruction extends Instruction {
 	raw_replace(variable, value) {
 		if (!this.isInstructionGroup) {
 			this.content = this.content.replace(new RegExp(`\\{${variable}\\}`, 'g'), value);
+			return this;
 		} else {
-			super.raw_replace(variable, value);
+			return super.raw_replace(variable, value);
+		}
+	}
+
+	/**
+	 * 
+	 * @param {string} variable 
+	 * @param {any} value 
+	 * @deprecated
+	 */
+	replace(variable, value) {
+		if (!this.isInstructionGroup) {
+			this.content = this.content.replace(new RegExp(`\\{${variable}\\}`, 'g'), `{${this.referrer.length}}`);
+			this.referrer.push(value);
+			return this;
+		} else {
+			return super.replace(variable, value);
 		}
 	}
 
@@ -10995,11 +11053,11 @@ class CodeGenerator extends ASTVisitor {
 		
 		let connector = new Instruction();
 		let bodyProcessor = new Instruction();
+		const body = node.body ? this.visit(node.body) : new Instruction();
 		bodyProcessor.concat(InstructionBuilder.jump('{0}', 'notEqual', test.instructionReturn, 'true', [body.size() + 2]));
 		this.releaseTempVariable();
 		this.currentBreaks = [];
 		this.currentContinues = [];
-		const body = node.body ? this.visit(node.body) : new Instruction();
 		bodyProcessor.concat(body);
 		connector.concat(test);
 		connector.concat(bodyProcessor);
@@ -11278,6 +11336,17 @@ class CodeGenerator extends ASTVisitor {
 	visitUnaryExpression(node) {
 		let result;
 		switch (node.operator) {
+			case '+':
+				return this.visit(node.argument);
+				break;
+			case '-':
+				if (node.argument.type === 'NumericLiteral') {
+					return new Instruction([], -node.argument.value);
+				}
+				result = this.visit(node.argument);
+				result.concat(InstructionBuilder.op('sub', result.instructionReturn, 0, result.instructionReturn));
+				return result;
+				break;
 			case '++': case '--':
 				result = this.visit(node.argument);
 				let duplicate;
