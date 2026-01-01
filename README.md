@@ -1,4 +1,4 @@
-# mindustry-c: A JavaScript program compiling C code (under C89) to Mindustry Assembly
+# mindustry-c: A JavaScript program compiling C code to Mindustry Assembly
 
 ## What is Mindustry-C?
 
@@ -30,6 +30,9 @@ There have been many similar softwares aiming at using languages like C/C++ (ali
   - But you won't have `#pragma` or `#include`
   - Also, support for function pointers might be limited
 
+- Some C/C++ features:
+  - Partial support for `const`
+
 - Adding special types for Mindustry:
   - `device` for device (conveyors, scatters, etc.)
   - `null_t` for `null` in Mindustry (notice that it might **not** like `nullptr` or `(void*)0`)
@@ -50,17 +53,20 @@ There have been many similar softwares aiming at using languages like C/C++ (ali
   - Removal of unused code/variable
     - Including unused `if` branches or `while` loops
   - Inlining functions
-  - ~~Loop unrolling~~ (because instructions are expensive in Mindustry!)
+  - **There's no** ~~Loop unrolling~~ (because instructions are expensive in Mindustry!)
 
 ## Notice
 
 Following functions **rely on** memory allocation:
 
+- Any `volatile` variable
 - Any variable that has address (`&var`)
 - Any `struct` or `union`
 - Any array
 
 A pointer takes up 2 units of spaces, respectively storing the memory cell and address of the element it points to.
+
+Using heap memory might be costly. Avoid declaring memory-demanding variables (listed above) in non-main functions (place them in global scope instead).
 
 Arrays might also take up additional spaces to store its previous/next cell of storage. Designing memory structure for this strange "cyber-" hardware is hard.
 
