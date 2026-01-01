@@ -3830,7 +3830,7 @@ class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'printflush', returnType: 'void', parameters: ['device'] },
 			{ name: 'getlink', returnType: 'device', parameters: ['int'] },
 			{ name: 'control', returnType: 'void', parameters: ['char*', 'device'], hasVarArgs: true }, // 操作名称 + 设备 + 变长参数
-			{ name: 'radar', returnType: 'device', parameters: ['char*', 'char*', 'char*', 'char*', 'int'] },
+			{ name: 'radar', returnType: 'device', parameters: ['char*', 'char*', 'char*', 'char*', 'device', 'int'] },
 			{ name: 'sensor', returnType: 'int', parameters: ['device', 'int'] },
 			{ name: 'set', returnType: 'void', parameters: [], hasVarArgs: true, special: 'set' }, // 特殊处理
 			{ name: 'op', returnType: 'void', parameters: [], hasVarArgs: true, special: 'op' }, // 特殊处理
@@ -5928,7 +5928,6 @@ class Optimizer {
         // 分析参数
         node.arguments.forEach(arg => this.analyzeNode(arg, info));
     }
-	
 	// ! Manually updated !
 	analyzeIfStatement(node, info = null) {
 		// 分析条件表达式
@@ -6877,26 +6876,26 @@ class Optimizer {
 					}
 					break;
 				
-				case 'CompoundStatement':
-					node.statements.forEach(stmt => collectFromNode(stmt));
-					break;
-				case 'ForStatement':
-				case 'WhileStatement':
-				case 'IfStatement':
-					if (node.init) collectFromNode(node.init);
-					if (node.test) collectFromNode(node.test);
-					if (node.update) collectFromNode(node.update);
-					if (node.body) collectFromNode(node.body);
-					if (node.consequent) collectFromNode(node.consequent);
-					if (node.alternate) collectFromNode(node.alternate);
-					break;
-				case 'ReturnStatement':
-					if (node.argument) collectFromNode(node.argument);
 			}
 			
 			// 递归处理子节点
 			if (node.children) {
 				node.children.forEach(child => collectFromNode(child));
+			}
+
+			const fieldsToCheck = [
+				'functions', 'globalDeclarations', 'typeDefinitions',
+				'statements', 'expression', 'test', 'consequent', 'alternate',
+				'body', 'init', 'update', 'argument', 'left', 'right',
+				'declarators', 'arguments', 'callee', 'initializer'
+			];
+
+			for (const field of fieldsToCheck) {
+				if (Array.isArray(node[field])) {
+					node[field].forEach(elem => collectFromNode(elem));
+				} else if (node[field] && typeof node[field] === 'object') {
+					collectFromNode(node[field]);
+				}
 			}
 		};
 		
@@ -11121,11 +11120,11 @@ class CodeGenerator extends ASTVisitor {
 		const test = this.implicitToBoolean(node.test);
 		let connector = new Instruction();
 		let bodyProcessor = new Instruction();
+		this.currentBreaks = [];
+		this.currentContinues = [];
 		const body = node.body ? this.visit(node.body) : new Instruction();
 		bodyProcessor.concat(InstructionBuilder.jump('{0}', 'notEqual', test.instructionReturn, 'true', [body.size() + 2]));
 		this.releaseTempVariable();
-		this.currentBreaks = [];
-		this.currentContinues = [];
 		bodyProcessor.concat(body);
 		connector.concat(test);
 		connector.concat(bodyProcessor);
@@ -11152,6 +11151,8 @@ class CodeGenerator extends ASTVisitor {
 	 */
 	visitForStatement(node) {
 		let loopSystem = new Instruction();
+		this.currentBreaks = [];
+		this.currentContinues = [];
 		const body = node.body ? this.visit(node.body) : new Instruction();
 		const update = node.update ? this.visit(node.update) : new Instruction();
 		let initSystem = new Instruction();
@@ -11161,8 +11162,6 @@ class CodeGenerator extends ASTVisitor {
 			this.releaseTempVariable();
 		}
 		let bodyLoop = new Instruction();
-		this.currentBreaks = [];
-		this.currentContinues = [];
 		bodyLoop.concat(body);
 		bodyLoop.concat(update);
 		bodyLoop.concat(InstructionBuilder.jump('{0}', 'always', null, null, [0]));
@@ -11869,7 +11868,7 @@ class CodeGenerator extends ASTVisitor {
 						throw `Parameter ${i} for radar() must be a string literal`;
 					}
 				}
-				const processSequence = ast.arguments[i].slice(0, 4).map(arg => arg.value).join(" ");
+				const processSequence = ast.arguments.slice(0, 4).map(arg => arg.value).join(" ");
 				return packer(`radar ${processSequence}`, ast.arguments.slice(4), true);
 			},
 			sensor: ast => {
