@@ -66,5 +66,6 @@ Arrays might also take up additional spaces to store its previous/next cell of s
 
 ## Special Grammar
 
-- Use `auto volatile device conveyor1;` to register a connected device.
+- Use `auto device conveyor1;` to register a connected device (**`auto` is essential**).
 - Use `(volatile int*)` (or similar) to force to transmit registry variables to some functions (reserved for builtin calls).
+- Function pointers must have a `typedef` declared.
