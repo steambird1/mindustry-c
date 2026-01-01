@@ -11627,12 +11627,15 @@ class CodeGenerator extends ASTVisitor {
 			
 			case 'UnaryExpression':
 				if (left.getAttribute('isDereference')) {
-					precall = this.visit(left.argument);	// Simple calculation
-					if (left.argument.dataType.kind === 'pointer') {
-						isPointer = true;
+					if (returnOnlyPointer) {
+						throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable already has memory address. Use '&' to avoid this problem.)`, left);
 					}
+					precall = this.visit(left.argument);	// Simple calculation
+					// Not regarding as pointer!
 					pointer = precall.instructionReturn;
 					break;
+				} else {
+					return this.processLValGetter(left.argument, returnOnlyPointer);
 				}
 				// Otherwise, DELIBERATELY PASS DOWN
 			default:
