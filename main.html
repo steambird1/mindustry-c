@@ -199,6 +199,54 @@
             color: #6c757d;
             font-size: 0.9rem;
         }
+
+                /* 修改位置：在已有的CSS样式中添加 */
+
+        .error-output {
+            color: #dc3545;
+            background-color: #f8d7da;
+            border-left: 4px solid #dc3545;
+        }
+
+        .warning-output {
+            color: #856404;
+            background-color: #fff3cd;
+            border-left: 4px solid #ffc107;
+        }
+
+        .error-output, .warning-output {
+            height: 200px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.3;
+            white-space: pre;
+            overflow-wrap: normal;
+            overflow-x: auto;
+        }
+
+        /* 错误和警告消息中的行号样式 */
+        .error-line, .warning-line {
+            color: #666;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+
+        /* 错误和警告消息中的位置信息样式 */
+        .error-location, .warning-location {
+            color: #6c757d;
+            font-style: italic;
+            margin-right: 10px;
+        }
+
+        /* 错误和警告消息容器 */
+        .error-item, .warning-item {
+            padding: 5px 10px;
+            border-bottom: 1px solid rgba(0,0,0,0.1);
+        }
+
+        .error-item:last-child, .warning-item:last-child {
+            border-bottom: none;
+        }
         
         @media (max-width: 768px) {
             .code-container, .output-container {
@@ -339,6 +387,31 @@ void main() {
                         <pre class="output-container p-3 mb-0" id="output-text">汇编代码将显示在这里...</pre>
                     </div>
                 </div>
+
+                <div class="card mt-3">
+                    <div class="card-header bg-danger text-white">
+                        编译错误
+                        <span class="badge bg-light text-danger ms-2" id="error-count">0</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="output-container error-output" id="error-output">
+                            <div class="p-3 text-muted">暂无错误信息</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 编译警告显示 -->
+                <div class="card mt-3">
+                    <div class="card-header bg-warning text-dark">
+                        编译警告
+                        <span class="badge bg-light text-warning ms-2" id="warning-count">0</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="output-container warning-output" id="warning-output">
+                            <div class="p-3 text-muted">暂无警告信息</div>
+                        </div>
+                    </div>
+                </div>
                 
                 <div class="card">
                     <div class="card-header">
@@ -457,7 +530,7 @@ void main() {
                 try {
                     const lexer = new Lexer(code);
                     const result = lexer.tokenize();
-                    console.log(result);
+                    //console.log(result);
                     // 处理高亮HTML
                     let highlightedHTML = '';
                     let currentPosition = 0;
@@ -465,18 +538,20 @@ void main() {
                     // 对每个token进行高亮处理
                     for (const token of result.tokens) {
                         // 添加token之前的普通文本
+                        //console.log("Current:"+currentPosition+",coming:",token);
                         if (token.location.index > currentPosition) {
                             const plainText = code.substring(currentPosition, token.location.index);
-                            highlightedHTML += escapeHtml(plainText);
+                            //console.log("Plain text: from"+currentPosition+"to"+token.location.index,`"${plainText}"`);
+                            highlightedHTML += `<span>${escapeHtml(plainText)}</span>`;
                         }
                         
                         // 根据token类型添加高亮类
-                        let tokenText = token.value || '';
+                        let tokenText = `${token.value}` || '';
                         const tokenType = token.type;
                         
                         let cssClass = '';
                         if (tokenType.includes('KEYWORD') || 
-                            Object.values(TokenType).slice(4, 34).includes(tokenType)) { // 关键字范围
+                            Object.values(TokenType).slice(4, 41).includes(tokenType)) { // 关键字范围
                             cssClass = 'keyword';
                         } else if (tokenType === TokenType.IDENTIFIER) {
                             cssClass = 'identifier';
@@ -484,22 +559,22 @@ void main() {
                             cssClass = 'number';
                         } else if (tokenType === TokenType.STRING || tokenType === TokenType.CHARACTER) {
                             tokenText = token.raw ?? token.value;
-                            console.log(tokenText);
+                            //console.log(tokenText);
                             cssClass = 'string';
                         } else if (tokenType.includes('OPERATOR') || 
-                                   Object.values(TokenType).slice(34, 70).includes(tokenType)) { // 运算符范围
+                                   Object.values(TokenType).slice(41, 69).includes(tokenType)) { // 运算符范围
                             cssClass = 'operator';
                         } else if (tokenType.includes('PUNCTUATOR') || 
-                                   Object.values(TokenType).slice(70, 85).includes(tokenType)) { // 标点符号范围
+                                   Object.values(TokenType).slice(69, 80).includes(tokenType)) { // 标点符号范围
                             cssClass = 'punctuator';
-                        } else if (Object.values(TokenType).slice(85, 110).includes(tokenType)) { // 特殊指令
+                        } else if (Object.values(TokenType).slice(80, 110).includes(tokenType)) { // 特殊指令
                             cssClass = 'special';
                         } else if (tokenType === TokenType.PREDEFINED_CONSTANT) {
                             cssClass = 'predefined';
                         } else if (tokenType === TokenType.COMMENT) {
                             cssClass = 'comment';
                         }
-                        
+
                         if (cssClass) {
                             highlightedHTML += `<span class="${cssClass}">${escapeHtml(tokenText)}</span>`;
                         } else {
@@ -584,6 +659,87 @@ void main() {
     }
 }
             // 函数：编译代码
+
+                        // 修改位置：在JavaScript部分添加以下函数
+
+            // 函数：显示错误信息
+            function displayErrors(errors) {
+                const errorOutput = document.getElementById('error-output');
+                const errorCount = document.getElementById('error-count');
+                
+                if (!errors || errors.length === 0) {
+                    errorOutput.innerHTML = '<div class="p-3 text-muted">暂无错误信息</div>';
+                    errorCount.textContent = '0';
+                    return;
+                }
+                
+                errorCount.textContent = errors.length;
+                
+                let errorHTML = '';
+                errors.forEach((error, index) => {
+                    if (!error) return;
+                    errorHTML += `<div class="error-item">
+                        <span class="error-line">${index + 1}.</span>`;
+                    
+                    if (error.line && error.column) {
+                        errorHTML += `<span class="error-location">[行${error.line},列${error.column}]</span>`;
+                    }
+                    
+                    errorHTML += `<span>${escapeHtml(error.message || error)}</span>`;
+                    
+                    if (error.location) {
+                        errorHTML += `<div class="text-muted small ms-4">位置: 索引${error.location.index}</div>`;
+                    }
+                    
+                    errorHTML += `</div>`;
+                });
+                
+                errorOutput.innerHTML = errorHTML;
+            }
+
+            // 函数：显示警告信息
+            function displayWarnings(warnings) {
+                const warningOutput = document.getElementById('warning-output');
+                const warningCount = document.getElementById('warning-count');
+                
+                if (!warnings || warnings.length === 0) {
+                    warningOutput.innerHTML = '<div class="p-3 text-muted">暂无警告信息</div>';
+                    warningCount.textContent = '0';
+                    return;
+                }
+                
+                warningCount.textContent = warnings.length;
+                
+                let warningHTML = '';
+                warnings.forEach((warning, index) => {
+                    if (!warning) return;
+                    warningHTML += `<div class="warning-item">
+                        <span class="warning-line">${index + 1}.</span>`;
+                    
+                    if (warning.line && warning.column) {
+                        warningHTML += `<span class="warning-location">[行${warning.line},列${warning.column}]</span>`;
+                    }
+                    
+                    warningHTML += `<span>${escapeHtml(warning.message || warning)}</span>`;
+                    
+                    if (warning.location) {
+                        warningHTML += `<div class="text-muted small ms-4">位置: 索引${warning.location.index}</div>`;
+                    }
+                    
+                    warningHTML += `</div>`;
+                });
+                
+                warningOutput.innerHTML = warningHTML;
+            }
+
+            // 函数：清空错误和警告显示
+            function clearErrorWarnings() {
+                document.getElementById('error-output').innerHTML = '<div class="p-3 text-muted">暂无错误信息</div>';
+                document.getElementById('warning-output').innerHTML = '<div class="p-3 text-muted">暂无警告信息</div>';
+                document.getElementById('error-count').textContent = '0';
+                document.getElementById('warning-count').textContent = '0';
+            }
+
             function compileCode() {
                 const code = codeInput.value;
                 
@@ -627,6 +783,7 @@ void main() {
                         const result = compiler.compile();
                         
                         // 显示编译结果
+                        /*
                         if (result.success) {
                             showCompileStatus('success', '成功', '编译成功完成');
                             outputText.textContent = result.code || '编译成功，但未生成代码';
@@ -674,6 +831,48 @@ void main() {
                                         outputText.textContent += `${error.message || error}\n`;
                                     }
                                 });
+                            }
+                        }
+                            */
+                        
+                        // 修改为：
+                        if (result.success) {
+                            showCompileStatus('success', '成功', '编译成功完成');
+                            outputText.textContent = result.code || '编译成功，但未生成代码';
+                            
+                            // 分离显示错误和警告
+                            if (result.errors && result.errors.length > 0) {
+                                displayErrors(result.errors);
+                            } else {
+                                clearErrorWarnings();
+                            }
+                            
+                            if (result.warnings && result.warnings.length > 0) {
+                                displayWarnings(result.warnings);
+                            } else {
+                                // 如果没有警告，确保警告区域是空的
+                                document.getElementById('warning-output').innerHTML = '<div class="p-3 text-muted">暂无警告信息</div>';
+                                document.getElementById('warning-count').textContent = '0';
+                            }
+                        } else {
+                            showCompileStatus('error', '失败', '编译失败');
+                            outputText.textContent = '编译失败:\n';
+                            
+                            // 显示致命错误（如果有）
+                            if (result.fatalError) {
+                                outputText.textContent += result.fatalError + '\n';
+                            }
+                            
+                            // 显示错误信息
+                            if (result.errors && result.errors.length > 0) {
+                                displayErrors(result.errors);
+                            } else {
+                                clearErrorWarnings();
+                            }
+                            
+                            // 显示警告信息
+                            if (result.warnings && result.warnings.length > 0) {
+                                displayWarnings(result.warnings);
                             }
                         }
                     // 在编译函数的 catch 块中，添加更详细的错误信息：

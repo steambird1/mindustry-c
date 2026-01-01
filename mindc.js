@@ -342,18 +342,18 @@ class NumericLiteralNode extends ASTNode {
 }
 
 class StringLiteralNode extends ASTNode {
-    constructor(value) {
+    constructor(value, raw = null) {
         super(ASTNodeType.STRING_LITERAL);
         this.value = value;
-        this.raw = `"${value}"`;
+        this.raw = raw ?? `"${value}"`;
     }
 }
 
 class CharacterLiteralNode extends ASTNode {
-    constructor(value) {
+    constructor(value, raw = null) {
         super(ASTNodeType.CHARACTER_LITERAL);
         this.value = value;
-        this.raw = `'${value}'`;
+        this.raw = raw ?? `'${value}'`;
     }
 }
 
@@ -454,6 +454,7 @@ class DeclaratorNode extends ASTNode {
         this.pointerQualifiers = []; // 指针限定符数组，每个元素对应一级指针
         this.arrayDimensions = []; // 数组维度
         this.functionParams = null; // 函数参数（用于函数指针）
+		this.initializer = null;
     }
 }
 
@@ -539,12 +540,12 @@ class ASTBuilder {
         return new NumericLiteralNode(value);
     }
     
-    static stringLiteral(value) {
-        return new StringLiteralNode(value);
+    static stringLiteral(value, raw = null) {
+        return new StringLiteralNode(value, raw);
     }
     
-    static characterLiteral(value) {
-        return new CharacterLiteralNode(value);
+    static characterLiteral(value, raw = null) {
+        return new CharacterLiteralNode(value, raw);
     }
     
     static nullLiteral() {
@@ -669,6 +670,9 @@ const TokenType = {
     VOID: 'VOID',
     VOLATILE: 'VOLATILE',
     WHILE: 'WHILE',
+	BOOL: 'BOOL',
+	TRUE: 'TRUE',
+	FALSE: 'FALSE',
     
     // 特殊关键字
     NULL: 'NULL',
@@ -804,6 +808,7 @@ class Token {
 const KEYWORDS = {
     'auto': TokenType.AUTO,
     'break': TokenType.BREAK,
+	'bool': TokenType.BOOL,
     'case': TokenType.CASE,
     'char': TokenType.CHAR,
     'const': TokenType.CONST,
@@ -814,6 +819,7 @@ const KEYWORDS = {
     'else': TokenType.ELSE,
     'enum': TokenType.ENUM,
     'extern': TokenType.EXTERN,
+	'false': TokenType.FALSE,
     'float': TokenType.FLOAT,
     'for': TokenType.FOR,
     'goto': TokenType.GOTO,
@@ -828,7 +834,8 @@ const KEYWORDS = {
     'sizeof': TokenType.SIZEOF,
     'static': TokenType.STATIC,
     'struct': TokenType.STRUCT,
-    'switch': TokenType.SWITCH,
+    'switch': TokenType.SWITCH, /* Unsupported */
+	'true': TokenType.TRUE,
     'typedef': TokenType.TYPEDEF,
     'union': TokenType.UNION,
     'unsigned': TokenType.UNSIGNED,
@@ -1729,7 +1736,7 @@ class Parser {
 		const storageTokens = ['static', 'register', 'extern', 'auto'];
 
 		const typeTokens = [
-            TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID,
+            TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID, TokenType.BOOL,
             TokenType.DOUBLE, TokenType.LONG, TokenType.SHORT, TokenType.SIGNED, TokenType.UNSIGNED,
             TokenType.STRUCT, TokenType.UNION, TokenType.ENUM
         ];
@@ -1899,11 +1906,19 @@ class Parser {
             else {
                 break;
             }
-        }
+		}
         
         // 设置指针信息
         declarator.pointerDepth = pointerDepth;
         declarator.pointerQualifiers = pointerQualifiers;
+
+		if (!isFunctionParam) {
+				if (this.matchToken(TokenType.ASSIGN)) {
+				this.consumeToken();
+				declarator.initializer = this.parseExpression();
+				declarator.initializer.parent = declarator;
+			}
+		}
         
         return declarator;
     }
@@ -2026,7 +2041,7 @@ class Parser {
 
         // 跳过类型说明符
         while (this.matchTokenTypeAt(currentIndex, [
-            TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID,
+            TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID, TokenType.BOOL,
             TokenType.DOUBLE, TokenType.LONG, TokenType.SHORT, TokenType.SIGNED, TokenType.UNSIGNED,
             TokenType.STRUCT, TokenType.UNION, TokenType.ENUM,
             TokenType.IDENTIFIER // typedef定义的类型
@@ -2336,6 +2351,7 @@ class Parser {
             varDeclarator.pointerDepth = declarator.pointerDepth;
             varDeclarator.pointerQualifiers = declarator.pointerQualifiers;
             varDeclarator.arrayDimensions = declarator.arrayDimensions;
+			varDeclarator.initializer = declarator.initializer;
 			
 			if (type.pointerDepth > 0) {
 				// Only for the first
@@ -2347,12 +2363,13 @@ class Parser {
             
 			// This is a little bit different from pure C89
             // 处理初始化
+			/*
             if (this.matchToken(TokenType.ASSIGN)) {
                 this.consumeToken();
                 varDeclarator.initializer = this.parseExpression();
 				varDeclarator.initializer.parent = varDeclarator;
             }
-            
+            */
             declarators.push(varDeclarator);
 			varDeclarator.parent = varDecl;
         } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
@@ -2433,6 +2450,7 @@ class Parser {
 			case TokenType.CONST:
 			case TokenType.VOLATILE:
             case TokenType.INT:
+			case TokenType.BOOL:
             case TokenType.CHAR:
             case TokenType.FLOAT:
             case TokenType.VOID:
@@ -2453,24 +2471,24 @@ class Parser {
             
             default:
                 // 检查是否为已知类型名（包括自定义类型）
-                if (this.isTypeName(token.value)) {
-                    // 尝试解析为变量声明
-                    const savedIndex = this.currentTokenIndex;
-                    const savedErrorsLength = this.errors.length;
-                    
-                    // 尝试解析为变量声明
-                    const declaration = this.tryParseVariableDeclaration();
-                    if (declaration) {
-                        return declaration;
-                    }
-                    
-                    // 解析失败，恢复状态
-                    this.currentTokenIndex = savedIndex;
-                    // 移除尝试解析期间产生的错误
-                    if (this.errors.length > savedErrorsLength) {
-                        this.errors.splice(savedErrorsLength);
-                    }
-                }
+                //if (this.isTypeName(token.value)) {
+				// 尝试解析为变量声明
+				const savedIndex = this.currentTokenIndex;
+				const savedErrorsLength = this.errors.length;
+				
+				// 尝试解析为变量声明
+				const declaration = this.tryParseVariableDeclaration();
+				if (declaration) {
+					return declaration;
+				}
+				
+				// 解析失败，恢复状态
+				this.currentTokenIndex = savedIndex;
+				// 移除尝试解析期间产生的错误
+				if (this.errors.length > savedErrorsLength) {
+					this.errors.splice(savedErrorsLength);
+				}
+                //}
                 return this.parseExpressionStatement();
         }
     }
@@ -2818,7 +2836,7 @@ class Parser {
                 break;
             }
 
-            const logicalExpr = ASTBuilder.logicalExpression(operatorToken.value, left, right);
+            const logicalExpr = ASTBuilder.binaryExpression(operatorToken.value, left, right);
 			left.parent = logicalExpr;
 			right.parent = logicalExpr;
             logicalExpr.location = left.location;
@@ -2841,7 +2859,7 @@ class Parser {
                 break;
             }
 
-            const logicalExpr = ASTBuilder.logicalExpression(operatorToken.value, left, right);
+            const logicalExpr = ASTBuilder.binaryExpression(operatorToken.value, left, right);
 			left.parent = logicalExpr;
 			right.parent = logicalExpr;
             logicalExpr.location = left.location;
@@ -2966,7 +2984,7 @@ class Parser {
 			
 			// 尝试解析类型说明符
 			const typeTokens = [
-				TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID,
+				TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID, TokenType.BOOL,
 				TokenType.DOUBLE, TokenType.LONG, TokenType.SHORT, 
 				TokenType.SIGNED, TokenType.UNSIGNED,
 				TokenType.STRUCT, TokenType.UNION, TokenType.ENUM
@@ -3254,15 +3272,25 @@ class Parser {
                 this.consumeToken();
                 return ASTBuilder.numericLiteral(token.value).setAttribute('location', token.location);
             }
+
+			case TokenType.TRUE: {
+				this.consumeToken();
+                return ASTBuilder.numericLiteral(true).setAttribute('location', token.location);
+			}
+
+			case TokenType.FALSE: {
+				this.consumeToken();
+                return ASTBuilder.numericLiteral(false).setAttribute('location', token.location);
+			}
             
             case TokenType.STRING: {
                 this.consumeToken();
-                return ASTBuilder.stringLiteral(token.value).setAttribute('location', token.location);
+                return ASTBuilder.stringLiteral(token.value, token.raw).setAttribute('location', token.location);
             }
             
             case TokenType.CHARACTER: {
                 this.consumeToken();
-                return ASTBuilder.characterLiteral(token.value).setAttribute('location', token.location);
+                return ASTBuilder.characterLiteral(token.value, token.raw).setAttribute('location', token.location);
             }
             
             case TokenType.NULL: {
@@ -3419,6 +3447,9 @@ class SymbolEntry {
 		if (this.isAutoDevice) {
 			return this.name;
 		}
+		if (this.kind === 'function') {
+			return '_' + this.name;
+		}
 		if (this.scope) {
 			return this.scope.getPath() + "." + this.name;
 		} else {
@@ -3430,6 +3461,16 @@ class SymbolEntry {
 		let result = new SymbolEntry(this.name, this.type, this.scope, this.kind);
 		Object.assign(result, this);
 		return result;
+	}
+
+	extractType() {
+		let resultType = this.type.type.duplicate();
+		if (this.isAutoDevice) resultType.qualifiers.push('auto');
+		if (this.isRegister) resultType.qualifiers.push('register');
+		if (this.isConst || this.type.isConst) resultType.qualifiers.push('const');
+		if (this.isVolatile || this.type.isVolatile) resultType.qualifiers.push('volatile');
+		if (this.isStatic) resultType.qualifiers.push('static');
+		return resultType;
 	}
 }
 
@@ -3476,10 +3517,15 @@ class Scope {
 	// 获取当前作用域的所有符号
 	/**
 	 * @returns {List<SymbolEntry>} All symbols of current scope.
+	 * @remark Notice: children scopes' information isn't included.
 	 */
     getAllSymbols() {
         return Array.from(this.symbols.values());
     }
+
+	recursivelyGetAllSymbols() {
+		return [...this.getAllSymbols(), ...(this.children.flatMap(child => child.recursivelyGetAllSymbols())) ];
+	}
 	
 	// 获取作用域的完整路径
     getPath() {
@@ -3537,6 +3583,17 @@ class TypeInfo {
 		}
         return result;
     }
+
+	/**
+	 * @remark Shallow copy for members and comprehensive copy for qualifiers.
+	 * @returns {TypeInfo}
+	 */
+	duplicate() {
+		let result = new TypeInfo(this.name, this.kind, this.size);
+		Object.assign(result, this);
+		result.qualifiers = [...this.qualifiers];
+		return result;
+	}
 }
 
 class MemberInfo {
@@ -3744,7 +3801,7 @@ class SemanticAnalyzer extends ASTVisitor {
 
     initializeBuiltinTypes() {
         // 基本类型
-        const basicTypes = ['int', 'char', 'float', 'double', 'void', 'long', 'short', 'signed', 'unsigned'];
+        const basicTypes = ['int', 'char', 'float', 'double', 'void', 'long', 'short', 'signed', 'unsigned', 'bool'];
         basicTypes.forEach(type => {
             this.typeTable.set(type, new TypeInfo(type, 'basic', 1));
         });
@@ -3765,6 +3822,7 @@ class SemanticAnalyzer extends ASTVisitor {
 
     initializeBuiltinFunctions() {
 		// TODO: Must be modified...
+		// TODO: Use boolean here
         const builtins = [
             { name: 'draw', returnType: 'void', parameters: ['char*'], hasVarArgs: true }, // 操作名称 + 变长参数 (Actually, need further judgment)
 			{ name: 'print', returnType: 'void', parameters: [], hasVarArgs: true }, // 变长参数 (Actually, accepting multiple operations)
@@ -4302,7 +4360,7 @@ class SemanticAnalyzer extends ASTVisitor {
 			if (storageClass === 'extern') {
 				varSymbol.accessThroughPointer = true;
 			}
-			if (storageClass === 'auto' && baseTypeName === 'device') {
+			if (baseTypeName === 'auto device') {
 				varSymbol.isAutoDevice = true;
 			}
 			
@@ -4315,6 +4373,7 @@ class SemanticAnalyzer extends ASTVisitor {
             varSymbol.isGlobal = this.currentScope === this.globalScope;
 			// Meaning that the variable requires special memory space. This doesn't mean that it's a pointer itself!
 			varSymbol.accessThroughPointer = pointerAccess || (varSymbol.isVolatile && !varSymbol.isRegister);
+			declarator.dataType = varSymbol.extractType();
 
             this.currentScope.addSymbol(varSymbol);
 
@@ -4329,17 +4388,14 @@ class SemanticAnalyzer extends ASTVisitor {
                         `Cannot initialize '${this.typeToString(finalType)}' with '${this.typeToString(initType)}'`,
                         declarator.initializer.location
                     );
-                }
-
-                // 检查const变量初始化
-                if (finalType.isConst() && !declarator.initializer) {
-                    this.addError(`Const variable '${declarator.name}' must be initialized`, declarator.location);
-                }
+				}
 
                 varSymbol.initialized = true;
-            } else if (finalType.isConst()) {
-                this.addError(`Const variable '${declarator.name}' must be initialized`, declarator.location);
             }
+			// 检查const变量初始化
+			if (finalType.isConst() && !varSymbol.isAutoDevice && !declarator.initializer) {
+				this.addError(`Const variable '${declarator.name}' must be initialized or be an automatically-linked device`, declarator.location);
+			}
         });
     }
 
@@ -4349,7 +4405,9 @@ class SemanticAnalyzer extends ASTVisitor {
 	 */
 	visitNumericLiteral(node) {
 		//node.dataType = this.typeTable.get('int');
-		if (node.raw.indexOf('.') !== -1 || node.raw.slice(-1) === 'f') {
+		if (node.value === true || node.value === false) {
+			node.dataType = this.typeTable.get('bool');
+		} else if (node.raw.indexOf('.') !== -1 || node.raw.slice(-1) === 'f') {
 			node.dataType = this.typeTable.get('float');
 		} else {
 			node.dataType = this.typeTable.get('int');
@@ -4868,8 +4926,8 @@ class SemanticAnalyzer extends ASTVisitor {
         
         // 检查条件表达式类型
         const testType = this.getExpressionType(node.test);
-        if (testType && testType.name !== 'int') {
-            this.addWarning(`Condition expression should be of type 'int'`, node.test.location);
+        if (testType && testType.name !== 'bool') {
+            this.addWarning(`Condition expression should be of type 'bool'`, node.test.location);
         }
 
         this.visit(node.consequent);
@@ -4883,8 +4941,8 @@ class SemanticAnalyzer extends ASTVisitor {
         
         // 检查条件表达式类型
         const testType = this.getExpressionType(node.test);
-        if (testType && testType.name !== 'int') {
-            this.addWarning(`Loop condition should be of type 'int'`, node.test.location);
+        if (testType && testType.name !== 'bool') {
+            this.addWarning(`Loop condition should be of type 'bool'`, node.test.location);
         }
 
         this.visit(node.body);
@@ -4901,8 +4959,8 @@ class SemanticAnalyzer extends ASTVisitor {
         if (node.test) {
             this.visit(node.test);
             const testType = this.getExpressionType(node.test);
-            if (testType && testType.name !== 'int') {
-                this.addWarning(`Loop condition should be of type 'int'`, node.test.location);
+            if (testType && testType.name !== 'bool') {
+                this.addWarning(`Loop condition should be of type 'bool'`, node.test.location);
             }
         }
         if (node.update) this.visit(node.update);
@@ -5098,14 +5156,14 @@ class SemanticAnalyzer extends ASTVisitor {
         }
         
         // 数值类型之间的兼容性
-        const numericTypes = ['int', 'char', 'short', 'long', 'float', 'double', 'signed', 'unsigned'];
+        const numericTypes = ['int', 'char', 'short', 'long', 'float', 'double', 'signed', 'unsigned', 'bool'];
         if (numericTypes.includes(targetType.name) && numericTypes.includes(sourceType.name)) {
             return true;
         }
-        
-        // null_t可以赋值给指针类型
+
 		// TODO: Let's regard this as a feature...
-        if (sourceType.name === 'null_t' && targetType.kind === 'pointer') {
+		// null_t can be assigned to everything
+        if (sourceType.name === 'null_t') {
             return true;
         }
         
@@ -5175,7 +5233,7 @@ class SemanticAnalyzer extends ASTVisitor {
 
         // 逻辑运算符要求布尔上下文（这里简化为int类型）
         if (logicalOps.includes(operator)) {
-            return leftType === 'int' && rightType === 'int';
+            return this.isLogicalType(leftType.name) && this.isLogicalType(rightType.name);
         }
 
         // 位运算符要求整型
@@ -5214,9 +5272,9 @@ class SemanticAnalyzer extends ASTVisitor {
             return this.isNumericType(argType);
         }
 
-        // 逻辑非要求布尔上下文（简化为int）
+        // 逻辑非要求布尔上下文
         if (logicalOps.includes(operator)) {
-            return argType === 'int';
+            return argType === 'bool';
         }
 
         // 位非要求整型
@@ -5237,8 +5295,14 @@ class SemanticAnalyzer extends ASTVisitor {
     }
 
     getResultType(operator, leftType, rightType) {
-        // 简化处理：大多数情况返回左操作数的类型
+		const comparisonOps = ['==', '!=', '<', '<=', '>', '>=', '||', '&&'];
+		const pointerOps = ['+', '-'];
         // 在实际编译器中需要更精确的类型推导
+		if (comparisonOps.includes(operator)) return this.typeTable.get('bool');
+		if (pointerOps.includes(operator)) {
+			if (leftType.kind === 'pointer') return leftType;
+			if (rightType.kind === 'pointer') return rightType;
+		}
         return leftType;
     }
 
@@ -5255,6 +5319,10 @@ class SemanticAnalyzer extends ASTVisitor {
 		if (operator === '*') {
 			// Return a pointer's pointing-to
 			return argType.pointerTo;
+		}
+
+		if (operator === '!') {
+			return this.typeTable.get('bool');
 		}
 		
         return argType;
@@ -5295,6 +5363,11 @@ class SemanticAnalyzer extends ASTVisitor {
         const integerTypes = ['int', 'char', 'short', 'long', 'signed', 'unsigned'];
         return integerTypes.includes(type);
     }
+
+	isLogicalType(type) {
+		const logicalTypes = ['bool'];
+		return this.isNumericType(type) || logicalTypes.includes(type);
+	}
 
     // 默认访问方法
     visitDefault(node) {
@@ -7847,6 +7920,8 @@ class Optimizer {
             case '&': case '&=': return left & right;
             case '|': case '|=': return left | right;
             case '^': case '^=': return left ^ right;
+			case '||': return left || right;
+			case '&&': return left && right;
             case '<<': case '<<=': return left << right;
             case '>>': case '>>=': return left >> right;
             case '==': return left == right ? 1 : 0;
@@ -7877,8 +7952,20 @@ class Optimizer {
         
         // 检查节点是否有副作用
         switch (node.type) {
-			case 'BinaryExpression':
+			case 'VariableDeclarator':
+			case 'Declarator':
+				if (node.dataType && (node.dataType.qualifiers.includes('volatile') || node.dataType.qualifiers.includes('static'))) {
+					return true;
+				}
+				if (node.initializer) {
+					return this.hasSideEffects(node.initializer);
+				}
+				break;
             case 'AssignmentExpression':
+				if (node.left.dataType && (node.left.dataType.qualifiers.includes('volatile') || node.left.dataType.qualifiers.includes('static'))) {
+					return true;
+				}
+			case 'BinaryExpression':
 				return (this.hasSideEffects(node.left)) || (this.hasSideEffects(node.right));
 				// TODO: Double-check logic here
 				break;
@@ -7944,6 +8031,13 @@ class Optimizer {
         }
         
         // 递归检查子节点
+		if (node.declarators) {
+			let hasSideEffects = false;
+			node.declarators.forEach(declarator => {
+				hasSideEffects = hasSideEffects || this.hasSideEffects(declarator);
+			});
+			return hasSideEffects;
+		}
         if (node.children) {
             for (const child of node.children) {
                 if (this.hasSideEffects(child)) {
@@ -8454,6 +8548,7 @@ class Optimizer {
         const info = this.functionInfo.get(funcName);
         if (!info || !info.node.body) return false;
 		if (!info.canInline) return false;
+		if (this.hasSideEffects(info.node.body)) return false;
         
         // 检查递归调用
         const calledFunctions = this.functionCallGraph.get(funcName) || new Set();
@@ -8669,7 +8764,7 @@ class Optimizer {
 				if (parentOfParent && parentOfParent.statements) {
 					result = doInsertInto(parentOfParent, null, false);
 				} else {
-					this.errors.push(`Internal Error: Unable to inline function '${funcNode.name} (E3)'`);
+					this.warnings.push(`Internal Error: Unable to inline function '${funcNode.name} (E3)'`);
 					return false;
 				}
 			}
@@ -8684,22 +8779,22 @@ class Optimizer {
 					// Should be already replaced inside the loop
 					result = doInsertInto(parentOfParent, directParent, false);
 				} else {
-					this.errors.push(`Internal Error: Unable to inline function '${funcNode.name} (E1)'`);
+					this.warnings.push(`Internal Error: Unable to inline function '${funcNode.name} (E1)'`);
 					return false;
 				}
 			}
 			// Replacement already done
-		} else if (directParent.type === 'compoundStatement') {
+		} else if (directParent.type === 'CompoundStatement') {
 			// Directly insert it? I should go for the call node!
 			result = doInsertInto(callNode, null, true);
 			// Delete the original statement inside
 		} else {
-			this.errors.push(`Internal Error: Unable to inline function '${funcNode.name} (E4)'`);
+			this.warnings.push(`Internal Error: Unable to inline function '${funcNode.name} (E4)'`);
 			return false;
 		}
 		
 		if (!result) {
-			this.errors.push(`Internal Error: Unable to inline function '${funcNode.name}' (E2)`);
+			this.warnings.push(`Internal Error: Unable to inline function '${funcNode.name}' (E2)`);
 			return false;
 		}
 		
@@ -8732,11 +8827,6 @@ class Optimizer {
 		// 检查函数体大小
 		const functionSize = this.estimateFunctionSize(funcNode);
 		if (functionSize > 20) { // 阈值，可根据需要调整
-			return false;
-		}
-		
-		// 检查是否有副作用
-		if (this.functionHasSideEffects(funcNode)) {
 			return false;
 		}
 		
@@ -8844,6 +8934,7 @@ class Optimizer {
 	 * 检查函数是否有副作用
 	 */
 	functionHasSideEffects(funcNode) {
+		/*
 		let hasSideEffects = false;
 		
 		const checkNode = (node) => {
@@ -8852,7 +8943,8 @@ class Optimizer {
 			switch (node.type) {
 				case 'FunctionCall':
 				case 'BuiltinCall':
-				case 'AssignmentExpression':
+					return true;
+//				case 'AssignmentExpression':
 				case 'UnaryExpression':
 					if (node.operator === '++' || node.operator === '--') {
 						hasSideEffects = true;
@@ -8867,6 +8959,12 @@ class Optimizer {
 		
 		checkNode(funcNode.body);
 		return hasSideEffects;
+		*/
+		if (funcNode.body) {
+			return this.hasSideEffects(funcNode.body);
+		} else {
+			return false;
+		}
 	}
 
 	/**
@@ -10326,32 +10424,33 @@ class FunctionRegisterer {
 		// (storing returning point, if not from main)
 		let assignment;
 		let stackPositionPointer = null;
-		if (!fromMain) {
-			// Consider configuring heap memories as required
-			// For each symbol, create a hidden pointer for it
-			let heapPreparation = new Instruction();
-			refFunction.stackSymbols.forEach(symbol => {
-				// So pointer-forward and -backward can't have stack symbols!
-				if (symbol.name === '__stackpos') {
-					if (refFunction.specialBuiltin) {
-						heapPreparation.concat(InstructionBuilder.set('__internal_stackpos', '__stackpos'));
-						return;
-					}
-					stackPositionPointer = symbol.getAssemblySymbol();
-					heapPreparation.concat(memoryObject.outputPointerStorageOf(stackPositionPointer, '__stackpos'));
+		
+		// Consider configuring heap memories as required
+		// For each symbol, create a hidden pointer for it
+		let heapPreparation = new Instruction();
+		refFunction.stackSymbols.forEach(symbol => {
+			// So pointer-forward and -backward can't have stack symbols!
+			if (symbol.name === '__stackpos') {
+				if (fromMain) return;
+				if (refFunction.specialBuiltin) {
+					heapPreparation.concat(InstructionBuilder.set('__internal_stackpos', '__stackpos'));
+					return;
 				}
-				const memFwdCall = memoryObject.outputPointerForwardCall(symbol.size, '__stackframe', this);
-				heapPreparation.concat(new Instruction([
-					InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_block`, '__stackframe_block'),
-					InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_pos`, '__stackframe_pos')
-				]));
-				heapPreparation.concat(memFwdCall);
-			});
-			
-			//assignment = memoryObject.assign("__stackpos_" + (this.callerId++));
-			//result.concat(memoryObject.outputStorageOf(assignment, "__stackpos"));
-			result.concat(heapPreparation);
-		}
+				stackPositionPointer = symbol.getAssemblySymbol();
+				heapPreparation.concat(memoryObject.outputPointerStorageOf(stackPositionPointer, '__stackpos'));
+			}
+			const memFwdCall = memoryObject.outputPointerForwardCall(symbol.size, '__stackframe', this);
+			heapPreparation.concat(new Instruction([
+				InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_block`, '__stackframe_block'),
+				InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_pos`, '__stackframe_pos')
+			]));
+			heapPreparation.concat(memFwdCall);
+		});
+		
+		//assignment = memoryObject.assign("__stackpos_" + (this.callerId++));
+		//result.concat(memoryObject.outputStorageOf(assignment, "__stackpos"));
+		result.concat(heapPreparation);
+		
 		
 		params.forEach((value, name) => {
 			result.concat(InstructionBuilder.set(name, value));
@@ -10709,13 +10808,14 @@ class CodeGenerator extends ASTVisitor {
 	/**
 	 * 
 	 * @param {Scope} scope 
+	 * @param {boolean} [staticAllocOnly=false] 
 	 * @remark Adding all heap memories (static variable and global variables)
 	 * Note:
 	 * accessThroughPointer - This value is stored in heap memory area (e.g. volatile int)
 	 * implementAsPointer - This value is a pointer
 	 * (These can be used simultaneously)
 	 */
-	processHeapMemory(scope) {
+	processHeapMemory(scope, staticAllocOnly = false) {
 		scope.getAllSymbols().forEach(symbol => {
 			// Update symbol size information
 			switch (symbol.kind) {
@@ -10758,11 +10858,13 @@ class CodeGenerator extends ASTVisitor {
 			// Assign heap memory
 			if (symbol.accessThroughPointer || symbol.needMemoryAllocation) {
 				symbol.needMemoryAllocation = true;
-				symbol.memoryLocation = this.memory.assign(symbol.getAssemblySymbol(), symbol.size);
+				if (!staticAllocOnly || symbol.isStatic) {
+					symbol.memoryLocation = this.memory.assign(symbol.getAssemblySymbol(), symbol.size);
+				}
 			}
 		});
 		scope.children.forEach(child => {
-			this.processHeapMemory(child);
+			this.processHeapMemory(child, true);
 		});
 	}
 
@@ -10792,7 +10894,18 @@ class CodeGenerator extends ASTVisitor {
 			}
 		} else if (symbol.accessThroughPointer) {
 			let temporary = this.getTempVariable();
-			result = this.memory.outputFetchOf(symbol.memoryLocation, temporary);
+			if (symbol.memoryLocation) {
+				result = this.memory.outputFetchOf(symbol.memoryLocation, temporary);
+			} else {
+				// Heap variables
+				/*
+				result = new Instruction([
+					InstructionBuilder.set(`${temporary}.__pointer_block`, `${symbol.getAssemblySymbol()}_block`),
+					InstructionBuilder.set(`${temporary}.__pointer_pos`, `${symbol.getAssemblySymbol()}_pos`)
+				], temporary);
+				*/
+				result = InstructionBuilder.read(temporary, `${symbol.getAssemblySymbol()}.__pointer_block`, `${symbol.getAssemblySymbol()}.__pointer_pos`);
+			}
 			result.instructionReturn = temporary;
 		} else {
 			let temporary = this.getTempVariable();
@@ -10825,7 +10938,19 @@ class CodeGenerator extends ASTVisitor {
 			}
 		}
 		if (symbol.accessThroughPointer) {
-			return this.memory.outputStorageOf(symbol.memoryLocation, data);
+			if (symbol.memoryLocation) {
+				return this.memory.outputStorageOf(symbol.memoryLocation, data);
+			} else {
+				// Heap variables
+				/*
+				return new Instruction([
+					InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_block`, `${data}_block`),
+					InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_pos`, `${data}_pos`)
+				]);
+				*/
+				return InstructionBuilder.write(data, `${symbol.getAssemblySymbol()}.__pointer_block`, `${symbol.getAssemblySymbol()}.__pointer_pos`);
+			}
+			
 		} else {
 			return InstructionBuilder.set(symbol.getAssemblySymbol(), data);
 		}
@@ -10849,10 +10974,10 @@ class CodeGenerator extends ASTVisitor {
 			}
 			const funcBody = this.visit(func);
 			let stackSymbols = [];
-			funcSymbol.owningScope.getAllSymbols().forEach(symbol => {
+			funcSymbol.owningScope.recursivelyGetAllSymbols().forEach(symbol => {
 				// Symbol values
-				if (symbol.accessThroughPointer) {
-					stackSymbols.push(symbol.getAssemblySymbol());
+				if (symbol.accessThroughPointer || symbol.needMemoryAllocation) {
+					stackSymbols.push(symbol);
 				}
 			});
 			this.functionManagement.addFunction(func.name, funcBody, this.currentScope, stackSymbols, func.name === 'main');
@@ -10865,6 +10990,17 @@ class CodeGenerator extends ASTVisitor {
 			this.addWarning('No main function in program');
 		}
 		return result;
+	}
+
+	/**
+	 * 
+	 * @param {AsmStatementNode} node 
+	 */
+	visitAsmStatement(node) {
+		return new SingleInstruction({
+			content: node.code,
+			referrer: []
+		});
 	}
     
 	/**
@@ -10964,7 +11100,7 @@ class CodeGenerator extends ASTVisitor {
 			alternateProcessor.concat(alternate);
 			alternateProcessor.concat(new InstructionReferrer(jumper, 'end_of_alt'));
 		}
-		let test = this.visit(node.test);
+		let test = this.implicitToBoolean(node.test);
 		result.concat(test);
 		this.releaseTempVariable();
 		//consequentProcessor.concat(InstructionBuilder.jump('{0}', 'notEqual', test.instructionReturn, 'true', [consequent.size() + 1 + (node.alternate != null ? 1 : 0)]));
@@ -10982,8 +11118,7 @@ class CodeGenerator extends ASTVisitor {
 	 * @param {WhileStatementNode} node 
 	 */
 	visitWhileStatement(node) {
-		const test = this.visit(node.test);
-		
+		const test = this.implicitToBoolean(node.test);
 		let connector = new Instruction();
 		let bodyProcessor = new Instruction();
 		const body = node.body ? this.visit(node.body) : new Instruction();
@@ -11031,7 +11166,7 @@ class CodeGenerator extends ASTVisitor {
 		bodyLoop.concat(body);
 		bodyLoop.concat(update);
 		bodyLoop.concat(InstructionBuilder.jump('{0}', 'always', null, null, [0]));
-		const test = node.test ? this.visit(node.test) : new Instruction();
+		const test = node.test ? this.implicitToBoolean(node.test) : new Instruction();
 		loopSystem.concat(test);
 		loopSystem.concat(InstructionBuilder.jump('{0}', 'notEqual', test.instructionReturn, 'true', [bodyLoop.size() + 1]));
 		this.releaseTempVariable();
@@ -11104,10 +11239,20 @@ class CodeGenerator extends ASTVisitor {
 			finalize.concat(symbol.memoryLocation.getAssignmentInstruction(symbol.getAssemblySymbol()));
 		}
 		if (!symbol.memoryLocation || node.initializer) {
+			let endJumper = null;
+			const endTag = `${symbol.getAssemblySymbol()}:_static_tag`;
+			if (symbol.isStatic) {
+				endJumper = InstructionBuilder.jump('{skip_init}', 'equal', endTag, 'true');
+				finalize.concat(endJumper);
+			}
 			const evaluation = node.initializer ? this.visit(node.initializer) : new Instruction();
 			finalize.concat(evaluation);
 			let result = this.generateSymbolWrite(symbol, evaluation.instructionReturn ?? 'null');
 			finalize.concat(result);
+			if (symbol.isStatic) {
+				finalize.concat(InstructionBuilder.set(endTag, 'true'));
+				finalize.concat(new InstructionReferrer(endJumper, 'skip_init', 0));
+			}
 			this.releaseTempVariable();
 		}
 		return finalize;
@@ -11139,19 +11284,81 @@ class CodeGenerator extends ASTVisitor {
 	}
 	*/
 
+	implicitToNumeric(node) {
+		if (node.dataType && node.dataType.name === 'bool') {
+			let result = this.visit(node);
+			let temporary = this.getTempVariable();
+			result.concat(InstructionBuilder.set(temporary, '0'));
+			let jumper = InstructionBuilder.jump('{notequal_end}', 'notEqual', 'true', result.instructionReturn);
+			result.concat(jumper);
+			result.concat(InstructionBuilder.set(temporary, '1'));
+			result.concat(new InstructionReferrer(jumper, 'notequal_end', 0));
+			return result;
+		} else {
+			return this.visit(node);
+		}
+	}
+
+	implicitToBoolean(node) {
+		if (!node.dataType || node.dataType.name !== 'bool') {
+			let result = this.visit(node);
+			let temporary = this.getTempVariable();
+			result.concat(InstructionBuilder.set(temporary, 'false'));
+			let jumper = InstructionBuilder.jump('{equal_end}', 'equal', '0', result.instructionReturn);
+			result.concat(jumper);
+			result.concat(InstructionBuilder.set(temporary, 'true'));
+			result.concat(new InstructionReferrer(jumper, 'equal_end', 0));
+			return result;
+		} else {
+			return this.visit(node);
+		}
+	}
+
 	/**
 	 * 
 	 * @param {BinaryExpressionNode} node 
 	 * @remark MUST CONSIDER: Clear up temporary staff in general expression processor
-	 * @todo Numeric operations should be more complex for pointers!
-	 * @todo !! With this pointer evaluation involved, strcmp() must be provided
+	 * @todo '&&' and '||' not implemented!!!
 	 */
 	visitBinaryExpression(node) {
 		const operatorTranslation = new Map([['+', 'add'], ['-', 'sub'], ['*', 'mul'], ['/', 'div'], ['%', 'mod']]);
 		const comparerTranslation = new Map([['==', 'equal'], ['!=', 'notEqual'], ['<', 'lessThan'], ['>', 'greaterThan'], ['<=', 'lessThanEq'], ['>=', 'greaterThanEq']]);
-		const right = this.visit(node.right);
+		const logicalTranslation = new Map([	
+			['&&', (left, right) => {
+				let result = new Instruction();
+				let temporary = this.getTempVariable();
+				result.concat(left);
+				result.concat(right);
+				result.concat(InstructionBuilder.set(temporary, 'false'));
+				let jump1 = InstructionBuilder.jump('{alt}', 'notEqual', left.instructionReturn, 'true');
+				let jump2 = InstructionBuilder.jump('{alt}', 'notEqual', right.instructionReturn, 'true');
+				result.concat(jump1);
+				result.concat(jump2);
+				result.concat(InstructionBuilder.set(temporary, 'true'));
+				result.concat(new InstructionReferrer(jump1, 'alt', 0));
+				result.concat(new InstructionReferrer(jump2, 'alt', 0));
+				return result;
+			}],
+			['||', (left, right) => {
+				let result = new Instruction();
+				let temporary = this.getTempVariable();
+				result.concat(left);
+				result.concat(right);
+				result.concat(InstructionBuilder.set(temporary, 'true'));
+				let jump1 = InstructionBuilder.jump('{alt}', 'notEqual', left.instructionReturn, 'false');
+				let jump2 = InstructionBuilder.jump('{alt}', 'notEqual', right.instructionReturn, 'false');
+				result.concat(jump1);
+				result.concat(jump2);
+				result.concat(InstructionBuilder.set(temporary, 'false'));
+				result.concat(new InstructionReferrer(jump1, 'alt', 0));
+				result.concat(new InstructionReferrer(jump2, 'alt', 0));
+				return result;
+			}]
+		]);
 		let result = new Instruction();
 		if (operatorTranslation.has(node.operator)) {
+			// Boolean can't directly participate in this!
+			const right = this.visit(node.right);
 			const leftIsPointer = node.left.dataType && node.left.dataType.kind === 'pointer';
 			const rightIsPointer = node.right.dataType && node.right.dataType.kind === 'pointer';
 			if (leftIsPointer || rightIsPointer) {
@@ -11181,7 +11388,8 @@ class CodeGenerator extends ASTVisitor {
 				result.instructionReturn = varName;
 			}
 		} else if (comparerTranslation.has(node.operator)) {
-			const left = this.visit(node.left);
+			const left = this.implicitToBoolean(node.left);
+			const right = this.implicitToBoolean(node.right);
 			const outlet = this.getTempVariable();
 			let leftComparison = left.instructionReturn;
 			let rightComparison = right.instructionReturn;
@@ -11204,6 +11412,8 @@ class CodeGenerator extends ASTVisitor {
 			result.concat(left);
 			result.concat(right);
 			result.concat(sequence);
+		} else if (logicalTranslation.has(node.operator)) {
+			return logicalTranslation.get(node.operator)(this.implicitToBoolean(node.left), this.implicitToBoolean(node.right));
 		} else {
 			this.addWarning('Going to assignment through binary expression:', node);
 			result = this.processAssignment(node.left, right);
@@ -11238,6 +11448,10 @@ class CodeGenerator extends ASTVisitor {
 				const result = this.memory.outputPointerForwardCall(casting.instructionReturn, receiver, this.functionManagement, true);
 				casting.concat(result);
 				casting.instructionReturn = receiver;
+			} else if (node.expression.dataType.name === 'bool' && node.dataType.name !== 'bool') {
+				return this.implicitToNumeric(node.expression);
+			} else if (node.dataType.name === 'bool' && node.expression.dataType.name !== 'bool') {
+				return this.implicitToBoolean(node.expression);
 			}
 		}
 		return casting;
@@ -11370,8 +11584,7 @@ class CodeGenerator extends ASTVisitor {
 				const identity = this.currentScope.lookup(left.name);
 				if (identity) {
 					if (identity.implementAsPointer) {
-						//pointer = identity.getAssemblySymbol();
-						//isPointer = true;
+						// This means that the assignment must be via pointers
 						const assemblySymbol = identity.getAssemblySymbol();
 						if (returnOnlyPointer) {
 							return new Instruction([], assemblySymbol);
@@ -11405,7 +11618,7 @@ class CodeGenerator extends ASTVisitor {
 
 			case 'MemberExpression':
 				const resolution = this.resolveMemberExpression(left);
-				if (left.dataType === 'pointer') {
+				if (left.dataType.kind === 'pointer') {
 					isPointer = true;
 				}
 				finalResult.concat(resolution);
@@ -11415,7 +11628,7 @@ class CodeGenerator extends ASTVisitor {
 			case 'UnaryExpression':
 				if (left.getAttribute('isDereference')) {
 					precall = this.visit(left.argument);	// Simple calculation
-					if (left.argument.dataType === 'pointer') {
+					if (left.argument.dataType.kind === 'pointer') {
 						isPointer = true;
 					}
 					pointer = precall.instructionReturn;
@@ -11426,7 +11639,7 @@ class CodeGenerator extends ASTVisitor {
 				// TODO: Might be expressions... must get its l-value pointer to process
 				// Unary expression should also be evaluated here.
 				// TODO: Yet I should consider how to deal with unary *, which returns a LValue
-				let precall = this.visit(left);
+				precall = this.visit(left);
 				pointer = precall.instructionReturn;
 				this.addWarning(`Maybe not a LValue -- regarding the value as an address`, left.location);
 		}
@@ -11469,7 +11682,8 @@ class CodeGenerator extends ASTVisitor {
 			result.concat(lval.replace('pointer_block_entry', `${right.instructionReturn}_block`));
 			result.concat(lval.replace('pointer_ptr_entry', `${right.instructionReturn}_pos`));
 		} else {
-			result.concat(lval.replace('value_entry', right.instructionReturn));
+			let returns = right.instructionReturn;
+			result.concat(lval.replace('value_entry', returns));
 		}
 		return result;
 	}
@@ -11531,11 +11745,11 @@ class CodeGenerator extends ASTVisitor {
 	 * @param {StringLiteralNode} node 
 	 */
 	visitStringLiteral(node) {
-		return new Instruction([], `"${node.value.replace('"','\\"')}"`);
+		return new Instruction([], node.raw);
 	}
 
 	visitCharacterLiteral(node) {
-		return new Instruction([], `"${node.value.replace('"','\\"')}"`);
+		return new Instruction([], `${node.raw.replace('"','\\"')}`);
 	}
 
 	visitNullLiteral(node) {
