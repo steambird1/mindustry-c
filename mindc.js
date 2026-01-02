@@ -6194,8 +6194,12 @@ class Optimizer {
 			
 			// 搜索特定字段
 			if (!updateInfo) {
-				const fields = ['statements', 'consequent', 'alternate', 'body', 
-							  'init', 'test', 'update', 'argument', 'left', 'right'];
+				const fields = [
+					'functions', 'globalDeclarations', 'typeDefinitions',
+					'statements', 'expression', 'test', 'consequent', 'alternate',
+					'body', 'init', 'update', 'argument', 'left', 'right',
+					'declarators', 'arguments', 'callee', 'initializer'
+				];
 				
 				for (const field of fields) {
 					if (node[field] && !updateInfo) {
@@ -6845,16 +6849,17 @@ class Optimizer {
 						modifiedVars.add(node.left.name);
 					} else {
 						// Unrecognized...
-						this.errors.push('Internal Error: Unrecognized variable in loop optimizer', node.left);
+						this.warnings.push('Internal Error: Unrecognized variable in loop optimizer', node.left);
 					}
 					break;
 				
 				case 'BinaryExpression':
-					if (node.operator.includes('=') && node.operator !== '==' && node.operator !== '!=') {
+					if (node.operator.includes('=') && node.operator !== '==' && node.operator !== '!='
+					&& node.operator !== '>=' && node.operator !== '<=') {
 						if (node.left.type === 'Identifier') {
 							modifiedVars.add(node.left.name);
 						} else {
-							this.errors.push('Internal Error: Unrecognized variable in loop optimizer',node.left);
+							this.warnings.push('Internal Error: Unrecognized variable in loop optimizer',node.left);
 						}
 					}
 					break;
@@ -6863,7 +6868,7 @@ class Optimizer {
 						if (node.argument.type === 'Identifier') {
 							modifiedVars.add(node.argument.name);
 						} else {
-							this.errors.push('Internal Error: Unrecognized variable in loop optimizer',node.left);
+							this.warnings.push('Internal Error: Unrecognized variable in loop optimizer',node.left);
 						}
 					}
 					break;
@@ -7692,37 +7697,21 @@ class Optimizer {
         if (node.children) {
             node.children.forEach(child => this.traverseAndReplaceConstants(child, constants));
         }
-		if (node.declarators) {
-            node.declarators.forEach(child => this.traverseAndReplaceConstants(child, constants));
-        }
-		if (node.functions) {
-            node.functions.forEach(child => this.traverseAndReplaceConstants(child, constants));
-        }
-        
-        // 处理特殊节点的子节点
-        switch (node.type) {
-            case 'IfStatement':
-                if (node.test) this.traverseAndReplaceConstants(node.test, constants);
-                if (node.consequent) this.traverseAndReplaceConstants(node.consequent, constants);
-                if (node.alternate) this.traverseAndReplaceConstants(node.alternate, constants);
-                break;
-                
-            case 'WhileStatement':
-                if (node.test) this.traverseAndReplaceConstants(node.test, constants);
-                if (node.body) this.traverseAndReplaceConstants(node.body, constants);
-                break;
-                
-            case 'ForStatement':
-                if (node.init) this.traverseAndReplaceConstants(node.init, constants);
-                if (node.test) this.traverseAndReplaceConstants(node.test, constants);
-                if (node.update) this.traverseAndReplaceConstants(node.update, constants);
-                if (node.body) this.traverseAndReplaceConstants(node.body, constants);
-                break;
-			
-			case 'FunctionDeclaration':
-				if (node.body) this.traverseAndReplaceConstants(node.body, constants);
-                break;
-        }
+
+        const fieldsToCheck = [
+				'functions',
+				'statements', 'expression', 'test', 'consequent', 'alternate',
+				'body', 'init', 'update', 'argument',
+				'declarators', 'arguments', 'callee'
+			];	// A little bit special
+
+		for (const field of fieldsToCheck) {
+			if (Array.isArray(node[field])) {
+				node[field].forEach(elem => this.traverseAndReplaceConstants(elem, constants));
+			} else if (node[field] && typeof node[field] === 'object') {
+				this.traverseAndReplaceConstants(node[field], constants);
+			}
+		}
     }
 
     deadCodeEliminationInScope(scope) {
@@ -11153,25 +11142,28 @@ class CodeGenerator extends ASTVisitor {
 	 */
 	visitIfStatement(node) {
 		let result = new Instruction();
+		let test = this.implicitToBoolean(node.test);
+		result.concat(test);
+		this.releaseTempVariable();
 		let consequentProcessor = new Instruction();
 		let consequent = this.visit(node.consequent), alternateProcessor = new Instruction();
+		const noConsequent = InstructionBuilder.jump('{alt_begin}', 'notEqual', test.instructionReturn, 'true');
 		if (node.alternate) {
 			let alternate = this.visit(node.alternate);
 			//alternateProcessor.concat(InstructionBuilder.jump('{0}', 'always', null, null, [alternate.size() + 1]))// Skip alternate block if executing consequent
 			const jumper = InstructionBuilder.jump('{end_of_alt}', 'always');
 			alternateProcessor.concat(jumper);
+			alternateProcessor.concat(new InstructionReferrer(noConsequent, 'alt_begin'));
 			alternateProcessor.concat(alternate);
 			alternateProcessor.concat(new InstructionReferrer(jumper, 'end_of_alt'));
+		} else {
+			alternateProcessor.concat(new InstructionReferrer(noConsequent, 'alt_begin'));
 		}
-		let test = this.implicitToBoolean(node.test);
-		result.concat(test);
-		this.releaseTempVariable();
 		//consequentProcessor.concat(InstructionBuilder.jump('{0}', 'notEqual', test.instructionReturn, 'true', [consequent.size() + 1 + (node.alternate != null ? 1 : 0)]));
-		const noConsequent = InstructionBuilder.jump('{alt_begin}', 'notEqual', test.instructionReturn, 'true');
 		consequentProcessor.concat(noConsequent);
 		consequentProcessor.concat(consequent);
 		result.concat(consequentProcessor);
-		result.concat(new InstructionReferrer(noConsequent, 'alt_begin'));
+		//result.concat(new InstructionReferrer(noConsequent, 'alt_begin'));
 		result.concat(alternateProcessor);
 		return result;
 	}
