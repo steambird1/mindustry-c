@@ -324,12 +324,12 @@ void main() {
                                 <div class="row align-items-center">
                                     <div class="col-md-5">
                                         <label class="form-label">内存块名称</label>
-                                        <input type="text" class="form-control memory-block-name" value="block0" required>
+                                        <input type="text" class="form-control memory-block-name" value="cell1" required>
                                     </div>
                                     <div class="col-md-5">
                                         <label class="form-label">内存块大小</label>
                                         <div class="input-group">
-                                            <input type="number" class="form-control memory-block-size" min="1" value="4096" required>
+                                            <input type="number" class="form-control memory-block-size" min="1" value="64" required>
                                             <span class="input-group-text">字节</span>
                                         </div>
                                     </div>
@@ -423,8 +423,8 @@ void main() {
                             <li>配置所需的内存块（编号和大小）</li>
                             <li>点击"编译代码"按钮开始编译</li>
                             <li>查看右侧的汇编输出结果</li>
-                            <li>对于建筑，使用形如 <code>auto volatile device conveyor1;</code> 在开头声明</li>
-                            <li>目前支持 print, printflush, draw 等一部分内置调用，unit 相关函数和 asm 还在进行中。</li>
+                            <li>对于建筑，使用形如 <code>auto device conveyor1;</code> 在开头声明</li>
+                            <li>目前支持 print, printflush, draw 等内置调用。</li>
                         </ol>
                     </div>
                 </div>
@@ -615,12 +615,12 @@ void main() {
                     <div class="row align-items-center">
                         <div class="col-md-5">
                             <label class="form-label">内存块名称</label>
-                            <input type="text" class="form-control memory-block-name" value="block${blockCount}" required>
+                            <input type="text" class="form-control memory-block-name" value="cell${blockCount+1}" required>
                         </div>
                         <div class="col-md-5">
                             <label class="form-label">内存块大小</label>
                             <div class="input-group">
-                                <input type="number" class="form-control memory-block-size" min="1" value="4096" required>
+                                <input type="number" class="form-control memory-block-size" min="1" value="64" required>
                                 <span class="input-group-text">字节</span>
                             </div>
                         </div>
@@ -758,8 +758,8 @@ void main() {
                     const nameInput = item.querySelector('.memory-block-name');
                     const sizeInput = item.querySelector('.memory-block-size');
                     
-                    const name = nameInput ? nameInput.value : `block${index}`;
-                    const size = sizeInput ? parseInt(sizeInput.value) : 4096;
+                    const name = nameInput ? nameInput.value : `cell${index+1}`;
+                    const size = sizeInput ? parseInt(sizeInput.value) : 64;
                     
                     // 创建 MemoryBlock 对象 - 使用 (name, size) 参数
                     memoryBlocks.push(new MemoryBlock(name, size));

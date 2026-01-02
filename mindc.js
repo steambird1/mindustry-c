@@ -856,10 +856,10 @@ const SPECIAL_INSTRUCTIONS = {
     'control': TokenType.CONTROL,
     'radar': TokenType.RADAR,
     'sensor': TokenType.SENSOR,
-	'unitbind': TokenType.UNITBIND,
-	'unitcontrol': TokenType.UNITCONTROL,
-	'unitradar': TokenType.UNITRADAR,
-	'unitlocate': TokenType.UNITLOCATE,
+	'ubind': TokenType.UNITBIND,
+	'ucontrol': TokenType.UNITCONTROL,
+	'uradar': TokenType.UNITRADAR,
+	'ulocate': TokenType.UNITLOCATE,
     'set': TokenType.SET,
     'op': TokenType.OP,
     'lookup': TokenType.LOOKUP,
@@ -1908,15 +1908,17 @@ class Parser {
             }
 		}
         
+		if (!declarator) return null;
         // 设置指针信息
         declarator.pointerDepth = pointerDepth;
         declarator.pointerQualifiers = pointerQualifiers;
 
 		if (!isFunctionParam) {
-				if (this.matchToken(TokenType.ASSIGN)) {
+			if (this.matchToken(TokenType.ASSIGN)) {
 				this.consumeToken();
 				declarator.initializer = this.parseExpression();
-				declarator.initializer.parent = declarator;
+				if (declarator.initializer)
+					declarator.initializer.parent = declarator;
 			}
 		}
         
@@ -2711,7 +2713,7 @@ class Parser {
 
         const returnStmt = ASTBuilder.returnStatement(argument);
         returnStmt.location = returnToken.location;
-		argument.parent = returnStmt;
+		if (argument) argument.parent = returnStmt;
         return returnStmt;
     }
 
@@ -3320,8 +3322,8 @@ class Parser {
 
     isBuiltinFunction(name) {
         const builtins = [
-			'draw', 'print', 'drawflush', 'printflush', 'getlink',
-			'control', 'radar', 'sensor', 'set', 'op', 'lookup', 'unitbind', 'unitlocate', 'unitcontrol', 'unitradar',
+			'draw', 'print', 'drawflush', 'printflush', 'getlink', 'ceil', 'floor', 'sqrt', 'rand', 'abs',
+			'control', 'radar', 'sensor', 'set', 'op', 'lookup', 'ubind', 'ulocate', 'ucontrol', 'uradar', 'min', 'max',
 			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'adiff'
 		];
         return builtins.includes(name);
@@ -3502,12 +3504,12 @@ class Scope {
         return this.symbols.get(name) || (this.parent ? this.parent.lookup(name) : null);
     }
 	
-	// lookup scope for a symbol
 	lookupScopeOf(name) {
 		if (this.symbols.has(name)) {
 			return this;
 		}
-		return this.parent ? this.parent.lookupScopeOf(name) : null;
+		const result = this.parent ? this.parent.lookupScopeOf(name) : null;
+		return result;
 	}
 
     lookupCurrent(name) {
@@ -3699,54 +3701,21 @@ class SemanticAnalyzer extends ASTVisitor {
         if (node.children) {
             node.children.forEach(child => this.linkScopesToAST(child));
         }
-		
-        // 处理特殊节点的子节点
-        switch (node.type) {
-            case 'IfStatement':
-                if (node.test) this.linkScopesToAST(node.test);
-                if (node.consequent) this.linkScopesToAST(node.consequent);
-                if (node.alternate) this.linkScopesToAST(node.alternate);
-                break;
-                
-            case 'WhileStatement':
-                if (node.test) this.linkScopesToAST(node.test);
-                if (node.body) this.linkScopesToAST(node.body);
-                break;
-                
-            case 'ForStatement':
-                if (node.init) this.linkScopesToAST(node.init);
-                if (node.test) this.linkScopesToAST(node.test);
-                if (node.update) this.linkScopesToAST(node.update);
-                if (node.body) this.linkScopesToAST(node.body);
-                break;
-                
-            case 'FunctionDeclaration':
-                // 处理参数
-                node.parameters.forEach(param => {
-                    if (param.type && param.name) {
-                        param.scope = this.currentScope;
-                    }
-                });
-                if (node.body) this.linkScopesToAST(node.body);
-                break;
-                
-            case 'VariableDeclaration':
-                node.declarators.forEach(declarator => {
-                    declarator.scope = this.currentScope;
-                    if (declarator.initializer) {
-                        this.linkScopesToAST(declarator.initializer);
-                    }
-                });
-                break;
 
-			case 'FunctionCall':
-			case 'BuiltinCall':
-				node.arguments.forEach(arg => {
-					arg.scope = this.currentScope;
-					this.linkScopesToAST(arg);
-				});
-				break;
-        }
+		const fieldsToCheck = [
+				'functions', 'globalDeclarations', 'typeDefinitions',
+				'statements', 'expression', 'test', 'consequent', 'alternate',
+				'body', 'init', 'update', 'argument', 'left', 'right',
+				'declarators', 'arguments', 'callee', 'initializer'
+			];
+
+			for (const field of fieldsToCheck) {
+				if (Array.isArray(node[field])) {
+					node[field].forEach(elem => this.linkScopesToAST(elem));
+				} else if (node[field] && typeof node[field] === 'object') {
+					this.linkScopesToAST(node[field]);
+				}
+			}
         
         // 退出作用域
         switch (node.type) {
@@ -3812,47 +3781,56 @@ class SemanticAnalyzer extends ASTVisitor {
         
         // 指针类型的基础（void*）
 		// Pointer has a size of 2 !!
+		/*
         const voidPtrType = new TypeInfo('void*', 'pointer', 2);
         voidPtrType.pointerTo = this.typeTable.get('void');
         this.typeTable.set('void*', voidPtrType);
 		const charPtrType = new TypeInfo('char*', 'pointer', 2);
         voidPtrType.pointerTo = this.typeTable.get('char');
         this.typeTable.set('char*', charPtrType);
+		*/
     }
 
     initializeBuiltinFunctions() {
 		// TODO: Must be modified...
 		// TODO: Use boolean here
         const builtins = [
-            { name: 'draw', returnType: 'void', parameters: ['char*'], hasVarArgs: true }, // 操作名称 + 变长参数 (Actually, need further judgment)
+            { name: 'draw', returnType: 'void', parameters: ['char'], hasVarArgs: true }, // 操作名称 + 变长参数 (Actually, need further judgment)
 			{ name: 'print', returnType: 'void', parameters: [], hasVarArgs: true }, // 变长参数 (Actually, accepting multiple operations)
 			{ name: 'drawflush', returnType: 'void', parameters: ['device'] },
 			{ name: 'printflush', returnType: 'void', parameters: ['device'] },
 			{ name: 'getlink', returnType: 'device', parameters: ['int'] },
-			{ name: 'control', returnType: 'void', parameters: ['char*', 'device'], hasVarArgs: true }, // 操作名称 + 设备 + 变长参数
-			{ name: 'radar', returnType: 'device', parameters: ['char*', 'char*', 'char*', 'char*', 'device', 'int'] },
-			{ name: 'sensor', returnType: 'int', parameters: ['device', 'int'] },
+			{ name: 'control', returnType: 'void', parameters: ['char', 'device'], hasVarArgs: true }, // 操作名称 + 设备 + 变长参数
+			{ name: 'radar', returnType: 'device', parameters: ['char', 'char', 'char', 'char', 'device', 'int'] },
+			{ name: 'sensor', returnType: 'null_t', parameters: ['device', 'int'] },	// Sensor may return ANY TYPE. PROCESS ON YOUR OWN
 			{ name: 'set', returnType: 'void', parameters: [], hasVarArgs: true, special: 'set' }, // 特殊处理
 			{ name: 'op', returnType: 'void', parameters: [], hasVarArgs: true, special: 'op' }, // 特殊处理
-			{ name: 'lookup', returnType: 'int', parameters: ['char*', 'int'] },
+			{ name: 'lookup', returnType: 'int', parameters: ['char', 'int'] },
 			{ name: 'wait', returnType: 'void', parameters: ['float'] },
 			{ name: 'stop', returnType: 'void', parameters: [] },
 			{ name: 'end', returnType: 'void', parameters: [] },
 			{ name: 'jump', returnType: 'void', parameters: [], hasVarArgs: true, special: 'jump' }, // 特殊处理
 			{ name: 'read', returnType: 'void', parameters: [], special: 'read'}, // 特殊处理
 			{ name: 'write', returnType: 'void', parameters: [], special: 'write'}, // 特殊处理
-			{ name: 'unitbind', returnType: 'void', parameters: ['int']},
-			{ name: 'unitcontrol', returnType: 'void', parameters: [], hasVarArgs: true},
-			{ name: 'unitradar', returnType: 'device', parameters: ['char*', 'char*', 'char*', 'char*', 'int', 'int'] },
-			{ name: 'unitlocate', returnType: 'int', parameters: [], hasVarArgs: true},
-			{ name: 'asm', returnType: 'void', parameters: ['char*'], special: 'asm'}, // TODO: I'm unsure about whether this can be correctly done now.
+			{ name: 'ubind', returnType: 'void', parameters: ['int']},
+			{ name: 'ucontrol', returnType: 'void', parameters: [], hasVarArgs: true},
+			{ name: 'uradar', returnType: 'device', parameters: ['char', 'char', 'char', 'char', 'int', 'int'] },
+			{ name: 'ulocate', returnType: 'int', parameters: [], hasVarArgs: true},
+			{ name: 'asm', returnType: 'void', parameters: ['char'], special: 'asm'}, // TODO: I'm unsure about whether this can be correctly done now.
 			{ name: 'sin', returnType: 'float', parameters: ['float'] },	// These are in [op] instruction
 			{ name: 'cos', returnType: 'float', parameters: ['float'] },
 			{ name: 'tan', returnType: 'float', parameters: ['float'] },
 			{ name: 'asin', returnType: 'float', parameters: ['float'] },
 			{ name: 'acos', returnType: 'float', parameters: ['float'] },
 			{ name: 'atan', returnType: 'float', parameters: ['float'] },
-			{ name: 'adiff', returnType: 'float', parameters: ['float', 'float'] }
+			{ name: 'adiff', returnType: 'float', parameters: ['float', 'float'] },
+			{ name: 'min', returnType: 'float', parameters: ['float', 'float'] },
+			{ name: 'max', returnType: 'float', parameters: ['float', 'float'] },
+			{ name: 'ceil', returnType: 'float', parameters: ['float']},
+			{ name: 'floor', returnType: 'float', parameters: ['float']},
+			{ name: 'sqrt', returnType: 'float', parameters: ['float']},
+			{ name: 'abs', returnType: 'float', parameters: ['float']},
+			{ name: 'rand', returnType: 'float', parameters: []}
 		];
 
         builtins.forEach(func => {
@@ -4417,9 +4395,10 @@ class SemanticAnalyzer extends ASTVisitor {
 	/**
 	 * 
 	 * @param {StringLiteralNode} node 
+	 * @remark Specially, string literal is considered 'char', unless specially converted!
 	 */
 	visitStringLiteral(node) {
-		node.dataType = this.typeTable.get('char*');
+		node.dataType = this.typeTable.get('char');
 	}
 
 	/**
@@ -4936,6 +4915,27 @@ class SemanticAnalyzer extends ASTVisitor {
         }
     }
 
+	/**
+	 * 
+	 * @param {ConditionalExpressionNode} node 
+	 * @remark Manually written. How could AI forget this?
+	 */
+	visitConditionalExpression(node) {
+		this.visit(node.test);
+		const testType = this.getExpressionType(node.test);
+		if (testType && testType.name !== 'bool') {
+            this.addWarning(`Condition expression should be of type 'bool'`, node.test.location);
+        }
+		this.visit(node.consequent);
+		this.visit(node.alternate);
+		const consequentType = this.getExpressionType(node.consequent);
+		const alternateType = this.getExpressionType(node.alternate);
+		if (!this.isTypeCompatible(consequentType, alternateType)) {
+			this.addError(`Conditional expression must return the same type`, node.consequent.location);
+		}
+		node.dataType = consequentType;
+	}
+
     visitWhileStatement(node) {
         this.visit(node.test);
         
@@ -5018,6 +5018,9 @@ class SemanticAnalyzer extends ASTVisitor {
 
         // 根据节点类型推断类型
         switch (node.type) {
+			case 'ConditionalExpression':
+				return this.getExpressionType(node.consequent);
+
             case 'Identifier':
                 const symbol = this.currentScope.lookup(node.name);
                 return symbol ? symbol.type : null;
@@ -7549,7 +7552,7 @@ class Optimizer {
     }
 
 	getLiteral(value) {
-		if (typeof value === 'number') {
+		if (typeof value === 'number' || typeof value === 'boolean') {
 			return ASTBuilder.numericLiteral(value);
 		} else if (typeof value === 'string') {
 			return ASTBuilder.stringLiteral(value);
@@ -7891,6 +7894,15 @@ class Optimizer {
                     return this.evaluateUnaryOperation(node.operator, arg);
                 }
                 return undefined;
+			case 'ConditionalExpression':
+				const test = this.evaluateConstantExpression(node.test);
+				if (test !== undefined) {
+					if (test) {
+						return this.evaluateConstantExpression(node.consequent);
+					} else {
+						return this.evaluateConstantExpression(node.alternate);
+					}
+				}
             default:
                 return undefined;
         }
@@ -7923,12 +7935,12 @@ class Optimizer {
 			case '&&': return left && right;
             case '<<': case '<<=': return left << right;
             case '>>': case '>>=': return left >> right;
-            case '==': return left == right ? 1 : 0;
-            case '!=': return left != right ? 1 : 0;
-            case '<': return left < right ? 1 : 0;
-            case '>': return left > right ? 1 : 0;
-            case '<=': return left <= right ? 1 : 0;
-            case '>=': return left >= right ? 1 : 0;
+            case '==': return left == right;
+            case '!=': return left != right;
+            case '<': return left < right;
+            case '>': return left > right;
+            case '<=': return left <= right;
+            case '>=': return left >= right;
             default: return undefined;
         }
     }
@@ -7948,6 +7960,7 @@ class Optimizer {
 	// This function is manually merged from AI output.
     hasSideEffects(node) {
         if (!node) return false;
+		const selectedScope = node.scope ?? this.currentScope;
         
         // 检查节点是否有副作用
         switch (node.type) {
@@ -8020,7 +8033,8 @@ class Optimizer {
 				// Not considering struct members
 				return true;
 			case 'Identifier':
-				const scopePath = this.currentScope.lookupScopeOf(node.name).getPath();
+				if (node.name.length > 0 && node.name[0] === '@') return true;
+				const scopePath = selectedScope.lookupScopeOf(node.name).getPath();
 				const variableUses = this.variableUses.get(scopePath);
 				const variableState = variableUses.get(node.name);
 				if (variableState && (!variableState.canOptimize)) {
@@ -10370,10 +10384,7 @@ class FunctionRegisterer {
 	 */
 	getSystemInitializer(memoryObject) {
 		const memoryState = memoryObject.currentState();
-		const header = new Instruction([
-			InstructionBuilder.set('__stackframe_block', memoryState.block),
-			InstructionBuilder.set('__stackframe_pos', memoryState.position)
-		]);
+		const header = memoryState.getAssignmentInstruction('__stackframe');
 		return header;
 	}
 	
@@ -10427,23 +10438,29 @@ class FunctionRegisterer {
 		// Consider configuring heap memories as required
 		// For each symbol, create a hidden pointer for it
 		let heapPreparation = new Instruction();
+		let totalStackframeSize = 0;
+        if (refFunction.specialBuiltin) {
+            heapPreparation.concat(InstructionBuilder.set('__internal_stackpos', '__stackpos'));
+        }
 		refFunction.stackSymbols.forEach(symbol => {
 			// So pointer-forward and -backward can't have stack symbols!
 			if (symbol.name === '__stackpos') {
 				if (fromMain) return;
 				if (refFunction.specialBuiltin) {
-					heapPreparation.concat(InstructionBuilder.set('__internal_stackpos', '__stackpos'));
 					return;
 				}
-				stackPositionPointer = symbol.getAssemblySymbol();
-				heapPreparation.concat(memoryObject.outputPointerStorageOf(stackPositionPointer, '__stackpos'));
 			}
+			totalStackframeSize += symbol.size;
 			const memFwdCall = memoryObject.outputPointerForwardCall(symbol.size, '__stackframe', this);
 			heapPreparation.concat(new Instruction([
 				InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_block`, '__stackframe_block'),
 				InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_pos`, '__stackframe_pos')
 			]));
 			heapPreparation.concat(memFwdCall);
+			if (symbol.name === '__stackpos') {
+				stackPositionPointer = symbol.getAssemblySymbol();
+				heapPreparation.concat(memoryObject.outputPointerStorageOf(`${stackPositionPointer}.__pointer`, '__stackpos'));
+			}
 		});
 		
 		//assignment = memoryObject.assign("__stackpos_" + (this.callerId++));
@@ -10461,12 +10478,13 @@ class FunctionRegisterer {
 		// Instruction 3 and sth else: continue the control flow
 		// !!!! Function return will be responsible for setting @counter back !!!!
 		// (set current return point)
-		if (!fromMain && (stackPositionPointer || refFunction.specialBuiltin)) {
-			if (refFunction.specialBuiltin) {
-				result.concat(InstructionBuilder.set('__stackpos', '__internal_stackpos'));
-			} else {
-				result.concat(memoryObject.outputPointerFetchOf(stackPositionPointer, '__stackpos'));
-			}
+        if (refFunction.specialBuiltin) {
+            result.concat(InstructionBuilder.set('__stackpos', '__internal_stackpos'));
+        } else if (!fromMain && (stackPositionPointer || refFunction.specialBuiltin)) {
+			result.concat(memoryObject.outputPointerFetchOf(`${stackPositionPointer}.__pointer`, '__stackpos'));
+		}
+		if (totalStackframeSize > 0) {
+			result.concat(memoryObject.outputPointerBackwardCall(totalStackframeSize, '__stackframe', this));
 		}
 		return result;
 	}
@@ -10658,15 +10676,18 @@ class MemoryManager {
 		Logic: First read the remaining number and compare current step and the previous pointer. Add if not exceeding, or jump to next page.
 		*/
 		funcReg.addFunction('__pointerForward', new Instruction([
-			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [11]),
+			InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),
+			InstructionBuilder.end(),
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [14]),
 			InstructionBuilder.read('__block', '__ptrblock', 2),
 			InstructionBuilder.op('sub', '__mxstep', '__block', '__ptrpos'),
-			InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [7]),
+			InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [9]),
 			InstructionBuilder.op('add', '__ptrpos', '__ptrpos', '__step'),
 			InstructionBuilder.set('__step', 0),
-			InstructionBuilder.jump('{0}', 'always', null, null, [11]),
+			InstructionBuilder.jump('{0}', 'always', null, null, [14]),
 			InstructionBuilder.read('__ptrblock', '__ptrblock', 1),
 			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),
+			InstructionBuilder.op('add', '__step', '__step', 1),
 			InstructionBuilder.set('__ptrpos', this.reservedSize),
 			InstructionBuilder.jump('{0}', 'always', null, null, [0])
 		]), null, [], true);
@@ -10692,13 +10713,16 @@ class MemoryManager {
 	
 	outputPointerBackwardFunction(funcReg) {
 		funcReg.addFunction('__pointerBackward', new Instruction([
-			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [10]),
+			InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),
+			InstructionBuilder.end(),
+
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [12]),
 
 			InstructionBuilder.op('sub', '__mxstep', '__ptrpos', this.reservedSize),
-			InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [6]),
+			InstructionBuilder.jump('{0}', 'greaterThan', '__step', '__mxstep', [8]),
 			InstructionBuilder.op('sub', '__ptrpos', '__ptrpos', '__step'),
 			InstructionBuilder.set('__step', 0),
-			InstructionBuilder.jump('{0}', 'always', null, null, [10]),
+			InstructionBuilder.jump('{0}', 'always', null, null, [12]),
 			InstructionBuilder.read('__ptrblock', '__ptrblock', 0),
 			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),
 
@@ -10876,7 +10900,7 @@ class CodeGenerator extends ASTVisitor {
 	 */
 	generateSymbolRead(symbol, duplicate = false) {
 		let result = new Instruction();
-		if (!duplicate) {
+		if (!duplicate || (!symbol.isVolatile && symbol.isConst)) {
 			return new Instruction([], symbol.getAssemblySymbol());
 		}
 		if (symbol.implementAsPointer) {
@@ -10979,7 +11003,7 @@ class CodeGenerator extends ASTVisitor {
 					stackSymbols.push(symbol);
 				}
 			});
-			this.functionManagement.addFunction(func.name, funcBody, this.currentScope, stackSymbols, func.name === 'main');
+			this.functionManagement.addFunction(func.name, funcBody, funcSymbol.owningScope, stackSymbols, func.name === 'main');
 		});
 		node.globalDeclarations.forEach(decl => result.concat(this.visit(decl)));
 		result.concat(this.functionManagement.getAllFunctionDecl());
@@ -11037,7 +11061,7 @@ class CodeGenerator extends ASTVisitor {
 	 * @remark '__return' is the result of function return !!
 	 */
 	visitReturnStatement(node) {
-		const result = this.visit(node.argument);
+		const result = node.argument ? this.visit(node.argument) : new Instruction();
 		let stmt = new Instruction();
 		stmt.concat(result);
 		stmt.concat(InstructionBuilder.set("__return", result.instructionReturn));
@@ -11077,6 +11101,46 @@ class CodeGenerator extends ASTVisitor {
 			instruction.instructionReturn = result.instructionReturn;
 		});
 		return instruction;
+	}
+
+	/**
+	 * 
+	 * @param {ConditionalExpressionNode} node 
+	 */
+	visitConditionalExpression(node) {
+		const isPointer = node.dataType && node.dataType.kind === 'pointer';
+		let result = new Instruction();
+		let returner = this.getTempVariable();
+		const test = this.visit(node.test);
+		result.concat(test);
+		const jumper = InstructionBuilder.jump('{alt}', 'notEqual', test.instructionReturn, 'true');
+		result.concat(jumper);
+		const consequent = this.visit(node.consequent);
+		result.concat(consequent);
+		if (isPointer) {
+			result.concat(new Instruction([
+				InstructionBuilder.set(`${returner}_ptr`, `${consequent.instructionReturn}_ptr`),
+				InstructionBuilder.set(`${returner}_block`, `${consequent.instructionReturn}_block`)
+			]));
+		} else {
+			result.concat(InstructionBuilder.set(returner, consequent.instructionReturn));
+		}
+		const finalize = InstructionBuilder.jump('{end}', 'always');
+		result.concat(finalize);
+		const alternate = this.visit(node.alternate);
+		result.concat(new InstructionReferrer(jumper, 'alt', 0));
+		result.concat(alternate);
+		if (isPointer) {
+			result.concat(new Instruction([
+				InstructionBuilder.set(`${returner}_ptr`, `${alternate.instructionReturn}_ptr`),
+				InstructionBuilder.set(`${returner}_block`, `${alternate.instructionReturn}_block`)
+			]));
+		} else {
+			result.concat(InstructionBuilder.set(returner, alternate.instructionReturn));
+		}
+		result.concat(new InstructionReferrer(finalize, 'end', 0));
+		result.instructionReturn = returner;
+		return result;
 	}
 
 	/**
@@ -11123,12 +11187,16 @@ class CodeGenerator extends ASTVisitor {
 		this.currentBreaks = [];
 		this.currentContinues = [];
 		const body = node.body ? this.visit(node.body) : new Instruction();
-		bodyProcessor.concat(InstructionBuilder.jump('{0}', 'notEqual', test.instructionReturn, 'true', [body.size() + 2]));
+		const conditBreak = InstructionBuilder.jump('{loop_break}', 'notEqual', test.instructionReturn, 'true');
+		bodyProcessor.concat(conditBreak);
+		this.currentBreaks.push(conditBreak);
 		this.releaseTempVariable();
 		bodyProcessor.concat(body);
+		const testJumper = InstructionBuilder.jump('{goto_test}', 'always', null, null);
+		connector.concat(new InstructionReferrer(testJumper, 'goto_test'));
 		connector.concat(test);
 		connector.concat(bodyProcessor);
-		connector.concat(InstructionBuilder.jump('{0}', 'always', null, null, [0]));
+		connector.concat(testJumper);
 		// Replace 'continue' and 'break':
 		//connector.replace('loop_continue', 0);
 		//connector.replace('loop_break', connector.size() + 1);
@@ -11164,10 +11232,14 @@ class CodeGenerator extends ASTVisitor {
 		let bodyLoop = new Instruction();
 		bodyLoop.concat(body);
 		bodyLoop.concat(update);
-		bodyLoop.concat(InstructionBuilder.jump('{0}', 'always', null, null, [0]));
+		const testJumper = InstructionBuilder.jump('{goto_test}', 'always', null, null,);
+		bodyLoop.concat(testJumper);
 		const test = node.test ? this.implicitToBoolean(node.test) : new Instruction();
+		loopSystem.concat(new InstructionReferrer(testJumper, 'goto_test'));
 		loopSystem.concat(test);
-		loopSystem.concat(InstructionBuilder.jump('{0}', 'notEqual', test.instructionReturn, 'true', [bodyLoop.size() + 1]));
+		const conditBreak = InstructionBuilder.jump('{loop_break}', 'notEqual', test.instructionReturn, 'true');
+		this.currentBreaks.push(conditBreak);
+		loopSystem.concat(conditBreak);
 		this.releaseTempVariable();
 		loopSystem.concat(bodyLoop);
 		let finalize = new Instruction();
@@ -11283,19 +11355,35 @@ class CodeGenerator extends ASTVisitor {
 	}
 	*/
 
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 * @returns {Instruction} Return something with implicit conversion to int
+	 */
 	implicitToNumeric(node) {
-		if (node.dataType && node.dataType.name === 'bool') {
-			let result = this.visit(node);
-			let temporary = this.getTempVariable();
-			result.concat(InstructionBuilder.set(temporary, '0'));
-			let jumper = InstructionBuilder.jump('{notequal_end}', 'notEqual', 'true', result.instructionReturn);
-			result.concat(jumper);
-			result.concat(InstructionBuilder.set(temporary, '1'));
-			result.concat(new InstructionReferrer(jumper, 'notequal_end', 0));
-			return result;
-		} else {
-			return this.visit(node);
+		let result, temporary;
+		if (node.dataType) {
+			switch (node.dataType.name) {
+				case 'bool':
+					result = this.visit(node);
+					temporary = this.getTempVariable();
+					result.concat(InstructionBuilder.set(temporary, '0'));
+					let jumper = InstructionBuilder.jump('{notequal_end}', 'notEqual', 'true', result.instructionReturn);
+					result.concat(jumper);
+					result.concat(InstructionBuilder.set(temporary, '1'));
+					result.concat(new InstructionReferrer(jumper, 'notequal_end', 0));
+					result.instructionReturn = temporary;
+					return result;
+					break;
+				case 'float': case 'double':
+					result = this.visit(node);
+					temporary = this.getTempVariable();
+					result.concat(InstructionBuilder.op('floor', temporary, result.instructionReturn));
+					result.instructionReturn = temporary;
+					break;
+			}
 		}
+		return this.visit(node);
 	}
 
 	implicitToBoolean(node) {
@@ -11307,6 +11395,7 @@ class CodeGenerator extends ASTVisitor {
 			result.concat(jumper);
 			result.concat(InstructionBuilder.set(temporary, 'true'));
 			result.concat(new InstructionReferrer(jumper, 'equal_end', 0));
+			result.instructionReturn = temporary;
 			return result;
 		} else {
 			return this.visit(node);
@@ -11320,40 +11409,8 @@ class CodeGenerator extends ASTVisitor {
 	 * @todo '&&' and '||' not implemented!!!
 	 */
 	visitBinaryExpression(node) {
-		const operatorTranslation = new Map([['+', 'add'], ['-', 'sub'], ['*', 'mul'], ['/', 'div'], ['%', 'mod']]);
-		const comparerTranslation = new Map([['==', 'equal'], ['!=', 'notEqual'], ['<', 'lessThan'], ['>', 'greaterThan'], ['<=', 'lessThanEq'], ['>=', 'greaterThanEq']]);
-		const logicalTranslation = new Map([	
-			['&&', (left, right) => {
-				let result = new Instruction();
-				let temporary = this.getTempVariable();
-				result.concat(left);
-				result.concat(right);
-				result.concat(InstructionBuilder.set(temporary, 'false'));
-				let jump1 = InstructionBuilder.jump('{alt}', 'notEqual', left.instructionReturn, 'true');
-				let jump2 = InstructionBuilder.jump('{alt}', 'notEqual', right.instructionReturn, 'true');
-				result.concat(jump1);
-				result.concat(jump2);
-				result.concat(InstructionBuilder.set(temporary, 'true'));
-				result.concat(new InstructionReferrer(jump1, 'alt', 0));
-				result.concat(new InstructionReferrer(jump2, 'alt', 0));
-				return result;
-			}],
-			['||', (left, right) => {
-				let result = new Instruction();
-				let temporary = this.getTempVariable();
-				result.concat(left);
-				result.concat(right);
-				result.concat(InstructionBuilder.set(temporary, 'true'));
-				let jump1 = InstructionBuilder.jump('{alt}', 'notEqual', left.instructionReturn, 'false');
-				let jump2 = InstructionBuilder.jump('{alt}', 'notEqual', right.instructionReturn, 'false');
-				result.concat(jump1);
-				result.concat(jump2);
-				result.concat(InstructionBuilder.set(temporary, 'false'));
-				result.concat(new InstructionReferrer(jump1, 'alt', 0));
-				result.concat(new InstructionReferrer(jump2, 'alt', 0));
-				return result;
-			}]
-		]);
+		const operatorTranslation = new Map([['+', 'add'], ['-', 'sub'], ['*', 'mul'], ['/', 'div'], ['%', 'mod'], ['|', 'or'], ['||', 'or'], ['&', 'and'], ['&&', 'land'], ['^', 'xor'], ['<<', 'shl'], ['>>', 'shr'], ['==', 'equal'], ['!=', 'notEqual'], ['<', 'lessThan'], ['>', 'greaterThan'], ['<=', 'lessThanEq'], ['>=', 'greaterThanEq']]);
+		const comparerTranslation = new Map([]);	// unused now
 		let result = new Instruction();
 		if (operatorTranslation.has(node.operator)) {
 			// Boolean can't directly participate in this!
@@ -11361,11 +11418,12 @@ class CodeGenerator extends ASTVisitor {
 			const leftIsPointer = node.left.dataType && node.left.dataType.kind === 'pointer';
 			const rightIsPointer = node.right.dataType && node.right.dataType.kind === 'pointer';
 			if (leftIsPointer || rightIsPointer) {
-				// TODO
 				const left = this.visit(node.left);
 				const duplicate = this.getTempVariable();
 				const pointerReferrer = leftIsPointer ? left.instructionReturn : right.instructionReturn;
 				result.instructionReturn = duplicate;
+				result.concat(left);
+				result.concat(right);
 				result.concat(InstructionBuilder.set(`${duplicate}_block`, `${pointerReferrer}_block`));
 				result.concat(InstructionBuilder.set(`${duplicate}_pos`, `${pointerReferrer}_pos`));
 				switch (node.operator) {
@@ -11411,8 +11469,6 @@ class CodeGenerator extends ASTVisitor {
 			result.concat(left);
 			result.concat(right);
 			result.concat(sequence);
-		} else if (logicalTranslation.has(node.operator)) {
-			return logicalTranslation.get(node.operator)(this.implicitToBoolean(node.left), this.implicitToBoolean(node.right));
 		} else {
 			this.addWarning('Going to assignment through binary expression:', node);
 			result = this.processAssignment(node.left, right);
@@ -11426,33 +11482,43 @@ class CodeGenerator extends ASTVisitor {
 	 * @todo
 	 */
 	visitCastExpression(node) {
-		const casting = this.visit(node.expression);
-		if (node.dataType.qualifiers.indexOf('volatile') != -1) {
-			if (node.expression.type === 'Identifier') {
-				// Directly return it.
-				const symbol = this.currentScope.lookup(node.expression.name);
-				return new Instruction([], symbol.getAssemblySymbol());
+		let casting;
+		if (node.dataType) {
+			if (node.dataType.qualifiers.indexOf('volatile') != -1) {
+				if (node.expression.type === 'Identifier') {
+					// Directly return it.
+					if (node.expression.name.length > 0 && node.expression.name[0] == '@') {
+						return new Instruction([], node.expression.name);
+					}
+					const symbol = this.currentScope.lookup(node.expression.name);
+					casting = new Instruction([], symbol.getAssemblySymbol());
+				} else {
+					casting = this.visit(node.expression);
+				}
+			} else if (node.expression && node.expression.dataType) {
+				if (node.expression.dataType.kind === 'pointer' && node.dataType.name === 'int') {
+					casting = this.visit(node.expression);
+					const receiver = this.getTempVariable();
+					const result = this.memory.outputPointerValueCall(casting.instructionReturn, this.functionManagement);
+					casting.concat(result);
+					casting.concat(InstructionBuilder.set(receiver, '__builtin_return'));
+					casting.instructionReturn = receiver;
+				} else if (node.expression.dataType.name === 'int' && node.dataType.kind === 'pointer') {
+					casting = this.visit(node.expression);
+					const receiver = this.getTempVariable();
+					const result = this.memory.outputPointerForwardCall(casting.instructionReturn, receiver, this.functionManagement, true);
+					casting.concat(result);
+					casting.instructionReturn = receiver;
+				} else if (node.expression.dataType.name === 'bool' && node.dataType.name !== 'bool') {
+					casting = this.implicitToNumeric(node.expression);
+				} else if (node.dataType.name === 'bool' && node.expression.dataType.name !== 'bool') {
+					casting = this.implicitToBoolean(node.expression);
+				}
 			}
-			return casting;
+		} else {
+			casting = this.visit(node.expression);
 		}
-		if (node.dataType && node.expression && node.expression.dataType) {
-			if (node.expression.dataType.kind === 'pointer' && node.dataType.name === 'int') {
-				const receiver = this.getTempVariable();
-				const result = this.memory.outputPointerValueCall(casting.instructionReturn, this.functionManagement);
-				casting.concat(result);
-				casting.concat(InstructionBuilder.set(receiver, '__builtin_return'));
-				casting.instructionReturn = receiver;
-			} else if (node.expression.dataType.name === 'int' && node.dataType.kind === 'pointer') {
-				const receiver = this.getTempVariable();
-				const result = this.memory.outputPointerForwardCall(casting.instructionReturn, receiver, this.functionManagement, true);
-				casting.concat(result);
-				casting.instructionReturn = receiver;
-			} else if (node.expression.dataType.name === 'bool' && node.dataType.name !== 'bool') {
-				return this.implicitToNumeric(node.expression);
-			} else if (node.dataType.name === 'bool' && node.expression.dataType.name !== 'bool') {
-				return this.implicitToBoolean(node.expression);
-			}
-		}
+		casting.setAttribute('fromCast', true);
 		return casting;
 	}
 	
@@ -11481,7 +11547,7 @@ class CodeGenerator extends ASTVisitor {
 	 * @todo Similar to the simplifier of assignment expressions
 	 */
 	visitUnaryExpression(node) {
-		let result;
+		let result, collector;
 		switch (node.operator) {
 			case '+':
 				return this.visit(node.argument);
@@ -11517,9 +11583,18 @@ class CodeGenerator extends ASTVisitor {
 				// Get value from given address (variable address).
 				// Assume that this is only about RValue (LValue is independently handled.)
 				// ...
-				let collector = this.getTempVariable();
+				collector = this.getTempVariable();
 				result = this.visit(node.argument);
 				result.concat(InstructionBuilder.read(collector, `${result.instructionReturn}_block`, `${result.instructionReturn}_pos`));
+				return result;
+				break;
+			case '!':
+				result = this.visit(node.argument);
+				result.concat(InstructionBuilder.op('equal', result.instructionReturn, result.instructionReturn, 'false'));
+				return result;
+			case '~':
+				result = this.visit(node.argument);
+				result.concat(InstructionBuilder.op('not', result.instructionReturn, result.instructionReturn));
 				return result;
 				break;
 		}
@@ -11529,7 +11604,8 @@ class CodeGenerator extends ASTVisitor {
 	 * 
 	 * @param {ASTNode} node 
 	 * @returns {Instruction}
-	 * @todo
+	 * @todo Optimize for a common situation: Left side refers to a determined variable
+	 * (which requires changes in LVal-getter as well)
 	 */
 	resolveMemberExpression(node) {
 		let finalResult = new Instruction();
@@ -11713,8 +11789,7 @@ class CodeGenerator extends ASTVisitor {
 			));
 		}
 		result.concat(this.functionManagement.getFunctionCall(
-			node.callee.name, new Map(), this.memory, 
-			!(this.currentScope.type === 'function' && this.currentScope.name !== 'main')));
+			node.callee.name, new Map(), this.memory, this.currentFunction === 'main'));
 		// Get a copy of function return
 		if (relevantFunction.type.returnType !== 'void') {
 			result.instructionReturn = this.getTempVariable();
@@ -11728,7 +11803,10 @@ class CodeGenerator extends ASTVisitor {
 	 * @param {IdentifierNode} node 
 	 */
 	visitIdentifier(node) {
-		if (node.name.length && node.name[0] == '@') {
+		const isBuiltinConstant = node.name.length && node.name[0] == '@';
+		const isConstant = node.dataType && node.dataType.qualifiers.includes('const') 
+			&& (!node.dataType.qualifiers.includes('volatile'));
+		if (isBuiltinConstant) {
 			return new Instruction([], node.name);
 		}
 		return this.generateSymbolRead(this.currentScope.lookup(node.name), true);
@@ -11784,16 +11862,36 @@ class CodeGenerator extends ASTVisitor {
 			let returner = "";
 			if (hasReturn) {
 				returner = this.getTempVariable();
-				varNames.push(returner);
+				//varNames.push(returner);
+				varNames.unshift(returner);
 			}
 			for (let i = varNames.length; i < parameterSize; i++) {
 				varNames.push('x');	// null filler
 			}
 			result.concat(new SingleInstruction({
-				content: prefix + ' ' + varNames.join(' ') + (hasReturn ? ` ${returner}` : ''),
+				content: prefix + ' ' + varNames.join(' '),
 				referrer: []
 			}));
 			if (hasReturn) result.instructionReturn = returner;
+			return result;
+		};
+
+		const opProcesser = (name, params, parameterSize = 2) => {
+			let varNames = [];
+			let result = new Instruction(params.map(ast => {
+				const fetcher = this.visit(ast);
+				varNames.push(fetcher.instructionReturn);
+				return fetcher;
+			}));
+			let returner = this.getTempVariable();
+			for (let i = varNames.length; i < parameterSize; i++) {
+				varNames.push('x');	// null filler
+			}
+			result.concat(new SingleInstruction({
+				content: `op ${name} ${returner} ${varNames.join(' ')}`,
+				referrer: []
+			}));
+			result.instructionReturn = returner;
 			return result;
 		};
 
@@ -11818,10 +11916,77 @@ class CodeGenerator extends ASTVisitor {
 				return packer(`getlink`, ast.arguments, true);
 			},
 			wait: ast => {
-				return packer(`wait`, ast.arguments, true);
+				return packer(`wait`, ast.arguments);
 			},
 			ubind: ast => {
-				return packer(`ubind`, ast.arguments, true);
+				return packer(`ubind`, ast.arguments);
+			},
+			ucontrol: ast => {
+				if (ast.arguments[0].type === 'StringLiteral') {
+					return packer(`ucontrol ${ast.arguments[0].value}`, ast.arguments.slice(1), false, 5);
+				} else {
+					throw `Parameter 1 for ucontrol() must be string literal`
+				}
+			},
+			ulocate: ast => {
+				let result = new Instruction(), tmpRet = this.getTempVariable();
+				let postConcat = new Instruction();
+				if (ast.arguments[0].type === 'StringLiteral') {
+					let preConcat = "", subArg1, tailPosition = 1;
+					switch (ast.arguments[0].value) {
+						case 'ore':
+							subArg1 = this.visit(ast.arguments[1]);
+							tailPosition = 2;
+							result.concat(subArg1);
+							preConcat = `ore core true ${subArg1.instructionReturn}`;
+							break;
+						case 'building':
+							if (ast.arguments[1].type !== 'StringLiteral') {
+								throw `Parameter 2 for ulocate() must be string literal for building`;
+								break;
+							}
+							tailPosition = 3;
+							subArg1 = this.visit(ast.arguments[2]);
+							result.concat(subArg1);
+							preConcat = `building ${ast.arguments[1].value} ${subArg1.instructionReturn} @copper`;
+							break;
+						case 'spawn':
+							preConcat = `spawn core true @copper`;
+							break;
+						case 'damaged':
+							preConcat = `damaged core true @copper`;
+							break;
+					}
+					for (let i = tailPosition; i < tailPosition + 4; i++) {
+						const argContent = this.visit(ast.arguments[i]);
+						if (argContent.getAttribute('fromCast') && ast.arguments[i].dataType.qualifiers
+							&& ast.arguments[i].dataType.qualifiers.includes('volatile')) {
+								preConcat += ` ${argContent.instructionReturn}`;
+						} else {
+							const tmpVar = this.getTempVariable();
+							preConcat += ` ${tmpVar}`;
+							postConcat.concat(InstructionBuilder.write(tmpVar, `${argContent.instructionReturn}_block`, `${argContent.instructionReturn}_ptr`));
+						}
+					}
+					result.concat(new SingleInstruction({
+						content: `ulocate ${preConcat}`,
+						referrer: []
+					}));
+				} else {
+					throw `Parameter 1 for ulocate() must be string literal`;
+				}
+				result.concat(postConcat);
+				return result;
+			},
+			uradar: ast => {
+				// The first 4 parameters must all be string literal
+				for (let i = 0; i < 4; i++) {
+					if (ast.arguments[i].type !== 'StringLiteral') {
+						throw `Parameter ${i} for radar() must be a string literal`;
+					}
+				}
+				const processSequence = ast.arguments.slice(0, 4).map(arg => arg.value).join(" ");
+				return packer(`uradar ${processSequence}`, ast.arguments.slice(4), true);
 			},
 			draw: ast => {
 
@@ -11876,8 +12041,49 @@ class CodeGenerator extends ASTVisitor {
 			},
 			lookup: ast => {
 				return packer(`lookup`, ast.arguments, true);
+			},
+			sin: ast => {
+				return opProcesser(`sin`, ast.arguments);
+			},
+			cos: ast => {
+				return opProcesser(`cos`, ast.arguments);
+			},
+			tan: ast => {
+				return opProcesser(`tan`, ast.arguments);
+			},
+			asin: ast => {
+				return opProcesser(`asin`, ast.arguments);
+			},
+			acos: ast => {
+				return opProcesser(`acos`, ast.arguments);
+			},
+			atan: ast => {
+				return opProcesser(`atan`, ast.arguments);
+			},
+			adiff: ast => {
+				return opProcesser(`angleDiff`, ast.arguments);
+			},
+			min: ast => {
+				return opProcesser(`min`, ast.arguments);
+			},
+			max: ast => {
+				return opProcesser(`max`, ast.arguments);
+			},
+			abs: ast => {
+				return opProcesser(`abs`, ast.arguments);
+			},
+			ceil: ast => {
+				return opProcesser(`ceil`, ast.arguments);
+			},
+			floor: ast => {
+				return opProcesser(`floor`, ast.arguments);
+			},
+			sqrt: ast => {
+				return opProcesser(`sqrt`, ast.arguments);
+			},
+			rand: ast => {
+				return opProcesser(`rand`, ast.arguments);
 			}
-			// TODO: unit control, etc.
 		};
 
 		if (handlers[node.functionName]) {
