@@ -8,9 +8,7 @@
 
 Incomplete parts:
 
-- Testing
-- `asm`
-- Unit-relevant instructions
+- Comprehensive testing (will be done after my upcoming January gaokao)
 
 ----
 
@@ -23,7 +21,13 @@ Mindustry-C aims to compile C code to Mindustry Assembly, a brain-racking langua
 
 There have been many similar softwares aiming at using languages like C/C++ (alike grammar) or Python to code in Mindustry, but they aren't so effective. So here we are.
 
-## Features about Mindustry-C (Envisioned)
+## Installation
+
+Installation is not needed. Just download `main.html` and `mindc.js` and ensure that you have Internet connection (UI requires Bootstrap from CDN; or the display might be a little bit weird). Then, input your code and start compiling!
+
+For grammar introduction (about the features unique to Mindustry-C) and examples, refer to docs (might be in progress).
+
+## Features about Mindustry-C
 
 - Reserving most of C89 features
   - Yes, you'll have structs, pointers, unions, and `typedef`!
@@ -31,7 +35,7 @@ There have been many similar softwares aiming at using languages like C/C++ (ali
   - Also, support for function pointers might be limited
 
 - Some C/C++ features:
-  - Partial support for `const`
+  - Partial support for `const` and `auto` (used to describe automatically-connected devices)
 
 - Adding special types for Mindustry:
   - `device` for device (conveyors, scatters, etc.)
