@@ -76,6 +76,13 @@ Arrays might also take up additional spaces to store its previous/next cell of s
 
 ## Special Grammar
 
+### Specialized for Mindustry
+
 - Use `auto device conveyor1;` to register a connected device (**`auto` is essential**).
 - Use `(volatile int*)` (or similar) to force to transmit registry variables to some functions (reserved for builtin calls).
 - Function pointers must have a `typedef` declared.
+
+### Different from C/C++
+
+- Initializer lists should be unwrapped (or, an initializer list will be considered a preprocessed pointer literal).
+- Structs delivered in parameters are **by reference instead of by value** (given that it can be costly to copy anything in Mindustry).
