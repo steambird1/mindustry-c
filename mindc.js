@@ -4854,13 +4854,19 @@ class SemanticAnalyzer extends ASTVisitor {
         }
 
         const funcSymbol = this.currentScope.lookup(node.callee.name);
-        if (!funcSymbol || funcSymbol.kind !== 'function') {
+        if (!funcSymbol || (funcSymbol.kind !== 'function' && 
+			(!funcSymbol.type.type || funcSymbol.type.type.kind !== 'function'))) {
             this.addError(`Undeclared function '${node.callee.name}'`, node.callee.location);
             return;
         }
+		let expectedParams = funcSymbol.type.parameters || [], isFunctionPointer = false;
+		if (funcSymbol.kind !== 'function' && funcSymbol.type.type.kind === 'function') {
+			expectedParams = funcSymbol.type.type.functionTo.type.parameters;
+			isFunctionPointer = true;
+		}
 
         // 检查参数数量
-        const expectedParams = funcSymbol.type.parameters || [];
+       
         if (node.arguments.length !== expectedParams.length) {
             this.addError(
                 `Function '${node.callee.name}' expects ${expectedParams.length} arguments, but ${node.arguments.length} were provided`,
@@ -4882,7 +4888,12 @@ class SemanticAnalyzer extends ASTVisitor {
             }
         });
 
-        node.dataType = this.getTypeInfo(funcSymbol.type.returnType);
+		if (isFunctionPointer) {
+			node.dataType = this.getTypeInfo(funcSymbol.type.type.functionTo.type.returnType);
+		} else {
+			node.dataType = this.getTypeInfo(funcSymbol.type.returnType);
+		}
+		node.setAttribute('isFunctionPointer', isFunctionPointer);
     }
 
     visitBuiltinCall(node) {
@@ -5184,6 +5195,13 @@ class SemanticAnalyzer extends ASTVisitor {
         if (this.typeToString(targetType) === this.typeToString(sourceType)) {
             return true;
         }
+		// Clear names for checker
+		if (targetType.kind === 'function' && sourceType.kind === 'function') {
+			const duplicateTarget = targetType.duplicate(), duplicateSource = sourceType.duplicate();
+			duplicateTarget.name = "";
+			duplicateSource.name = "";
+			return this.typeToString(duplicateTarget) === this.typeToString(duplicateSource);
+		}
         
         // void指针可以接受任何指针类型
         if (targetType.kind === 'pointer' && sourceType.kind === 'pointer') {
@@ -5945,6 +5963,9 @@ class Optimizer {
 				}
 				
 			}
+		}
+		if (node.right.type === 'Identifier' && node.right.symbol && node.right.symbol.kind === 'function') {
+			this.recordFunctionCall(this.currentFunction, node.right.name);
 		}
     }
 
@@ -10407,16 +10428,25 @@ class FunctionRegisterer {
 	 * @param {Instruction} body 
 	 * @param {Scope} scope The scope should be function scope
 	 * @param {List<SymbolEntry>} stackSymbols 
+	 * @remark These two symbols won't be analyzed, so they're safe
 	 */
 	addFunction(name, body, scope = null, givenStackSymbols = [], specialBuiltin = false) {
 		let stackTotal = 0;
 		let stackSymbols = givenStackSymbols;
-		stackSymbols.push(new SymbolEntry('__stackpos', 'int', scope, 'variable', null, 1));
+		stackSymbols.push(new SymbolEntry('__stackpos', '__builtin_int', scope, 'variable', null, 1));
 		stackSymbols.forEach(element => {
 			if (element.size != null) stackTotal += element.size;
 		});
+		let preservedStack = null;
+		if (scope) {
+			preservedStack = new SymbolEntry('__preserved_stackpos', '__builtin_int', scope, 'variable', null, 1);
+			scope.addSymbol(preservedStack);
+			// Otherwise, you have to manually guarantee that you won't modify stackpos inside!
+		}
 		this.functionCollection.set(name, {
 			body: body,
+			scope: scope,
+			preservedStack: preservedStack,
 			stackSymbols: stackSymbols,
 			stackTotal: stackTotal,
 			specialBuiltin: specialBuiltin
@@ -10434,14 +10464,69 @@ class FunctionRegisterer {
 	}
 	
 	// Convention: functions are labeled through "_${name}"
-	getAllFunctionDecl() {
+	getAllFunctionDecl(memoryObject) {
 		let result = new Instruction();
 		this.functionCollection.forEach((func, name) => {
-			const returner = new Instruction([InstructionBuilder.set('@counter', '__stackpos')]);
+			const returner = new Instruction([InstructionBuilder.set('@counter', 
+				func.preservedStack ? func.preservedStack.getAssemblySymbol() : '__stackpos')]);
 			const jumper = InstructionBuilder.jump('{end_of_body}', 'always', null, null);
 			let connector = new Instruction();
 			connector.concat(jumper);
+			// Stack preparation (moved from function call)
+			let stackPositionPointer = null;
+			const refFunction = func;
+			// Consider configuring heap memories as required
+			// For each symbol, create a hidden pointer for it
+			let heapPreparation = new Instruction();
+			let totalStackframeSize = 0;
+			/*
+			if (refFunction.specialBuiltin) {
+				heapPreparation.concat(InstructionBuilder.set('__internal_stackpos', '__stackpos'));
+			}
+				*/
+			refFunction.stackSymbols.forEach(symbol => {
+				// So pointer-forward and -backward can't have stack symbols!
+				if (symbol.name === '__stackpos') {
+					//if (fromMain) return;
+					if (refFunction.specialBuiltin) {
+						return;
+					}
+				}
+				totalStackframeSize += symbol.size;
+				const memFwdCall = memoryObject.outputPointerForwardCall(symbol.size, '__stackframe', this);
+				heapPreparation.concat(new Instruction([
+					InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_block`, '__stackframe_block'),
+					InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_pos`, '__stackframe_pos')
+				]));
+				heapPreparation.concat(memFwdCall);
+				if (symbol.name === '__stackpos') {
+					stackPositionPointer = symbol.getAssemblySymbol();
+					heapPreparation.concat(memoryObject.outputPointerStorageOf(`${stackPositionPointer}.__pointer`, '__internal_stackpos'));
+				}
+			});
+
+			// End
+			if (func.preservedStack) {
+				connector.concat(InstructionBuilder.set(func.preservedStack.getAssemblySymbol(), '__stackpos'));
+			}
+			
+			connector.concat(heapPreparation);
 			connector.concat(func.body);
+			//connector.concat(InstructionBuilder.set('__jump_stackpos', '__stackpos'));
+
+			if (refFunction.specialBuiltin) {
+				// Do nothing now
+				//connector.concat(InstructionBuilder.set('__stackpos', '__internal_stackpos'));
+			} else if (stackPositionPointer || refFunction.specialBuiltin) {
+				const fromMainJumper = InstructionBuilder.jump('{from_main}', 'equal', '__from_main', 'true');
+				connector.concat(fromMainJumper);
+				connector.concat(memoryObject.outputPointerFetchOf(`${stackPositionPointer}.__pointer`, '__stackpos'));
+				connector.concat(new InstructionReferrer(fromMainJumper, 'from_main'));
+			}
+			if (totalStackframeSize > 0) {
+				connector.concat(memoryObject.outputPointerBackwardCall(totalStackframeSize, '__stackframe', this));
+			}
+
 			if (name === 'main') {
 				connector.concat(InstructionBuilder.end());
 			} else {
@@ -10459,79 +10544,48 @@ class FunctionRegisterer {
 		});
 		return result;
 	}
+
+	getRawFunctionCall(varName, params, fromMain = false) {
+		let result = new Instruction();
+		// Caller configuring the stack
+		// (storing returning point, if not from main)
+		
+		
+		//assignment = memoryObject.assign("__stackpos_" + (this.callerId++));
+		//result.concat(memoryObject.outputStorageOf(assignment, "__stackpos"));
+		//result.concat(heapPreparation);
+		
+		
+		params.forEach((value, name) => {
+			result.concat(InstructionBuilder.set(name, value));
+		});
+		result.concat(InstructionBuilder.set("__from_main", fromMain ? 'true' : 'false'));
+		result.concat(InstructionBuilder.set("__internal_stackpos", "__stackpos"));
+		result.concat(InstructionBuilder.set("__stackpos", "@counter"));
+		result.concat(InstructionBuilder.op("add", "__stackpos", "__stackpos", 2));	// Instruction 1
+		result.concat(InstructionBuilder.set("@counter", varName)); // Instruction 2 (caller)
+		// (Stack cleanup)
+		// Instruction 3 and sth else: continue the control flow
+		// !!!! Function return will be responsible for setting @counter back !!!!
+		// (set current return point)
+        
+		return result;
+	}
 	
 	/**
 	 * Get a function call instruction block.
 	 * @param {string} name
 	 * @param {list<Object{name, value}>} params Notice: Only for internal calls.
-	 * @param {MemoryManager} memoryObject
+	 * @param {MemoryManager} memoryObject Reserved only for compatibility.
 	 * @param {boolean} fromMain
 	 * @remark The return value will be stored in __returnA and __returnB (for pointer). These are set by the function itself
-	 * @todo MODIFY THE HEAPSTACK ASSIGNMENT !!!
 	*/
 	getFunctionCall(name, params, memoryObject, fromMain = false) {
 		const refFunction = this.functionCollection.get(name);
 		if (!refFunction) {
 			return new Instruction();
 		}
-		let result = new Instruction();
-		// Caller configuring the stack
-		// (storing returning point, if not from main)
-		let assignment;
-		let stackPositionPointer = null;
-		
-		// Consider configuring heap memories as required
-		// For each symbol, create a hidden pointer for it
-		let heapPreparation = new Instruction();
-		let totalStackframeSize = 0;
-        if (refFunction.specialBuiltin) {
-            heapPreparation.concat(InstructionBuilder.set('__internal_stackpos', '__stackpos'));
-        }
-		refFunction.stackSymbols.forEach(symbol => {
-			// So pointer-forward and -backward can't have stack symbols!
-			if (symbol.name === '__stackpos') {
-				if (fromMain) return;
-				if (refFunction.specialBuiltin) {
-					return;
-				}
-			}
-			totalStackframeSize += symbol.size;
-			const memFwdCall = memoryObject.outputPointerForwardCall(symbol.size, '__stackframe', this);
-			heapPreparation.concat(new Instruction([
-				InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_block`, '__stackframe_block'),
-				InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_pos`, '__stackframe_pos')
-			]));
-			heapPreparation.concat(memFwdCall);
-			if (symbol.name === '__stackpos') {
-				stackPositionPointer = symbol.getAssemblySymbol();
-				heapPreparation.concat(memoryObject.outputPointerStorageOf(`${stackPositionPointer}.__pointer`, '__stackpos'));
-			}
-		});
-		
-		//assignment = memoryObject.assign("__stackpos_" + (this.callerId++));
-		//result.concat(memoryObject.outputStorageOf(assignment, "__stackpos"));
-		result.concat(heapPreparation);
-		
-		
-		params.forEach((value, name) => {
-			result.concat(InstructionBuilder.set(name, value));
-		});
-		result.concat(InstructionBuilder.set("__stackpos", "@counter"));
-		result.concat(InstructionBuilder.op("add", "__stackpos", "__stackpos", 2));	// Instruction 1
-		result.concat(InstructionBuilder.set("@counter", `_${name}`)); // Instruction 2 (caller)
-		// (Stack cleanup)
-		// Instruction 3 and sth else: continue the control flow
-		// !!!! Function return will be responsible for setting @counter back !!!!
-		// (set current return point)
-        if (refFunction.specialBuiltin) {
-            result.concat(InstructionBuilder.set('__stackpos', '__internal_stackpos'));
-        } else if (!fromMain && (stackPositionPointer || refFunction.specialBuiltin)) {
-			result.concat(memoryObject.outputPointerFetchOf(`${stackPositionPointer}.__pointer`, '__stackpos'));
-		}
-		if (totalStackframeSize > 0) {
-			result.concat(memoryObject.outputPointerBackwardCall(totalStackframeSize, '__stackframe', this));
-		}
-		return result;
+		return this.getRawFunctionCall(`_${name}`, params, fromMain);
 	}
 }
 
@@ -11098,7 +11152,7 @@ class CodeGenerator extends ASTVisitor {
 			this.functionManagement.addFunction(func.name, funcBody, funcSymbol.owningScope, stackSymbols, func.name === 'main');
 		});
 		node.globalDeclarations.forEach(decl => result.concat(this.visit(decl)));
-		result.concat(this.functionManagement.getAllFunctionDecl());
+		result.concat(this.functionManagement.getAllFunctionDecl(this.memory));
 		result.setAttribute('mainSymbol', mainSymbol);
 		// Main function is now called in generate() after some preprocessing
 		return result;
@@ -11129,6 +11183,11 @@ class CodeGenerator extends ASTVisitor {
 		}
 		this.currentFunction = node.name;
 		this.currentReturns = [];
+		let result = new Instruction(), paramId = 0;
+		result.concat(new Instruction(node.scope.getAllSymbols().flatMap(sym => {
+			if (sym.kind !== 'parameter') return [];
+			return [this.generateSymbolWrite(sym, `__param_${paramId++}`)];
+		})));
 		let body = this.visit(node.body);
 		//body.replace('func_ret', body.size() + 1);
 		this.currentReturns.forEach(rets => {
@@ -11140,7 +11199,8 @@ class CodeGenerator extends ASTVisitor {
 		this.releaseTempVariable();
 		this.currentFunction = "";
 		this.currentReturns = [];
-		return body;
+		result.concat(body);
+		return result;
 	}
 
 	/**
@@ -11923,25 +11983,55 @@ class CodeGenerator extends ASTVisitor {
 	 * @param {FunctionCallNode} node 
 	 * @throws {InternalGenerationFailure}
 	 * @returns {Instruction}
-	 * @todo Must also clean temporary variables
+	 * @todo To make it suitable for function pointer (in order of parameter...)
 	 */
 	visitFunctionCall(node) {
 		let result = new Instruction();
 		// Prepare for all parameters
-		const relevantFunction = node.callee ? node.callee.symbol : null;
+		let relevantFunction = node.callee ? node.callee.symbol : null, isFunctionPointer = false;
+		if (relevantFunction.kind !== 'function') {
+			relevantFunction = relevantFunction.type.type.functionTo;
+			isFunctionPointer = true;
+		}
 		if (!relevantFunction) {
 			throw new InternalGenerationFailure(`Unknown function ${node.callee ? node.callee.name : '<error-function>'}`);
 		}
+		//let paramDelivery = new Map();
 		for (let i = 0; i < relevantFunction.type.parameters.length && i < node.arguments.length; i++) {
 			const param = this.visit(node.arguments[i]);
 			result.concat(param);
+			/*
 			result.concat(this.generateSymbolWrite(
 				relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name),
 				param.instructionReturn
 			));
+			*/
+			let actualType;
+			if (isFunctionPointer) {
+				actualType = this.compiler.semanticAnalyzer.getTypeInfo(relevantFunction.type.parameters[i].type);
+			} else {
+				actualType = relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name).type.type;
+			}
+			if (actualType.kind === 'pointer' || actualType.kind === 'array' || actualType.kind === 'struct'
+				|| actualType.kind === 'union'
+			) {
+				result.concat(new Instruction([
+					InstructionBuilder.set(`__param_${i}_block`, `${param.instructionReturn}_block`),
+					InstructionBuilder.set(`__param_${i}_pos`, `${param.instructionReturn}_pos`)
+				]));
+			} else {
+				result.concat(InstructionBuilder.set(`__param_${i}`, param.instructionReturn));
+			}
+			
 		}
-		result.concat(this.functionManagement.getFunctionCall(
-			node.callee.name, new Map(), this.memory, this.currentFunction === 'main'));
+		if (isFunctionPointer) {
+			result.concat(this.functionManagement.getRawFunctionCall(node.callee.symbol.getAssemblySymbol(),
+				new Map(), this.currentFunction === 'main'));
+		} else {
+			result.concat(this.functionManagement.getFunctionCall(
+				node.callee.name, new Map(), this.memory, this.currentFunction === 'main'));
+		}
+		
 		// Get a copy of function return
 		if (relevantFunction.type.returnType !== 'void') {
 			result.instructionReturn = this.getTempVariable();
