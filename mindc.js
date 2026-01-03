@@ -1799,6 +1799,11 @@ class Parser {
                 return typeNode;
             }
             
+			if (!this.knownTypeNames.has(token.value)) {
+				this.addError(`Unknown type ${token.value}`);
+				return null;
+			}
+
             // 可能是通过typedef定义的类型别名
             typeNode = ASTBuilder.typeSpecifier(token.value);
             typeNode.setAttribute('location', token.location);
@@ -2600,8 +2605,10 @@ class Parser {
         
         // 在完整实现中，应该维护一个类型名符号表
         // 检查是否已经在已知类型名集合中
-        if (this.knownTypeNames.has(name)) {
-            return true;
+
+		// A known type is necessary
+        if (!this.knownTypeNames.has(name)) {
+            return false;
         }
         
         // 对于未知的标识符，我们需要检查它是否可能是类型名
@@ -10990,6 +10997,7 @@ class CodeGenerator extends ASTVisitor {
 			switch (symbol.kind) {
 				case 'variable':
 				case 'struct':
+				case 'parameter':
 				case 'union':
 					const symbolType = symbol.type.type;
 					symbol.size = symbolType.size;
@@ -11163,10 +11171,37 @@ class CodeGenerator extends ASTVisitor {
 	 * @param {AsmStatementNode} node 
 	 */
 	visitAsmStatement(node) {
+		if (node.code.length && node.code[0] === ':') {
+			const instructionSplit = node.code.split(' ');
+			switch (instructionSplit[0]) {
+				case ":varStorage":
+					if (instructionSplit.length < 3) {
+						this.addError(`Invalid asm statement: ${node.code}`, node.location);
+					}
+					const symbol = this.currentScope.lookup(instructionSplit[2]);
+					if (!symbol) {
+						this.addError(`Unknown symbol: ${instructionSplit[2]}`, node.location);
+					}
+					const assembly = symbol.getAssemblySymbol();
+					if (symbol && (symbol.implementAsPointer || symbol.accessThroughPointer)) {
+						return new Instruction([
+							InstructionBuilder.set(`${instructionSplit[1]}_block`, `${assembly}_block`),
+							InstructionBuilder.set(`${instructionSplit[1]}_ptr`, `${assembly}_ptr`)
+						]);
+					} else {
+						return InstructionBuilder.set(instructionSplit[1], assembly);
+					}
+					break;
+				case ":varRead":
+					return new Instruction([], instructionSplit.length >= 2 ? instructionSplit[1] : "null");
+					break;
+			}
+		} 
 		return new SingleInstruction({
 			content: node.code,
 			referrer: []
 		});
+		
 	}
     
 	/**
@@ -11470,8 +11505,10 @@ class CodeGenerator extends ASTVisitor {
 			}
 			const evaluation = node.initializer ? this.visit(node.initializer) : new Instruction();
 			finalize.concat(evaluation);
-			let result = this.generateSymbolWrite(symbol, evaluation.instructionReturn ?? 'null');
-			finalize.concat(result);
+			if (!symbol.memoryLocation) {
+				let result = this.generateSymbolWrite(symbol, evaluation.instructionReturn ?? 'null');
+				finalize.concat(result);
+			}
 			if (symbol.isStatic) {
 				finalize.concat(InstructionBuilder.set(endTag, 'true'));
 				finalize.concat(new InstructionReferrer(endJumper, 'skip_init', 0));
@@ -11703,7 +11740,8 @@ class CodeGenerator extends ASTVisitor {
 					casting = this.implicitToBoolean(node.expression);
 				}
 			}
-		} else {
+		} 
+		if (!casting) {
 			casting = this.visit(node.expression);
 		}
 		casting.setAttribute('fromCast', true);
@@ -12335,6 +12373,12 @@ class CodeGenerator extends ASTVisitor {
 			},
 			rand: ast => {
 				return opProcesser(`rand`, ast.arguments);
+			},
+			asm: ast => {
+				if (ast.arguments.length <= 0 || ast.arguments[0].type !== 'StringLiteral') {
+					throw `Incorrect asm() call`;
+				}
+				return this.visitAsmStatement(ASTBuilder.asmStatement(ast.arguments[0].value));
 			}
 		};
 
