@@ -65,6 +65,7 @@ const ASTNodeType = {
     STRING_LITERAL: 'StringLiteral',
     CHARACTER_LITERAL: 'CharacterLiteral',
     NULL_LITERAL: 'NullLiteral',
+	INITIALIZER_LIST: 'InitializerList',
     
     // 类型
     TYPE_SPECIFIER: 'TypeSpecifier',
@@ -230,6 +231,13 @@ class VariableDeclaratorNode extends ASTNode {
         this.pointerQualifiers = []; // 指针限定符数组，每个元素对应一级指针
         this.arrayDimensions = []; // 数组维度
     }
+}
+
+// Initializer uses children! (and has no type information)
+class InitializerListNode extends ASTNode {
+	constructor() {
+		super(ASTNodeType.INITIALIZER_LIST);
+	}
 }
 
 class BinaryExpressionNode extends ASTNode {
@@ -551,6 +559,10 @@ class ASTBuilder {
     static nullLiteral() {
         return new NullLiteralNode();
     }
+
+	static initializerList() {
+		return new InitializerListNode();
+	}
     
     static typeSpecifier(typeName) {
         return new TypeSpecifierNode(typeName);
@@ -2772,7 +2784,7 @@ class Parser {
     }
 
     parseAssignmentExpression() {
-        const left = this.parseConditionalExpression();
+        const left = this.parseInitializerList();
         if (!left) return null;
 
         if (this.isAssignmentOperator()) {
@@ -2803,6 +2815,28 @@ class Parser {
             TokenType.BITWISE_AND_ASSIGN, TokenType.BITWISE_OR_ASSIGN, TokenType.BITWISE_XOR_ASSIGN
         ].includes(token.type);
     }
+
+	/**
+	 * Parse initializer list (manually implemented.)
+	 */
+	parseInitializerList() {
+		if (this.matchToken(TokenType.LEFT_BRACE)) {
+			let initList = ASTBuilder.initializerList();
+			this.consumeToken();
+			while (true) {
+				const expr = this.parseConditionalExpression();
+				initList.addChild(expr);
+				if (this.matchToken(TokenType.RIGHT_BRACE)) {
+					break;	// End of the list
+				}
+				this.expectToken(TokenType.COMMA);	// already consuming
+			}
+			this.consumeToken();	// consume '}'
+			return initList;
+		}
+
+		return this.parseConditionalExpression();
+	}
 
     parseConditionalExpression() {
         const test = this.parseLogicalOrExpression();
@@ -5006,6 +5040,15 @@ class SemanticAnalyzer extends ASTVisitor {
         this.currentScope = this.currentScope.parent;
     }
 
+	visitInitializerList(node) {
+		node.dataType = this.typeTable.get('null_t').duplicate();	// size might be modified
+		node.dataType.size = 0;
+		node.children.forEach(child => {
+			this.visit(child);
+			node.dataType.size += child.dataType ? child.dataType.size : 0;
+		});
+	}
+
     // =============== 类型检查辅助方法 ===============
 	getExpressionType(node) {
         if (!node) return null;
@@ -5106,6 +5149,7 @@ class SemanticAnalyzer extends ASTVisitor {
             case 'CharacterLiteral':
                 return this.typeTable.get('char');
 
+			case 'InitializerList':
             case 'NullLiteral':
                 return this.typeTable.get('null_t');
 
@@ -7558,9 +7602,17 @@ class Optimizer {
 
 	getLiteral(value) {
 		if (typeof value === 'number' || typeof value === 'boolean') {
-			return ASTBuilder.numericLiteral(value);
+			const result = ASTBuilder.numericLiteral(value);
+			result.dataType = this.typeTable.get('int');
+			return result;
 		} else if (typeof value === 'string') {
-			return ASTBuilder.stringLiteral(value);
+			const result = ASTBuilder.stringLiteral(value);
+			result.dataType = this.typeTable.get('char');
+			return result;
+		} else if (value == null) {
+			const result = ASTBuilder.nullLiteral();
+			result.dataType = this.typeTable.get('null_t');
+			return result;
 		} else {
 			return null;
 		}
@@ -7582,6 +7634,7 @@ class Optimizer {
                     // 替换为常量值
                     const replacement = this.getLiteral(constValue);
                     replacement.location = node.location;
+					replacement.dataType = node.dataType;
                     this.replaceNode(node, replacement);
                     this.modified = true;
                 }
@@ -7605,6 +7658,7 @@ class Optimizer {
                     if (result !== undefined) {
                         const replacement = this.getLiteral(result);
                         replacement.location = node.location;
+						replacement.dataType = node.dataType;
                         this.replaceNode(node, replacement);
                         this.modified = true;
                     }
@@ -7623,6 +7677,7 @@ class Optimizer {
                     if (result !== undefined) {
                         const replacement = this.getLiteral(result);
                         replacement.location = node.location;
+						replacement.dataType = node.dataType;
                         this.replaceNode(node, replacement);
                         this.modified = true;
                     }
@@ -7970,6 +8025,7 @@ class Optimizer {
 				return (this.hasSideEffects(node.left)) || (this.hasSideEffects(node.right));
 				// TODO: Double-check logic here
 				break;
+			//case 'InitializerList':	// Depending on its children
 			case 'FunctionCall':
             case 'BuiltinCall':
 			case 'AsmStatement':
@@ -10749,6 +10805,44 @@ class MemoryManager {
 		caller.instructionReturn = '__builtin_return';
 		return caller;
 	}
+
+	/**
+	 * 
+	 * @param {FunctionRegisterer} funcReg 
+	 */
+	outputMemcpyFunction(funcReg) {
+		funcReg.addFunction('__memcpy', new Instruction([
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__remain', 0, [13]),
+			InstructionBuilder.read('__tmp', '__srcblock', '__srcpos'),
+			InstructionBuilder.write('__tmp', '__tgtblock', '__tgtpos'),
+			InstructionBuilder.read('__srcmax', '__srcblock', 2),
+			InstructionBuilder.op('add', '__srcpos', '__srcpos', 1),
+			InstructionBuilder.op('add', '__tgtpos', '__tgtpos', 1),
+			InstructionBuilder.jump('{0}', 'lessThan', '__srcpos', '__srcmax', [8]),
+			InstructionBuilder.read('__srcblock', '__srcblock', 1),
+			InstructionBuilder.read('__tgtmax', '__srcblock', 2),
+			InstructionBuilder.jump('{0}', 'lessThan', '__tgtpos', '__tgtmax', [11]),
+			InstructionBuilder.read('__tgtblock', '__tgtblock', 1),
+			InstructionBuilder.op('sub', '__remain', '__remain', 1),
+			InstructionBuilder.jump('{0}', 'always', null, null, [0])
+		]), null, [], true);
+	}
+
+	/**
+	 * 
+	 * @param {string} target 
+	 * @param {string} source 
+	 * @param {any} size 
+	 * @param {FunctionRegisterer} funcReg 
+	 * @returns {Instruction}
+	 */
+	outputMemcpyCall(target, source, size, funcReg) {
+		const caller = funcReg.getFunctionCall('__memcpy', 
+			new Map([["__srcblock", source + '_block'], 
+				["__srcpos", source + '_pos'], ["__tgtblock", target + '_block'], 
+				["__tgtpos", target + '_pos'], ["__remain", size]]), this);
+		return caller;
+	}
 }
 
 
@@ -10769,6 +10863,7 @@ class CodeGenerator extends ASTVisitor {
         super(compiler);
 		this.semantic = compiler.semanticAnalyzer;
 		this.registryId = 0;
+		this.temporarySpaceId = 0;
         this.outputCode = new Instruction();
 		this.memory = new MemoryManager(compiler.memoryInfo);
 		this.functionManagement = new FunctionRegisterer();
@@ -10801,9 +10896,17 @@ class CodeGenerator extends ASTVisitor {
 			if (!this.compiler.config.getAttribute('noPointerFunction')) {
 				result.concat(this.memory.outputPointerForwardFunction(this.functionManagement));
 				result.concat(this.memory.outputPointerBackwardFunction(this.functionManagement));
+				result.concat(this.memory.outputMemcpyFunction(this.functionManagement));
 			}
+			const programBody = this.visit(ast);
+			const mainSymbol = programBody.getAttribute('mainSymbol');
+			result.concat(programBody);
 			result.concat(this.functionManagement.getSystemInitializer(this.memory));
-			result.concat(this.visit(ast));
+			if (mainSymbol) {
+				result.concat(this.functionManagement.getFunctionCall('main', new Map(), this.memory, true));
+			} else {
+				this.addWarning('No main function in program');
+			}
 		} catch (error) {
 			success = false;
 			this.addError(`Internal parser error: ${error.message}\n${error.stack}`);
@@ -10996,11 +11099,8 @@ class CodeGenerator extends ASTVisitor {
 		});
 		node.globalDeclarations.forEach(decl => result.concat(this.visit(decl)));
 		result.concat(this.functionManagement.getAllFunctionDecl());
-		if (mainSymbol) {
-			result.concat(this.functionManagement.getFunctionCall('main', new Map(), this.memory, true));
-		} else {
-			this.addWarning('No main function in program');
-		}
+		result.setAttribute('mainSymbol', mainSymbol);
+		// Main function is now called in generate() after some preprocessing
 		return result;
 	}
 
@@ -11349,6 +11449,42 @@ class CodeGenerator extends ASTVisitor {
 
 	/**
 	 * 
+	 * @param {InitializerListNode} node 
+	 * @remark This function fetchs parent information...
+	 * - If its parent is a declarator (or variable declarator), it directly sets values
+	 * - Otherwise, it creates a new memory space and copies it
+	 */
+	visitInitializerList(node) {
+		const declaratorTypes = ['VariableDeclarator', 'Declarator'];
+		const pointerImplementation = ['pointer', 'array', 'struct', 'union'];
+		let assignedSpace = null, result = new Instruction(), tmpVar = this.getTempVariable();
+		if (node.parent && declaratorTypes.includes(node.parent.type)) {
+			assignedSpace = this.currentScope.lookup(node.parent.name).memoryLocation;
+		}
+		assignedSpace = assignedSpace ?? this.memory.assign(this.getTempSpace(), node.dataType.size);
+		result.concat(assignedSpace.getAssignmentInstruction(tmpVar));
+		result.instructionReturn = tmpVar;
+		//let currentPointer = 0;
+		for (let i = 0; i < node.children.length; i++) {
+			const valueFetch = this.visit(node.children[i]);
+			result.concat(valueFetch);
+			// Process assignment-like
+			if (pointerImplementation.includes(node.children[i].dataType.kind)) {
+				// They are implemented as pointer...
+				result.concat(new Instruction([
+					this.memory.outputStorageOf(assignedSpace, `${valueFetch.instructionReturn}_block`),
+					this.memory.outputStorageOf(assignedSpace.duplicate().forwarding(1), `${valueFetch.instructionReturn}_ptr`)
+				]));
+			} else {
+				result.concat(this.memory.outputStorageOf(assignedSpace, valueFetch.instructionReturn));
+			}
+			assignedSpace.forwarding(node.children[i].dataType.size ?? 0);
+		}
+		return result;
+	}
+
+	/**
+	 * 
 	 * @param {ASTNode} node 
 	 * @returns {Instruction} Return something with implicit conversion to int
 	 */
@@ -11529,6 +11665,19 @@ class CodeGenerator extends ASTVisitor {
 		} else {
 			value = this.visit(node.right);
 		}
+		if (node.right.type === 'InitializerList' && node.left.type !== 'Identifier') {
+			// Pre-evaluated pointer with initializer list, perform something like memcpy
+			let result = new Instruction();
+			const leftPointer = this.processLValGetter(node.left, true);
+			const listData = this.visit(node.right);
+			result.concat(leftPointer);
+			result.concat(listData);
+			result.concat(this.memory.outputMemcpyCall(leftPointer.instructionReturn, listData.instructionReturn,
+				node.right.dataType.size ?? 0, this.functionManagement
+			));
+			result.instructionReturn = leftPointer.instructionReturn;
+			return result;
+		}
 		return this.processAssignment(node.left, value);
 	}
 
@@ -11630,10 +11779,9 @@ class CodeGenerator extends ASTVisitor {
 			finalResult.instructionReturn = leftsideDuplicate;
 		} else {
 			// Struct/union: seek member inside it. Already calculated by SEM.
-			const index = leftside;
 			//finalResult.concat(InstructionBuilder.op('add', index.instructionReturn, index.instructionReturn, node.getAttribute('memberOffset')));
-			finalResult.concat(this.memory.outputPointerForwardCall(node.getAttribute('memberOffset'), index.instructionReturn, this.functionManagement));
-			finalResult.instructionReturn = index.instructionReturn;
+			finalResult.concat(this.memory.outputPointerForwardCall(node.getAttribute('memberOffset'), leftsideDuplicate, this.functionManagement));
+			finalResult.instructionReturn = leftsideDuplicate;
 		}
 		return finalResult;
 	}
@@ -11651,6 +11799,7 @@ class CodeGenerator extends ASTVisitor {
 	 * @remark Therefore, all 'visit' (e.g. Identifier, MemberExpression) must be implemented!
 	 */
 	processLValGetter(left, returnOnlyPointer = false) {
+		const pointerImplementation = ['pointer', 'array', 'struct', 'union'];
 		let pointer = "";
 		let finalResult = new Instruction();
 		let isPointer = false;
@@ -11695,7 +11844,7 @@ class CodeGenerator extends ASTVisitor {
 
 			case 'MemberExpression':
 				const resolution = this.resolveMemberExpression(left);
-				if (left.dataType.kind === 'pointer') {
+				if (pointerImplementation.includes(left.dataType.kind)) {
 					isPointer = true;
 				}
 				finalResult.concat(resolution);
@@ -11765,6 +11914,7 @@ class CodeGenerator extends ASTVisitor {
 			let returns = right.instructionReturn;
 			result.concat(lval.replace('value_entry', returns));
 		}
+		result.instructionReturn = lval.instructionReturn;
 		return result;
 	}
 
@@ -11841,6 +11991,7 @@ class CodeGenerator extends ASTVisitor {
 	/**
 	 * 
 	 * @param {ASTNode} node Node for member expression
+	 * @todo
 	 */
 	visitMemberExpression(node) {
 		// It must be a pointer-like, so we directly seek for a LValue
@@ -12117,6 +12268,11 @@ class CodeGenerator extends ASTVisitor {
     getTempVariable() {
         // 获取临时变量名
 		return '__register_' + (this.registryId++);
+    }
+
+	getTempSpace() {
+        // 获取临时变量名
+		return '__memory_' + (this.temporarySpaceId++);
     }
 
 	releaseTempVariable() {
