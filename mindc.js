@@ -11601,8 +11601,11 @@ class CodeGenerator extends ASTVisitor {
 	 */
 	resolveMemberExpression(node) {
 		let finalResult = new Instruction();
-		const leftside = this.visit(node.children[0]);	// Thus it returns a duplicated version of address
-		finalResult.concat(leftside);
+		const leftsideOrigin = this.processLValGetter(node.children[0], true); // Thus it returns a duplicated version of address
+		finalResult.concat(leftsideOrigin);
+		const leftsideDuplicate = this.getTempVariable();
+		finalResult.concat(InstructionBuilder.set(`${leftsideDuplicate}_block`, `${leftsideOrigin.instructionReturn}_block`));
+		finalResult.concat(InstructionBuilder.set(`${leftsideDuplicate}_pos`, `${leftsideOrigin.instructionReturn}_pos`));
 		if (node.getAttribute('computed')) {
 			// Array, continue to get left-side
 			// TODO: The index of the left side should be multiplied by right-side size
@@ -11610,15 +11613,21 @@ class CodeGenerator extends ASTVisitor {
 			const index = this.visit(node.children[1]);	// Simple calculation
 			finalResult.concat(index);
 			let ratio = 1, childSize = 0;
-			if (node.children[0].dataType.size > 0 && node.dataType.size > 0) {
-				childSize = node.children[0].dataType.size;
-				ratio = childSize / node.dataType.size;
+			if (node.dataType.size > 0) {
+				ratio = node.dataType.size;
 			}
 			// Got correction ratio of array index
 			//finalResult.concat(InstructionBuilder.op('mul', index.instructionReturn, index.instructionReturn, ratio));
 			// Get multiplier
-			finalResult.concat(this.memory.outputPointerForwardCall((ratio - 1) * childSize, index.instructionReturn, this.functionManagement));
-			finalResult.instructionReturn = index.instructionReturn;
+			let resultIndex;
+			if (ratio > 1) {
+				resultIndex = this.getTempVariable();
+				finalResult.concat(InstructionBuilder.op('mul', resultIndex, index.instructionReturn, ratio));
+			} else {
+				resultIndex = index.instructionReturn;
+			}
+			finalResult.concat(this.memory.outputPointerForwardCall(resultIndex, leftsideDuplicate, this.functionManagement));
+			finalResult.instructionReturn = leftsideDuplicate;
 		} else {
 			// Struct/union: seek member inside it. Already calculated by SEM.
 			const index = leftside;
@@ -11664,7 +11673,8 @@ class CodeGenerator extends ASTVisitor {
 					} else if (identity.accessThroughPointer) {
 						//pointer = `${identity.getAssemblySymbol()}.__pointer`;
 						if (returnOnlyPointer) {
-							throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable already has memory address. Use '&' to avoid this problem.)`, left);
+							return new Instruction([], assemblySymbol);
+							//throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable already has memory address. Use '&' to avoid this problem.)`, left);
 						}
 						return this.generateSymbolWrite(identity, '{value_entry}');
 					} else {
@@ -11830,11 +11840,20 @@ class CodeGenerator extends ASTVisitor {
 
 	/**
 	 * 
-	 * @param {ASTNode} node 
+	 * @param {ASTNode} node Node for member expression
 	 */
 	visitMemberExpression(node) {
 		// It must be a pointer-like, so we directly seek for a LValue
-		return this.resolveMemberExpression(node);
+		//return this.resolveMemberExpression(node);
+		const memberResolution = this.resolveMemberExpression(node);
+		if (node.dataType.kind === 'pointer' || node.dataType.kind === 'array') {
+			return memberResolution;
+		}
+		let result = new Instruction(), tmpVar = this.getTempVariable();
+		result.concat(memberResolution);
+		result.concat(this.memory.outputPointerFetchOf(memberResolution.instructionReturn, tmpVar));
+		result.instructionReturn = tmpVar;
+		return result;
 	}
 
 	/**
