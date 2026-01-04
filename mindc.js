@@ -11249,7 +11249,7 @@ class CodeGenerator extends ASTVisitor {
 			const paramName = `__param_${paramId++}`;
 			if (sym.type.type.kind === 'struct' || sym.type.type.kind === 'union') {
 				// Must be copied
-				return [this.memory.outputMemcpyCall(sym.getAssemblySymbol(), paramName, sym.type.type.size, this.functionManagement)];
+				return [this.memory.outputMemcpyCall(`${sym.getAssemblySymbol()}.__pointer`, paramName, sym.type.type.size, this.functionManagement)];
 			}
 			return [this.generateSymbolWrite(sym, paramName)];
 		})));
