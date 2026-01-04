@@ -2831,7 +2831,7 @@ class Parser {
 			let initList = ASTBuilder.initializerList();
 			this.consumeToken();
 			while (true) {
-				const expr = this.parseConditionalExpression();
+				const expr = this.parseInitializerList();
 				initList.addChild(expr);
 				if (this.matchToken(TokenType.RIGHT_BRACE)) {
 					break;	// End of the list
@@ -3363,7 +3363,7 @@ class Parser {
 
     isBuiltinFunction(name) {
         const builtins = [
-			'draw', 'print', 'drawflush', 'printflush', 'getlink', 'ceil', 'floor', 'sqrt', 'rand', 'abs',
+			'draw', 'print', 'drawflush', 'printflush', 'getlink', 'ceil', 'floor', 'sqrt', 'rand', 'abs', 'memcpy',
 			'control', 'radar', 'sensor', 'set', 'op', 'lookup', 'ubind', 'ulocate', 'ucontrol', 'uradar', 'min', 'max',
 			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'adiff'
 		];
@@ -3437,6 +3437,11 @@ class Parser {
 
 // 7th conv.
 // 修改SymbolEntry类以存储更详细的类型信息
+/**
+ * @member {boolean} accessThroughPointer Indicating whether the variable should be accessed by a memory address (not necessarily be a pointer!)
+ * @member {boolean} implementAsPointer Indicating whether the variable IS a pointer (or array, which is regarded as a pointer.)
+ * @member {boolean} needMemoryAllocation
+ */
 class SymbolEntry {
     constructor(name, type, scope, kind, location = null, size = null) {
         this.name = name;
@@ -3458,6 +3463,7 @@ class SymbolEntry {
 		this.implementAsPointer = false;	// This is true will mean that when getting value, it will return a pointer
 		this.needMemoryAllocation = false;
 		this.isAutoDevice = false;
+		this.isVirtualSymbol = false;
 		// (for struct, union, pointer and array)
 
         this.isGlobal = false;
@@ -3663,6 +3669,7 @@ class SemanticAnalyzer extends ASTVisitor {
         
 		this.globalScope = null;	// ???
 		this.scopeCounter = 0;
+		this.virtualCounter = 0;
 		// Cannot do initialization in construction !!!
     }
 
@@ -3857,7 +3864,7 @@ class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'ucontrol', returnType: 'void', parameters: [], hasVarArgs: true},
 			{ name: 'uradar', returnType: 'device', parameters: ['char', 'char', 'char', 'char', 'int', 'int'] },
 			{ name: 'ulocate', returnType: 'int', parameters: [], hasVarArgs: true},
-			{ name: 'asm', returnType: 'void', parameters: ['char'], special: 'asm'}, // TODO: I'm unsure about whether this can be correctly done now.
+			{ name: 'asm', returnType: 'null_t', parameters: ['char'], special: 'asm'}, // TODO: I'm unsure about whether this can be correctly done now.
 			{ name: 'sin', returnType: 'float', parameters: ['float'] },	// These are in [op] instruction
 			{ name: 'cos', returnType: 'float', parameters: ['float'] },
 			{ name: 'tan', returnType: 'float', parameters: ['float'] },
@@ -3871,7 +3878,8 @@ class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'floor', returnType: 'float', parameters: ['float']},
 			{ name: 'sqrt', returnType: 'float', parameters: ['float']},
 			{ name: 'abs', returnType: 'float', parameters: ['float']},
-			{ name: 'rand', returnType: 'float', parameters: []}
+			{ name: 'rand', returnType: 'float', parameters: []},
+			{ name: 'memcpy', returnType: 'void', parameters: ['void*', 'void*', 'unsigned']}
 		];
 
         builtins.forEach(func => {
@@ -5059,12 +5067,27 @@ class SemanticAnalyzer extends ASTVisitor {
     }
 
 	visitInitializerList(node) {
+		const declaratorTypes = ['VariableDeclarator', 'Declarator'];
 		node.dataType = this.typeTable.get('null_t').duplicate();	// size might be modified
 		node.dataType.size = 0;
 		node.children.forEach(child => {
 			this.visit(child);
 			node.dataType.size += child.dataType ? child.dataType.size : 0;
 		});
+		// Assign a virtual symbol for it
+		if (!node.parent || (node.parent.type !== 'InitializerList'
+			 && (!declaratorTypes.includes(node.parent.type) || !node.parent.symbol))) {
+			const virtualSymbol = new SymbolEntry(
+				`__initializer_${this.virtualCounter++}`, node.dataType, this.currentScope, 'array', null, node.dataType.size);
+			virtualSymbol.isConst = true;
+			virtualSymbol.isVolatile = true;
+			virtualSymbol.accessThroughPointer = true;
+			virtualSymbol.needMemoryAllocation = true;
+			virtualSymbol.isVirtualSymbol = true;
+			virtualSymbol.isStatic = true;
+			node.symbol = virtualSymbol;
+			this.currentScope.addSymbol(virtualSymbol);
+		}
 	}
 
     // =============== 类型检查辅助方法 ===============
@@ -10630,7 +10653,7 @@ class MemoryBlockInfo {
 
 	currentRemain() {
 		if (this.parent) {
-			return this.parent.memoryBlocks[this.block].size - this.reservedSize - this.position;
+			return this.parent.memoryBlocks[this.block].size - this.position;
 		}
 		else return Infinity;
 	}
@@ -10873,16 +10896,18 @@ class MemoryManager {
 	 */
 	outputMemcpyFunction(funcReg) {
 		funcReg.addFunction('__memcpy', new Instruction([
-			InstructionBuilder.jump('{0}', 'lessThanEq', '__remain', 0, [13]),
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__remain', 0, [15]),
 			InstructionBuilder.read('__tmp', '__srcblock', '__srcpos'),
 			InstructionBuilder.write('__tmp', '__tgtblock', '__tgtpos'),
 			InstructionBuilder.read('__srcmax', '__srcblock', 2),
+			InstructionBuilder.op('sub', '__srcmax', '__srcmax', 1),
 			InstructionBuilder.op('add', '__srcpos', '__srcpos', 1),
 			InstructionBuilder.op('add', '__tgtpos', '__tgtpos', 1),
-			InstructionBuilder.jump('{0}', 'lessThan', '__srcpos', '__srcmax', [8]),
+			InstructionBuilder.jump('{0}', 'lessThan', '__srcpos', '__srcmax', [9]),
 			InstructionBuilder.read('__srcblock', '__srcblock', 1),
-			InstructionBuilder.read('__tgtmax', '__srcblock', 2),
-			InstructionBuilder.jump('{0}', 'lessThan', '__tgtpos', '__tgtmax', [11]),
+			InstructionBuilder.read('__tgtmax', '__tgtblock', 2),
+			InstructionBuilder.op('sub', '__tgtmax', '__tgtmax', 1),
+			InstructionBuilder.jump('{0}', 'lessThan', '__tgtpos', '__tgtmax', [13]),
 			InstructionBuilder.read('__tgtblock', '__tgtblock', 1),
 			InstructionBuilder.op('sub', '__remain', '__remain', 1),
 			InstructionBuilder.jump('{0}', 'always', null, null, [0])
@@ -11024,9 +11049,9 @@ class CodeGenerator extends ASTVisitor {
 							break;
 						default:
 							// struct/union, etc.
-							symbol.implementAsPointer = true;
+							symbol.implementAsPointer = false;
 							symbol.needMemoryAllocation = true;
-							symbol.accessThroughPointer = false;	// They aren't actually pointers
+							symbol.accessThroughPointer = true;	// They aren't actually pointers
 					}
 					break;
 				default:
@@ -11035,7 +11060,7 @@ class CodeGenerator extends ASTVisitor {
 			// Assign heap memory
 			if (symbol.accessThroughPointer || symbol.needMemoryAllocation) {
 				symbol.needMemoryAllocation = true;
-				if (!staticAllocOnly || symbol.isStatic) {
+				if (!staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol) {
 					symbol.memoryLocation = this.memory.assign(symbol.getAssemblySymbol(), symbol.size);
 				}
 			}
@@ -11221,7 +11246,12 @@ class CodeGenerator extends ASTVisitor {
 		let result = new Instruction(), paramId = 0;
 		result.concat(new Instruction(node.scope.getAllSymbols().flatMap(sym => {
 			if (sym.kind !== 'parameter') return [];
-			return [this.generateSymbolWrite(sym, `__param_${paramId++}`)];
+			const paramName = `__param_${paramId++}`;
+			if (sym.type.type.kind === 'struct' || sym.type.type.kind === 'union') {
+				// Must be copied
+				return [this.memory.outputMemcpyCall(sym.getAssemblySymbol(), paramName, sym.type.type.size, this.functionManagement)];
+			}
+			return [this.generateSymbolWrite(sym, paramName)];
 		})));
 		let body = this.visit(node.body);
 		//body.replace('func_ret', body.size() + 1);
@@ -11505,7 +11535,7 @@ class CodeGenerator extends ASTVisitor {
 			}
 			const evaluation = node.initializer ? this.visit(node.initializer) : new Instruction();
 			finalize.concat(evaluation);
-			if (!symbol.memoryLocation) {
+			if (!symbol.memoryLocation && node.initializer) {
 				let result = this.generateSymbolWrite(symbol, evaluation.instructionReturn ?? 'null');
 				finalize.concat(result);
 			}
@@ -11554,29 +11584,49 @@ class CodeGenerator extends ASTVisitor {
 	visitInitializerList(node) {
 		const declaratorTypes = ['VariableDeclarator', 'Declarator'];
 		const pointerImplementation = ['pointer', 'array', 'struct', 'union'];
-		let assignedSpace = null, result = new Instruction(), tmpVar = this.getTempVariable();
-		if (node.parent && declaratorTypes.includes(node.parent.type)) {
-			assignedSpace = this.currentScope.lookup(node.parent.name).memoryLocation;
+		let assignedSpace = node.symbol ? node.symbol.memoryLocation : null, result = new Instruction(), tmpVar = this.getTempVariable();
+		let knownType = null;
+		if (node.parent) {
+			if (declaratorTypes.includes(node.parent.type)) {
+				assignedSpace = assignedSpace ?? this.currentScope.lookup(node.parent.name).memoryLocation;
+				if (assignedSpace) {
+					// Actually, the preprocessing has been done in the variable declarator visitor.
+					result.setAttribute('noCopy', true);
+				}
+			}
 		}
 		assignedSpace = assignedSpace ?? this.memory.assign(this.getTempSpace(), node.dataType.size);
 		result.concat(assignedSpace.getAssignmentInstruction(tmpVar));
 		result.instructionReturn = tmpVar;
 		//let currentPointer = 0;
-		for (let i = 0; i < node.children.length; i++) {
-			const valueFetch = this.visit(node.children[i]);
-			result.concat(valueFetch);
-			// Process assignment-like
-			if (pointerImplementation.includes(node.children[i].dataType.kind)) {
-				// They are implemented as pointer...
-				result.concat(new Instruction([
-					this.memory.outputStorageOf(assignedSpace, `${valueFetch.instructionReturn}_block`),
-					this.memory.outputStorageOf(assignedSpace.duplicate().forwarding(1), `${valueFetch.instructionReturn}_ptr`)
-				]));
+		/**
+		 * 
+		 * @param {ASTNode} obj 
+		 * @param {TypeInfo} typeLayer
+		 */
+		const initializerProcessor = (obj, typeLayer) => {
+			if (obj.type === 'InitializerList') {
+				obj.children.forEach(child => initializerProcessor(child, typeLayer ? typeLayer.pointerTo : null));
 			} else {
-				result.concat(this.memory.outputStorageOf(assignedSpace, valueFetch.instructionReturn));
+				const valueFetch = this.visit(obj);
+				result.concat(valueFetch);
+				// Process assignment-like
+				if (pointerImplementation.includes(obj.dataType.kind)) {
+					// They are implemented as pointer...
+					result.concat(new Instruction([
+						this.memory.outputStorageOf(assignedSpace, `${valueFetch.instructionReturn}_block`),
+						this.memory.outputStorageOf(assignedSpace.duplicate().forwarding(1), `${valueFetch.instructionReturn}_ptr`)
+					]));
+				} else {
+					result.concat(this.memory.outputStorageOf(assignedSpace, valueFetch.instructionReturn));
+				}
+				assignedSpace.forwarding(
+					(typeLayer && (typeLayer.size != null)) ? typeLayer.size 
+					: (obj.dataType.size ?? 0));
 			}
-			assignedSpace.forwarding(node.children[i].dataType.size ?? 0);
-		}
+		};
+		initializerProcessor(node, knownType);
+		
 		return result;
 	}
 
@@ -11761,21 +11811,23 @@ class CodeGenerator extends ASTVisitor {
 				node.left, node.right
 			));
 		} else {
+			if (node.right.type === 'InitializerList') {
+				// Pre-evaluated pointer with initializer list, perform something like memcpy
+				let result = new Instruction();
+				const leftPointer = this.processLValGetter(node.left, true);
+				node.setAttribute('generatedLVal', leftPointer);
+				const listData = this.visit(node.right);
+				result.concat(leftPointer);
+				result.concat(listData);
+				result.concat(this.memory.outputMemcpyCall(leftPointer.instructionReturn, listData.instructionReturn,
+					node.right.dataType.size ?? 0, this.functionManagement
+				));
+				result.instructionReturn = leftPointer.instructionReturn;
+				return result;
+			}
 			value = this.visit(node.right);
 		}
-		if (node.right.type === 'InitializerList' && node.left.type !== 'Identifier') {
-			// Pre-evaluated pointer with initializer list, perform something like memcpy
-			let result = new Instruction();
-			const leftPointer = this.processLValGetter(node.left, true);
-			const listData = this.visit(node.right);
-			result.concat(leftPointer);
-			result.concat(listData);
-			result.concat(this.memory.outputMemcpyCall(leftPointer.instructionReturn, listData.instructionReturn,
-				node.right.dataType.size ?? 0, this.functionManagement
-			));
-			result.instructionReturn = leftPointer.instructionReturn;
-			return result;
-		}
+		
 		return this.processAssignment(node.left, value);
 	}
 
@@ -11906,9 +11958,9 @@ class CodeGenerator extends ASTVisitor {
 			case 'Identifier':
 				const identity = this.currentScope.lookup(left.name);
 				if (identity) {
+					const assemblySymbol = identity.getAssemblySymbol();
 					if (identity.implementAsPointer) {
 						// This means that the assignment must be via pointers
-						const assemblySymbol = identity.getAssemblySymbol();
 						if (returnOnlyPointer) {
 							return new Instruction([], assemblySymbol);
 						}
@@ -11920,7 +11972,9 @@ class CodeGenerator extends ASTVisitor {
 					} else if (identity.accessThroughPointer) {
 						//pointer = `${identity.getAssemblySymbol()}.__pointer`;
 						if (returnOnlyPointer) {
-							return new Instruction([], assemblySymbol);
+							const result = new Instruction([], `${assemblySymbol}.__pointer`);
+							result.setAttribute('pointerAccess', true);
+							return result;
 							//throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable already has memory address. Use '&' to avoid this problem.)`, left);
 						}
 						return this.generateSymbolWrite(identity, '{value_entry}');
@@ -12379,6 +12433,18 @@ class CodeGenerator extends ASTVisitor {
 					throw `Incorrect asm() call`;
 				}
 				return this.visitAsmStatement(ASTBuilder.asmStatement(ast.arguments[0].value));
+			},
+			memcpy: ast => {
+				let result = new Instruction();
+				const targetSpace = this.visit(ast.arguments[0]);
+				const sourceSpace = this.visit(ast.arguments[1]);
+				const sizeValue = this.visit(ast.arguments[2]);
+				result.concat(targetSpace);
+				result.concat(sourceSpace);
+				result.concat(sizeValue);
+				result.concat(this.memory.outputMemcpyCall(targetSpace.instructionReturn, 
+					sourceSpace.instructionReturn, sizeValue.instructionReturn, this.functionManagement));
+				return result;
 			}
 		};
 
