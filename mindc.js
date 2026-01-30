@@ -11811,7 +11811,7 @@ class CodeGenerator extends ASTVisitor {
 			if (obj.type === 'InitializerList') {
 				obj.children.forEach(child => initializerProcessor(child, typeLayer ? typeLayer.pointerTo : null));
 			} else {
-				if (obj.dataType && warnedTypes.include(obj.dataType.name)) {
+				if (obj.dataType && warnedTypes.includes(obj.dataType.name)) {
 					this.addWarning(`Initializing object of type ${obj.dataType.toString()} in initializer list is an undefined behavior`, node.location);
 				}
 				const valueFetch = this.visit(obj);
@@ -12568,7 +12568,7 @@ class CodeGenerator extends ASTVisitor {
 			draw: ast => {
 
 				const draw_lengths = new Map([
-					['color', 4], ['stroke', 2], ['line', 5], ['rect', 5],
+					['clear', 4], ['color', 4], ['stroke', 2], ['line', 5], ['rect', 5],
 					['lineRect', 5], ['poly', 6], ['linePoly', 6], ['triangle', 7], ['image', 6]
 				]);
 
