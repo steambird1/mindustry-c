@@ -3365,7 +3365,8 @@ class Parser {
         const builtins = [
 			'draw', 'print', 'drawflush', 'printflush', 'getlink', 'ceil', 'floor', 'sqrt', 'rand', 'abs', 'memcpy',
 			'control', 'radar', 'sensor', 'set', 'op', 'lookup', 'ubind', 'ulocate', 'ucontrol', 'uradar', 'min', 'max',
-			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'adiff'
+			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'adiff',
+			'memsp'
 		];
         return builtins.includes(name);
     }
@@ -3610,6 +3611,11 @@ class TypeInfo {
         return this.qualifiers.includes('volatile');
     }
 
+	isPointerImpl() {
+		const pointerImplementation = ['pointer', 'array', 'struct', 'union'];
+		return pointerImplementation.includes(this.kind) || this.isVolatile();
+	}
+
 	initializeReferenceTable() {
 		this.memberReference = new Map();	// Used only in generation
 		this.members.forEach(member => {
@@ -3801,7 +3807,7 @@ class SemanticAnalyzer extends ASTVisitor {
             
             // 收集全局结构体/联合体定义
             node.globalDeclarations.forEach(decl => {
-                if (decl.type === 'VariableDeclaration' && decl.isStructOrUnion) {
+                if ((decl.type === 'VariableDeclaration' || decl.declarators) && decl.getAttribute('isStructOrUnion')) {
                     // 处理结构体/联合体变量声明中的类型定义
                     //this.processTypeFromDeclaration(decl.type);
 					// 检查是否是结构体/联合体类型
@@ -3879,7 +3885,8 @@ class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'sqrt', returnType: 'float', parameters: ['float']},
 			{ name: 'abs', returnType: 'float', parameters: ['float']},
 			{ name: 'rand', returnType: 'float', parameters: []},
-			{ name: 'memcpy', returnType: 'void', parameters: ['void*', 'void*', 'unsigned']}
+			{ name: 'memcpy', returnType: 'void', parameters: ['void*', 'void*', 'unsigned']},
+			{ name: 'memsp', returnType: 'void*', parameters: ['device', 'int']}
 		];
 
         builtins.forEach(func => {
@@ -5210,16 +5217,19 @@ class SemanticAnalyzer extends ASTVisitor {
 		let targetType = targetTypeRaw, sourceType = sourceTypeRaw;
 		// TODO: Might be sth like '*'
 		if (typeof targetType === 'string') {
-			targetType = this.getTypeInfo(targetType);
+			targetType = this.getTypeInfo(targetType).duplicate();
 		}
 		if (typeof sourceType === 'string') {
-			sourceType = this.getTypeInfo(sourceType);
+			sourceType = this.getTypeInfo(sourceType).duplicate();
 		}
 		
 		if (!targetType || !sourceType) return false;
         
-		// Remove const qualifier for both sides:
-		
+		// Remove auto and volatile qualifier for both sides:
+		const ignoredQualifiers = ['auto', 'volatile', 'static'];
+		sourceType.qualifiers = sourceType.qualifiers.filter(
+			item => (!ignoredQualifiers.includes(item) && item !== 'const'));	// 'const' of source does not matter
+		targetType.qualifiers = targetType.qualifiers.filter(item => (!ignoredQualifiers.includes(item)));
 		
         // 相同类型总是兼容
         if (this.typeToString(targetType) === this.typeToString(sourceType)) {
@@ -5743,15 +5753,16 @@ class Optimizer {
                 
             default:
                 // 递归分析子节点
-				if (node.declarators) {
-					this.analyzeVariableDeclaration(node, info);
-					break;
-				}
-                if (node.children) {
-                    node.children.forEach(child => this.analyzeNode(child, info));
-                }
+				
                 break;
         }
+
+		if (node.declarators) {
+			this.analyzeVariableDeclaration(node, info);
+		}
+		if (node.children) {
+			node.children.forEach(child => this.analyzeNode(child, info));
+		}
     }
 
     // =============== 具体分析函数 ===============
@@ -6907,8 +6918,9 @@ class Optimizer {
 		const modifiedVars = this.collectModifiedVariablesInLoop(loopNode);
 		
 		// 标记这些变量为不可优化
-		modifiedVars.forEach(varName => {
-			const scopePath = this.currentScope.lookupScopeOf(varName).getPath();
+		modifiedVars.forEach(varInfo => {
+			const varName = varInfo.varName;
+			const scopePath = (varInfo.scope ?? this.currentScope).lookupScopeOf(varName).getPath();
 			const variableUses = this.variableUses.get(scopePath);
 			const constantList = this.localConstants.get(scopePath);
 			const usage = variableUses.get(varName);
@@ -6941,7 +6953,10 @@ class Optimizer {
 			switch (node.type) {
 				case 'AssignmentExpression':
 					if (node.left.type === 'Identifier') {
-						modifiedVars.add(node.left.name);
+						modifiedVars.add({
+							varName: node.left.name,
+							scope: node.scope
+						});
 					} else {
 						// Unrecognized...
 						this.warnings.push('Internal Error: Unrecognized variable in loop optimizer', node.left);
@@ -6952,7 +6967,10 @@ class Optimizer {
 					if (node.operator.includes('=') && node.operator !== '==' && node.operator !== '!='
 					&& node.operator !== '>=' && node.operator !== '<=') {
 						if (node.left.type === 'Identifier') {
-							modifiedVars.add(node.left.name);
+							modifiedVars.add({
+								varName: node.left.name,
+								scope: node.scope
+							});
 						} else {
 							this.warnings.push('Internal Error: Unrecognized variable in loop optimizer',node.left);
 						}
@@ -6961,7 +6979,10 @@ class Optimizer {
 				case 'UnaryExpression':
 					if ((node.operator === '++' || node.operator === '--')) {
 						if (node.argument.type === 'Identifier') {
-							modifiedVars.add(node.argument.name);
+							modifiedVars.add({
+								varName: node.argument.name,
+								scope: node.scope
+							});
 						} else {
 							this.warnings.push('Internal Error: Unrecognized variable in loop optimizer',node.left);
 						}
@@ -10633,6 +10654,7 @@ class MemoryBlock {
 	constructor(name, size) {
 		this.name = name;
 		this.size = size;
+		this.occupation = new Array(size);
 	}
 }
 
@@ -10651,11 +10673,26 @@ class MemoryBlockInfo {
 		return new MemoryBlockInfo(this.block, this.position, this.full, this.parent);
 	}
 
+	// This function now only ESTIMATES (given the internal reservations!)
+	/**
+	 * 
+	 * @returns The current ESTIMATED remaining size.
+	 * @deprecated
+	 * @private We recommend only the private use.
+	 */
 	currentRemain() {
 		if (this.parent) {
 			return this.parent.memoryBlocks[this.block].size - this.position;
 		}
 		else return Infinity;
+	}
+
+	isAvailable() {
+		if (this.parent) {
+			return (this.currentRemain() > 0) &&
+				(!this.parent.memoryBlocks[this.block].occupation[this.position]);
+		}
+		else return true;
 	}
 
 	skipToNextPage() {
@@ -10675,13 +10712,13 @@ class MemoryBlockInfo {
 	forwarding(size) {
 		let currentSize = size;
 		while (!this.full && currentSize > 0) {
-			if (this.currentRemain() <= currentSize) {
-				currentSize -= this.currentRemain();
-				this.skipToNextPage();	
-			} else {
-				this.position += currentSize;
-				currentSize = 0;
-			}
+			do {
+				this.position++;
+				currentSize--;
+				if (this.currentRemain() <= 0) {
+					this.skipToNextPage();	
+				}
+			} while (!this.full && !this.isAvailable());
 		}
 		if (currentSize > 0) {
 			throw new MemoryAllocationException();
@@ -10713,6 +10750,11 @@ class MemoryManager {
 		this.reservedSize = MEMORY_RESERVE_SIZE;
 		this.memoryPositionStack = [new MemoryBlockInfo(0, this.reservedSize, false, this)];
 		this.variableReference = new Map();
+		this.memoryBlocks.forEach(single => {
+			for (let i = 0; i < 4; i++) {
+				single.occupation[i] = '__internal_reserve';
+			}
+		});
 	}
 	
 	// Services
@@ -10978,6 +11020,8 @@ class CodeGenerator extends ASTVisitor {
 				elem.initializeReferenceTable();
 			});
 			*/
+			this.RValueAssigner = this.memory.currentState().duplicate();
+			this.RValueMax = 0;
 			result.concat(this.memory.outputLinkInitializer());
 			if (!this.compiler.config.getAttribute('noPointerFunction')) {
 				result.concat(this.memory.outputPointerForwardFunction(this.functionManagement));
@@ -10987,6 +11031,7 @@ class CodeGenerator extends ASTVisitor {
 			const programBody = this.visit(ast);
 			const mainSymbol = programBody.getAttribute('mainSymbol');
 			result.concat(programBody);
+			this.memory.forwarding(this.RValueMax);
 			result.concat(this.functionManagement.getSystemInitializer(this.memory));
 			if (mainSymbol) {
 				result.concat(this.functionManagement.getFunctionCall('main', new Map(), this.memory, true));
@@ -11070,6 +11115,11 @@ class CodeGenerator extends ASTVisitor {
 		});
 	}
 
+	requireRValueMemory(size) {
+		this.RValueMax = Math.max(this.RValueMax, size);
+		return this.RValueAssigner.duplicate();
+	}
+
 	/**
 	 * 
 	 * @param {SymbolEntry} symbol 
@@ -11077,13 +11127,20 @@ class CodeGenerator extends ASTVisitor {
 	 * @return {Instruction} Instructions to execute BEFORE reading.
 	 * @remark Reading symbol through its original name.
 	 */
-	generateSymbolRead(symbol, duplicate = false) {
+	generateSymbolRead(symbol, duplicate = false, givenName = null) {
 		let result = new Instruction();
 		if (!duplicate || (!symbol.isVolatile && symbol.isConst)) {
-			return new Instruction([], symbol.getAssemblySymbol());
+			if (givenName) {
+				return new Instruction([
+					InstructionBuilder.set(givenName, symbol.getAssemblySymbol())
+				], givenName);
+			} else {
+				return new Instruction([], symbol.getAssemblySymbol());
+			}
+			
 		}
 		if (symbol.implementAsPointer) {
-			const temporary = this.getTempVariable();
+			const temporary = givenName ?? this.getTempVariable();
 			if (symbol.accessThroughPointer) {
 				result = this.memory.outputFetchOf(symbol.memoryLocation, `${temporary}_block`);
 				result.concat(this.memory.outputFetchOf(symbol.memoryLocation.duplicate().forwarding(1), `${temporary}_pos`))
@@ -11094,8 +11151,9 @@ class CodeGenerator extends ASTVisitor {
 					InstructionBuilder.set(`${temporary}_pos`, `${symbol.getAssemblySymbol()}_pos`)
 				], temporary);
 			}
+			result.setAttribute('isPointer', true);
 		} else if (symbol.accessThroughPointer) {
-			let temporary = this.getTempVariable();
+			let temporary = givenName ?? this.getTempVariable();
 			if (symbol.memoryLocation) {
 				result = this.memory.outputFetchOf(symbol.memoryLocation, temporary);
 			} else {
@@ -11109,10 +11167,12 @@ class CodeGenerator extends ASTVisitor {
 				result = InstructionBuilder.read(temporary, `${symbol.getAssemblySymbol()}.__pointer_block`, `${symbol.getAssemblySymbol()}.__pointer_pos`);
 			}
 			result.instructionReturn = temporary;
+			result.setAttribute('isPointer', true);
 		} else {
-			let temporary = this.getTempVariable();
+			let temporary = givenName ?? this.getTempVariable();
 			result = InstructionBuilder.set(temporary, symbol.getAssemblySymbol());
 			result.instructionReturn = temporary;
+			result.setAttribute('isPointer', false);
 		}
 		
 		return result;
@@ -11200,6 +11260,7 @@ class CodeGenerator extends ASTVisitor {
 			const instructionSplit = node.code.split(' ');
 			switch (instructionSplit[0]) {
 				case ":varStorage":
+				case ":varStorageCp":
 					if (instructionSplit.length < 3) {
 						this.addError(`Invalid asm statement: ${node.code}`, node.location);
 					}
@@ -11207,15 +11268,8 @@ class CodeGenerator extends ASTVisitor {
 					if (!symbol) {
 						this.addError(`Unknown symbol: ${instructionSplit[2]}`, node.location);
 					}
-					const assembly = symbol.getAssemblySymbol();
-					if (symbol && (symbol.implementAsPointer || symbol.accessThroughPointer)) {
-						return new Instruction([
-							InstructionBuilder.set(`${instructionSplit[1]}_block`, `${assembly}_block`),
-							InstructionBuilder.set(`${instructionSplit[1]}_ptr`, `${assembly}_ptr`)
-						]);
-					} else {
-						return InstructionBuilder.set(instructionSplit[1], assembly);
-					}
+					return this.generateSymbolRead(symbol, instructionSplit[0] === ":varStorageCp", instructionSplit[1]);
+					break;
 					break;
 				case ":varRead":
 					return new Instruction([], instructionSplit.length >= 2 ? instructionSplit[1] : "null");
@@ -11278,7 +11332,19 @@ class CodeGenerator extends ASTVisitor {
 		const result = node.argument ? this.visit(node.argument) : new Instruction();
 		let stmt = new Instruction();
 		stmt.concat(result);
-		stmt.concat(InstructionBuilder.set("__return", result.instructionReturn));
+		//stmt.concat(InstructionBuilder.set("__return", result.instructionReturn));
+		// Copying should be done in callers, not callees
+		if (node.dataType && node.dataType.isPointerImpl()) {
+			stmt.setAttribute('isPointer', true);
+			stmt.concat([
+				InstructionBuilder.set(`__return_block`, `${result.instructionReturn}_block`),
+				InstructionBuilder.set(`__return_pos`, `${result.instructionReturn}_pos`)
+			])
+		} else if (result.getAttribute('isPointer')) {
+			stmt.concat(this.memory.outputPointerFetchOf(result.instructionReturn, "__return"));
+		} else {
+			stmt.concat(InstructionBuilder.set('__return', result.instructionReturn));
+		}
 		this.releaseTempVariable();
 		let jumper = InstructionBuilder.jump(`{func_ret}`, 'always');
 		this.currentReturns.push(jumper);
@@ -11320,9 +11386,9 @@ class CodeGenerator extends ASTVisitor {
 	/**
 	 * 
 	 * @param {ConditionalExpressionNode} node 
+	 * @todo This means that we need a manual process to return something unified.
 	 */
 	visitConditionalExpression(node) {
-		const isPointer = node.dataType && node.dataType.kind === 'pointer';
 		let result = new Instruction();
 		let returner = this.getTempVariable();
 		const test = this.visit(node.test);
@@ -11330,18 +11396,22 @@ class CodeGenerator extends ASTVisitor {
 		const jumper = InstructionBuilder.jump('{alt}', 'notEqual', test.instructionReturn, 'true');
 		result.concat(jumper);
 		const consequent = this.visit(node.consequent);
+		const alternate = this.visit(node.alternate);
+		const isPointer = node.dataType && node.dataType.isPointerImpl();
 		result.concat(consequent);
 		if (isPointer) {
 			result.concat(new Instruction([
 				InstructionBuilder.set(`${returner}_ptr`, `${consequent.instructionReturn}_ptr`),
 				InstructionBuilder.set(`${returner}_block`, `${consequent.instructionReturn}_block`)
 			]));
+			result.setAttribute('isPointer', true);
+		} else if (consequent.getAttribute('isPointer')) {
+			result.concat(this.memory.outputPointerFetchOf(consequent.instructionReturn, returner));
 		} else {
 			result.concat(InstructionBuilder.set(returner, consequent.instructionReturn));
 		}
 		const finalize = InstructionBuilder.jump('{end}', 'always');
 		result.concat(finalize);
-		const alternate = this.visit(node.alternate);
 		result.concat(new InstructionReferrer(jumper, 'alt', 0));
 		result.concat(alternate);
 		if (isPointer) {
@@ -11349,6 +11419,9 @@ class CodeGenerator extends ASTVisitor {
 				InstructionBuilder.set(`${returner}_ptr`, `${alternate.instructionReturn}_ptr`),
 				InstructionBuilder.set(`${returner}_block`, `${alternate.instructionReturn}_block`)
 			]));
+			result.setAttribute('isPointer', true);
+		} else if (alternate.getAttribute('isPointer')) {
+			result.concat(this.memory.outputPointerFetchOf(alternate.instructionReturn, returner));
 		} else {
 			result.concat(InstructionBuilder.set(returner, alternate.instructionReturn));
 		}
@@ -11535,10 +11608,20 @@ class CodeGenerator extends ASTVisitor {
 			}
 			const evaluation = node.initializer ? this.visit(node.initializer) : new Instruction();
 			finalize.concat(evaluation);
-			if (!symbol.memoryLocation && node.initializer) {
-				let result = this.generateSymbolWrite(symbol, evaluation.instructionReturn ?? 'null');
-				finalize.concat(result);
+			if (node.initializer) {
+				if (!symbol.implementAsPointer && symbol.accessThroughPointer) {
+					let pointerCopy = new Instruction([
+						InstructionBuilder.set(`${symbol.getAssemblySymbol()}_block`, `${evaluation.instructionReturn}_block`),
+						InstructionBuilder.set(`${symbol.getAssemblySymbol()}_ptr`, `${evaluation.instructionReturn}_ptr`)
+					]);
+					pointerCopy.setAttribute('isPointer', true);
+					finalize.concat(pointerCopy);
+				} else if ((!symbol.memoryLocation) || node.initializer.type !== 'InitializerList') {
+					let result = this.generateSymbolWrite(symbol, evaluation.instructionReturn ?? 'null');
+					finalize.concat(result);
+				}
 			}
+			
 			if (symbol.isStatic) {
 				finalize.concat(InstructionBuilder.set(endTag, 'true'));
 				finalize.concat(new InstructionReferrer(endJumper, 'skip_init', 0));
@@ -11583,13 +11666,13 @@ class CodeGenerator extends ASTVisitor {
 	 */
 	visitInitializerList(node) {
 		const declaratorTypes = ['VariableDeclarator', 'Declarator'];
-		const pointerImplementation = ['pointer', 'array', 'struct', 'union'];
 		let assignedSpace = node.symbol ? node.symbol.memoryLocation : null, result = new Instruction(), tmpVar = this.getTempVariable();
 		let knownType = null;
 		if (node.parent) {
 			if (declaratorTypes.includes(node.parent.type)) {
-				assignedSpace = assignedSpace ?? this.currentScope.lookup(node.parent.name).memoryLocation;
-				if (assignedSpace) {
+				const manualSpace = this.currentScope.lookup(node.parent.name).memoryLocation;
+				assignedSpace = manualSpace ?? assignedSpace;
+				if (manualSpace) {
 					// Actually, the preprocessing has been done in the variable declarator visitor.
 					result.setAttribute('noCopy', true);
 				}
@@ -11598,6 +11681,7 @@ class CodeGenerator extends ASTVisitor {
 		assignedSpace = assignedSpace ?? this.memory.assign(this.getTempSpace(), node.dataType.size);
 		result.concat(assignedSpace.getAssignmentInstruction(tmpVar));
 		result.instructionReturn = tmpVar;
+		result.setAttribute('isPointer', true);
 		//let currentPointer = 0;
 		/**
 		 * 
@@ -11611,7 +11695,7 @@ class CodeGenerator extends ASTVisitor {
 				const valueFetch = this.visit(obj);
 				result.concat(valueFetch);
 				// Process assignment-like
-				if (pointerImplementation.includes(obj.dataType.kind)) {
+				if (valueFetch.getAttribute('isPointer') || obj.dataType.isPointerImpl()) {
 					// They are implemented as pointer...
 					result.concat(new Instruction([
 						this.memory.outputStorageOf(assignedSpace, `${valueFetch.instructionReturn}_block`),
@@ -11949,7 +12033,6 @@ class CodeGenerator extends ASTVisitor {
 	 * @remark Therefore, all 'visit' (e.g. Identifier, MemberExpression) must be implemented!
 	 */
 	processLValGetter(left, returnOnlyPointer = false) {
-		const pointerImplementation = ['pointer', 'array', 'struct', 'union'];
 		let pointer = "";
 		let finalResult = new Instruction();
 		let isPointer = false;
@@ -11966,6 +12049,7 @@ class CodeGenerator extends ASTVisitor {
 						}
 						let finalize = new Instruction();
 						finalize.setAttribute('isPointer', true);
+						finalize.setAttribute('isAssignment', true);
 						finalize.concat(InstructionBuilder.set(`${assemblySymbol}_block`, '{pointer_block_entry}'));
 						finalize.concat(InstructionBuilder.set(`${assemblySymbol}_pos`, '{pointer_ptr_entry}'));
 						return finalize;
@@ -11996,7 +12080,7 @@ class CodeGenerator extends ASTVisitor {
 
 			case 'MemberExpression':
 				const resolution = this.resolveMemberExpression(left);
-				if (pointerImplementation.includes(left.dataType.kind)) {
+				if (left.dataType.kind.isPointerImpl()) {
 					isPointer = true;
 				}
 				finalResult.concat(resolution);
@@ -12044,6 +12128,7 @@ class CodeGenerator extends ASTVisitor {
 			// The pointer POINTS TO a value
 			finalResult.concat(this.memory.outputPointerStorageOf(pointer, '{value_entry}'));
 		}
+		finalResult.setAttribute('isAssignment', true);
 		return finalResult;
 	}
 
@@ -12127,7 +12212,27 @@ class CodeGenerator extends ASTVisitor {
 		// Get a copy of function return
 		if (relevantFunction.type.returnType !== 'void') {
 			result.instructionReturn = this.getTempVariable();
-			result.concat(InstructionBuilder.set(result.instructionReturn, '__return'));
+			const returnTypeContent = this.semantic.getTypeInfo(relevantFunction.type.returnType);
+			if (!returnTypeContent) {
+				this.addError("Return type unclear");
+			}
+			if (returnTypeContent.isPointerImpl()) {
+				result.setAttribute('isPointer', true);
+				if (returnTypeContent.kind === 'struct' || returnTypeContent.kind === 'union') {
+					// Do memcpy (this involves some strange memory allocation...)
+					const temporaryMemory = this.requireRValueMemory(returnTypeContent.size);
+					result.concat(temporaryMemory.getAssignmentInstruction(result.instructionReturn));
+					result.concat(this.memory.outputMemcpyCall(result.instructionReturn, '__return', returnTypeContent.size, this.functionManagement));
+				} else {
+					result.concat(new Instruction([
+						InstructionBuilder.set(`${result.instructionReturn}_ptr`, '__return_ptr'),
+						InstructionBuilder.set(`${result.instructionReturn}_block`, '__return_block')
+					]))
+				}
+			} else {
+				result.concat(InstructionBuilder.set(result.instructionReturn, '__return'));
+			}
+			
 		}
 		return result;
 	}
@@ -12444,6 +12549,19 @@ class CodeGenerator extends ASTVisitor {
 				result.concat(sizeValue);
 				result.concat(this.memory.outputMemcpyCall(targetSpace.instructionReturn, 
 					sourceSpace.instructionReturn, sizeValue.instructionReturn, this.functionManagement));
+				return result;
+			},
+			memst: ast => {
+				let result = new Instruction();
+				const returner = this.getTempVariable();
+				const blockRef = this.visit(ast.arguments[0]);
+				const posRef = this.visit(ast.arguments[1]);
+				result.concat(blockRef);
+				result.concat(posRef);
+				result.concat(InstructionBuilder.set(`${returner}_block`, blockRef.instructionReturn));
+				result.concat(InstructionBuilder.set(`${returner}_pos`, posRef.instructionReturn));
+				result.instructionReturn = returner;
+				result.setAttribute('isPointer', true);
 				return result;
 			}
 		};
