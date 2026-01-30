@@ -4320,8 +4320,16 @@ class SemanticAnalyzer extends ASTVisitor {
         
         // 创建带有限定符的类型
         const varType = new TypeInfo(baseType.name, baseType.kind, baseType.size, [...baseType.members]);
-        varType.qualifiers = [...baseType.qualifiers, ...qualifiers];
+        varType.qualifiers = [... new Set([...baseType.qualifiers, ...qualifiers])];
 		
+		const warningTypes = ['device', 'content_t'];
+		const warningStorages = ['volatile'];
+		const warningKinds = ['pointer', 'array'];
+
+		if ((varType.qualifiers.includes(warningStorages) || warningKinds.includes(varType.kind)) && warningTypes.includes(varType.name)) {
+			this.addWarning(`Variable ${declarator.name} (with type ${varType.toString()}) cannot be stored in memory`, declarator.location);
+		}
+
         node.declarators.forEach(declarator => {
             // 检查变量是否已声明
             const existingSymbol = this.currentScope.lookupCurrent(declarator.name);
