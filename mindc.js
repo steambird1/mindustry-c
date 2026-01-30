@@ -3613,7 +3613,8 @@ class TypeInfo {
 
 	isPointerImpl() {
 		const pointerImplementation = ['pointer', 'array', 'struct', 'union'];
-		return pointerImplementation.includes(this.kind) || this.isVolatile();
+		return ((typeof this.kind === 'object') && this.kind.isPointerImpl()) ||
+		 pointerImplementation.includes(this.kind) || this.isVolatile();
 	}
 
 	initializeReferenceTable() {
@@ -6959,7 +6960,7 @@ class Optimizer {
 						});
 					} else {
 						// Unrecognized...
-						this.warnings.push('Internal Error: Unrecognized variable in loop optimizer', node.left);
+						console.log('Internal Error: Unrecognized variable in loop optimizer', node.left);
 					}
 					break;
 				
@@ -6972,7 +6973,7 @@ class Optimizer {
 								scope: node.scope
 							});
 						} else {
-							this.warnings.push('Internal Error: Unrecognized variable in loop optimizer',node.left);
+							console.log('Internal Error: Unrecognized variable in loop optimizer',node.left);
 						}
 					}
 					break;
@@ -6984,7 +6985,7 @@ class Optimizer {
 								scope: node.scope
 							});
 						} else {
-							this.warnings.push('Internal Error: Unrecognized variable in loop optimizer',node.left);
+							console.log('Internal Error: Unrecognized variable in loop optimizer',node.left);
 						}
 					}
 					break;
@@ -10416,11 +10417,23 @@ class InstructionBuilder {
 			referrer: []
 		});
 	}
+	static reads(target, block, position) {
+		return new Instruction([
+			InstructionBuilder.getlink("__curb", block),
+			InstructionBuilder.read(target, "__curb", position)
+		]);
+	}
 	static write(source, block, position) {
 		return new SingleInstruction({
 			content: `write ${source} ${block} ${position}`,
 			referrer: []
 		});
+	}
+	static writes(target, block, position) {
+		return new Instruction([
+			InstructionBuilder.getlink("__curb", block),
+			InstructionBuilder.write(target, "__curb", position)
+		]);
 	}
 	static end() {
 		return new SingleInstruction({
@@ -10596,6 +10609,13 @@ class FunctionRegisterer {
 		return result;
 	}
 
+	/**
+	 * 
+	 * @param {string} varName 
+	 * @param {Array<{name: string, value}>} params 
+	 * @param {boolean} fromMain 
+	 * @returns 
+	 */
 	getRawFunctionCall(varName, params, fromMain = false) {
 		let result = new Instruction();
 		// Caller configuring the stack
@@ -10626,7 +10646,7 @@ class FunctionRegisterer {
 	/**
 	 * Get a function call instruction block.
 	 * @param {string} name
-	 * @param {list<Object{name, value}>} params Notice: Only for internal calls.
+	 * @param {Array<{name: string, value}>} params Notice: Only for internal calls.
 	 * @param {MemoryManager} memoryObject Reserved only for compatibility.
 	 * @param {boolean} fromMain
 	 * @remark The return value will be stored in __returnA and __returnB (for pointer). These are set by the function itself
@@ -10731,9 +10751,65 @@ class MemoryBlockInfo {
 			throw new MemoryAllocationException();
 		}
 		return new Instruction([
-			InstructionBuilder.set(`${varName}_block`, this.parent.memoryBlocks[this.block].name),
+			InstructionBuilder.set(`${varName}_block`, `${this.parent.memoryBlocks[this.block].name}_id`),
 			InstructionBuilder.set(`${varName}_pos`, this.position)
 		]);
+	}
+}
+
+/**
+ * @abstract This class will maintain the connection between building and number
+ * assigning variables for auto devices, e.g. cell1_id
+ */
+class BuildingLinker {
+	/**
+	 * 
+	 * @param {string[]} blockOccupation
+	 * @param {FunctionRegisterer} functionManagement
+	 */
+	constructor(blockOccupation, functionManagement) {
+		this.blockOccupation = blockOccupation;
+		this.functionManagement = functionManagement;
+	}
+
+	// Very unfortunately, this function can't use any function!
+	outputLinkInitializer() {
+
+		// "Inline function" that is called only once
+		const inlineJumper = new Instruction([
+			InstructionBuilder.getlink("__building", "__linkscan"),
+			InstructionBuilder.sensor("__buildingtype", "__building", "@type"),
+			InstructionBuilder.jump("{0}", "strictEqual", "__buildingtype", "@memory-cell", [6]),
+			InstructionBuilder.jump("{0}", "strictEqual", "__buildingtype", "@memory-bank", [6]),
+			InstructionBuilder.op("add", "__linkscan", "__linkscan", 1),
+			InstructionBuilder.jump("{0}", "always", null, null, [0]),
+			InstructionBuilder.set("@counter", "__linker_ret")
+		]);
+		const inlineJumperName = "__inline_jumper";
+
+		//this.functionManagement.addFunction(inlineJumperName, inlineJumper, null, [], true);	
+
+		let result = new Instruction([
+			InstructionBuilder.set("__linkscan", 0)
+		]);
+		const postFuncJumper = InstructionBuilder.jump("{eofunc}", "always");
+		const preFuncJumper = InstructionBuilder.jump("{pofunc}", "always");
+		result.concat(postFuncJumper);
+		result.concat(new Instruction([
+			new InstructionReferrer(preFuncJumper, "pofunc"),
+			inlineJumper,
+			new InstructionReferrer(postFuncJumper, "eofunc")
+		]));
+		result.concat(new Instruction(this.blockOccupation.flatMap(block => 
+			[
+				//this.functionManagement.getRawFunctionCall(`_${inlineJumperName}`, [], true),
+				InstructionBuilder.op("add", "__linker_ret", "@counter", 1),
+				preFuncJumper,
+				InstructionBuilder.set(`${block}_id`, "__linkscan"),
+				InstructionBuilder.op('add', '__linkscan', '__linkscan', 1)
+			]
+		)));
+		return result;
 	}
 }
 
@@ -10745,8 +10821,13 @@ class MemoryManager {
 	1 - Next block
 	2 - Block size
 	*/
+	/**
+	 * 
+	 * @param {{name: string, size: number}[]} memoryBlocks 
+	 */
 	constructor(memoryBlocks) {
 		this.memoryBlocks = memoryBlocks;
+		//this.memoryLinker = new BuildingLinker(memoryBlocks.map(block => block.name));
 		this.reservedSize = MEMORY_RESERVE_SIZE;
 		this.memoryPositionStack = [new MemoryBlockInfo(0, this.reservedSize, false, this)];
 		this.variableReference = new Map();
@@ -10795,7 +10876,7 @@ class MemoryManager {
 	// Instruction generation
 	// These all output lists
 	
-	// Internal function: for a constant address
+	// Internal function: for a constant address (these read/writes can be directly done)
 	outputStorageOf(position, variable) {
 		return InstructionBuilder.write(variable, this.memoryBlocks[position.block].name, position.position);
 	}
@@ -10805,11 +10886,11 @@ class MemoryManager {
 	}
 
 	outputPointerStorageOf(pointer, data) {
-		return InstructionBuilder.write(data, `${pointer}_block`, `${pointer}_pos`);
+		return InstructionBuilder.writes(data, `${pointer}_block`, `${pointer}_pos`);
 	}
 
 	outputPointerFetchOf(pointer, data) {
-		return InstructionBuilder.read(data, `${pointer}_block`, `${pointer}_pos`);
+		return InstructionBuilder.reads(data, `${pointer}_block`, `${pointer}_pos`);
 	}
 	
 	outputLinkInitializer() {
@@ -10819,11 +10900,11 @@ class MemoryManager {
 		result.concat(InstructionBuilder.set('null_pos', 'null'));
 		for (let i = 0; i < this.memoryBlocks.length; i++) {
 			result.concat(new Instruction({
-				content: 'write ' + (i === 0 ? 'null' : this.memoryBlocks[i-1].name) + ' ' + this.memoryBlocks[i].name + ' 0',
+				content: 'write ' + (i === 0 ? '-1' : `${this.memoryBlocks[i-1].name}_id`) + ' ' + this.memoryBlocks[i].name + ' 0',
 				referrer: []
 			}));
 			result.concat(new Instruction({
-				content: 'write ' + (i === this.memoryBlocks.length - 1 ? 'null' : this.memoryBlocks[i+1].name) + ' ' + this.memoryBlocks[i].name + ' 1',
+				content: 'write ' + (i === this.memoryBlocks.length - 1 ? '-1' : `${this.memoryBlocks[i+1].name}_id`) + ' ' + this.memoryBlocks[i].name + ' 1',
 				referrer: []
 			}));
 			result.concat(new Instruction({
@@ -10847,20 +10928,21 @@ class MemoryManager {
 		Logic: First read the remaining number and compare current step and the previous pointer. Add if not exceeding, or jump to next page.
 		*/
 		funcReg.addFunction('__pointerForward', new Instruction([
-			InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),
-			InstructionBuilder.end(),
-			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [14]),
-			InstructionBuilder.read('__block', '__ptrblock', 2),
-			InstructionBuilder.op('sub', '__mxstep', '__block', '__ptrpos'),
-			InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [9]),
-			InstructionBuilder.op('add', '__ptrpos', '__ptrpos', '__step'),
-			InstructionBuilder.set('__step', 0),
-			InstructionBuilder.jump('{0}', 'always', null, null, [14]),
-			InstructionBuilder.read('__ptrblock', '__ptrblock', 1),
-			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),
-			InstructionBuilder.op('add', '__step', '__step', 1),
-			InstructionBuilder.set('__ptrpos', this.reservedSize),
-			InstructionBuilder.jump('{0}', 'always', null, null, [0])
+			InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),			// 0
+			InstructionBuilder.end(),														// 1
+			InstructionBuilder.getlink('__curptrblock', '__ptrblock'),						// 2
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [15]),				// 3
+			InstructionBuilder.read('__block', '__curptrblock', 2),							// 4
+			InstructionBuilder.op('sub', '__mxstep', '__block', '__ptrpos'),				// 5
+			InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [10]),	// 6
+			InstructionBuilder.op('add', '__ptrpos', '__ptrpos', '__step'),					// 7
+			InstructionBuilder.set('__step', 0),											// 8
+			InstructionBuilder.jump('{0}', 'always', null, null, [15]),						// 9
+			InstructionBuilder.read('__ptrblock', '__curptrblock', 1),						// 10
+			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),					// 11
+			InstructionBuilder.op('add', '__step', '__step', 1),							// 12
+			InstructionBuilder.set('__ptrpos', this.reservedSize),							// 13
+			InstructionBuilder.jump('{0}', 'always', null, null, [0])						// 14
 		]), null, [], true);
 	}
 	
@@ -10873,7 +10955,7 @@ class MemoryManager {
 		let process = new Instruction();
 		if (doReset) {
 			process.concat(InstructionBuilder.set(variable + '_pos', this.reservedSize));
-			process.concat(InstructionBuilder.set(variable + '_block', this.memoryBlocks[0].name));
+			process.concat(InstructionBuilder.set(variable + '_block', `${this.memoryBlocks[0].name}_id`));
 		}
 		const caller = funcReg.getFunctionCall('__pointerForward', new Map([["__ptrpos", variable + '_pos'], ["__ptrblock", variable + '_block'], ["__step", step]]), this);
 		caller.concat(InstructionBuilder.set(variable + '_pos', "__ptrpos"));
@@ -10884,21 +10966,22 @@ class MemoryManager {
 	
 	outputPointerBackwardFunction(funcReg) {
 		funcReg.addFunction('__pointerBackward', new Instruction([
-			InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),
-			InstructionBuilder.end(),
+			InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),			// 0
+			InstructionBuilder.end(),														// 1
+			InstructionBuilder.getlink('__curptrblock', '__ptrblock'),						// 2
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [14]),				// 3
 
-			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [12]),
+			InstructionBuilder.op('sub', '__mxstep', '__ptrpos', this.reservedSize),		// 4
+			InstructionBuilder.jump('{0}', 'greaterThan', '__step', '__mxstep', [9]),		// 5
+			InstructionBuilder.op('sub', '__ptrpos', '__ptrpos', '__step'),					// 6
+			InstructionBuilder.set('__step', 0),											// 7
+			InstructionBuilder.jump('{0}', 'always', null, null, [14]),						// 8
+			InstructionBuilder.read('__ptrblock', '__curptrblock', 0),						// 9
+			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),					// 10
 
-			InstructionBuilder.op('sub', '__mxstep', '__ptrpos', this.reservedSize),
-			InstructionBuilder.jump('{0}', 'greaterThan', '__step', '__mxstep', [8]),
-			InstructionBuilder.op('sub', '__ptrpos', '__ptrpos', '__step'),
-			InstructionBuilder.set('__step', 0),
-			InstructionBuilder.jump('{0}', 'always', null, null, [12]),
-			InstructionBuilder.read('__ptrblock', '__ptrblock', 0),
-			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),
-
-			InstructionBuilder.read('__ptrpos', '__ptrblock', 4),
-			InstructionBuilder.jump('{0}', 'always', null, null, [0])
+			InstructionBuilder.getlink('__curptrblock', '__ptrblock'),						// 11
+			InstructionBuilder.read('__ptrpos', '__curptrblock', 4),						// 12
+			InstructionBuilder.jump('{0}', 'always', null, null, [0])						// 13
 		]), null, [], true);
 	}
 	
@@ -10938,21 +11021,28 @@ class MemoryManager {
 	 */
 	outputMemcpyFunction(funcReg) {
 		funcReg.addFunction('__memcpy', new Instruction([
-			InstructionBuilder.jump('{0}', 'lessThanEq', '__remain', 0, [15]),
-			InstructionBuilder.read('__tmp', '__srcblock', '__srcpos'),
-			InstructionBuilder.write('__tmp', '__tgtblock', '__tgtpos'),
-			InstructionBuilder.read('__srcmax', '__srcblock', 2),
-			InstructionBuilder.op('sub', '__srcmax', '__srcmax', 1),
-			InstructionBuilder.op('add', '__srcpos', '__srcpos', 1),
-			InstructionBuilder.op('add', '__tgtpos', '__tgtpos', 1),
-			InstructionBuilder.jump('{0}', 'lessThan', '__srcpos', '__srcmax', [9]),
-			InstructionBuilder.read('__srcblock', '__srcblock', 1),
-			InstructionBuilder.read('__tgtmax', '__tgtblock', 2),
-			InstructionBuilder.op('sub', '__tgtmax', '__tgtmax', 1),
-			InstructionBuilder.jump('{0}', 'lessThan', '__tgtpos', '__tgtmax', [13]),
-			InstructionBuilder.read('__tgtblock', '__tgtblock', 1),
-			InstructionBuilder.op('sub', '__remain', '__remain', 1),
-			InstructionBuilder.jump('{0}', 'always', null, null, [0])
+			InstructionBuilder.getlink('__srcblock', '__srcblock'),							// 0
+			InstructionBuilder.getlink('__tgtblock', '__tgtblock'),							// 1
+
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__remain', 0, [21]),				// 2
+			InstructionBuilder.read('__tmp', '__srcblock', '__srcpos'),						// 3
+			InstructionBuilder.write('__tmp', '__tgtblock', '__tgtpos'),					// 4
+			InstructionBuilder.read('__srcmax', '__srcblock', 2),							// 5
+			InstructionBuilder.op('sub', '__srcmax', '__srcmax', 1),						// 6
+			InstructionBuilder.op('add', '__srcpos', '__srcpos', 1),						// 7
+			InstructionBuilder.op('add', '__tgtpos', '__tgtpos', 1),						// 8
+			InstructionBuilder.jump('{0}', 'lessThan', '__srcpos', '__srcmax', [13]),		// 9
+			InstructionBuilder.read('__curb', '__srcblock', 1),								// 10
+			InstructionBuilder.getlink('__srcblock', '__curb'),								// 11
+			InstructionBuilder.set('__srcpos', this.reservedSize),							// 12
+			InstructionBuilder.read('__tgtmax', '__tgtblock', 2),							// 13
+			InstructionBuilder.op('sub', '__tgtmax', '__tgtmax', 1),						// 14
+			InstructionBuilder.jump('{0}', 'lessThan', '__tgtpos', '__tgtmax', [19]),		// 15
+			InstructionBuilder.read('__curb', '__tgtblock', 1),								// 16
+			InstructionBuilder.getlink('__tgtblock', '__curb'),								// 17
+			InstructionBuilder.set('__tgtpos', this.reservedSize),							// 18
+			InstructionBuilder.op('sub', '__remain', '__remain', 1),						// 19
+			InstructionBuilder.jump('{0}', 'always', null, null, [0])						// 20
 		]), null, [], true);
 	}
 
@@ -11022,6 +11112,9 @@ class CodeGenerator extends ASTVisitor {
 			*/
 			this.RValueAssigner = this.memory.currentState().duplicate();
 			this.RValueMax = 0;
+			const buildings = new BuildingLinker(this.memory.memoryBlocks.map(block => block.name), 
+				this.functionManagement);
+			result.concat(buildings.outputLinkInitializer());
 			result.concat(this.memory.outputLinkInitializer());
 			if (!this.compiler.config.getAttribute('noPointerFunction')) {
 				result.concat(this.memory.outputPointerForwardFunction(this.functionManagement));
@@ -11164,7 +11257,15 @@ class CodeGenerator extends ASTVisitor {
 					InstructionBuilder.set(`${temporary}.__pointer_pos`, `${symbol.getAssemblySymbol()}_pos`)
 				], temporary);
 				*/
-				result = InstructionBuilder.read(temporary, `${symbol.getAssemblySymbol()}.__pointer_block`, `${symbol.getAssemblySymbol()}.__pointer_pos`);
+				/*
+				result = new Instruction([
+					InstructionBuilder.getlink("__curb", `${symbol.getAssemblySymbol()}.__pointer_block`),
+					InstructionBuilder.read(temporary, "__curb", `${symbol.getAssemblySymbol()}.__pointer_pos`)
+				]);
+				*/
+				result = InstructionBuilder.reads(temporary, 
+					`${symbol.getAssemblySymbol()}.__pointer_block`, `${symbol.getAssemblySymbol()}.__pointer_pos`
+				);
 			}
 			result.instructionReturn = temporary;
 			result.setAttribute('isPointer', true);
@@ -11210,7 +11311,15 @@ class CodeGenerator extends ASTVisitor {
 					InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_pos`, `${data}_pos`)
 				]);
 				*/
-				return InstructionBuilder.write(data, `${symbol.getAssemblySymbol()}.__pointer_block`, `${symbol.getAssemblySymbol()}.__pointer_pos`);
+				/*
+				return new Instruction([
+					InstructionBuilder.getlink("__curb", `${symbol.getAssemblySymbol()}.__pointer_block`),
+					InstructionBuilder.write(data, "__curb", `${symbol.getAssemblySymbol()}.__pointer_pos`)
+				]);
+				*/
+				return InstructionBuilder.writes(data, 
+					`${symbol.getAssemblySymbol()}.__pointer_block`, `${symbol.getAssemblySymbol()}.__pointer_pos`
+				);
 			}
 			
 		} else {
@@ -11960,7 +12069,7 @@ class CodeGenerator extends ASTVisitor {
 				// ...
 				collector = this.getTempVariable();
 				result = this.visit(node.argument);
-				result.concat(InstructionBuilder.read(collector, `${result.instructionReturn}_block`, `${result.instructionReturn}_pos`));
+				result.concat(InstructionBuilder.reads(collector, `${result.instructionReturn}_block`, `${result.instructionReturn}_pos`));
 				return result;
 				break;
 			case '!':
@@ -12080,7 +12189,7 @@ class CodeGenerator extends ASTVisitor {
 
 			case 'MemberExpression':
 				const resolution = this.resolveMemberExpression(left);
-				if (left.dataType.kind.isPointerImpl()) {
+				if (left.dataType.isPointerImpl()) {
 					isPointer = true;
 				}
 				finalResult.concat(resolution);
@@ -12414,7 +12523,7 @@ class CodeGenerator extends ASTVisitor {
 						} else {
 							const tmpVar = this.getTempVariable();
 							preConcat += ` ${tmpVar}`;
-							postConcat.concat(InstructionBuilder.write(tmpVar, `${argContent.instructionReturn}_block`, `${argContent.instructionReturn}_ptr`));
+							postConcat.concat(InstructionBuilder.writes(tmpVar, `${argContent.instructionReturn}_block`, `${argContent.instructionReturn}_ptr`));
 						}
 					}
 					result.concat(new SingleInstruction({
