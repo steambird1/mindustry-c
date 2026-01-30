@@ -1299,7 +1299,7 @@ class Parser {
 		// 添加已知类型集合
         this.knownTypeNames = new Set([
             'int', 'char', 'float', 'void', 'double', 'long', 'short',
-            'signed', 'unsigned', 'device', 'null_t'
+            'signed', 'unsigned', 'device', 'null_t', 'content_t'
         ]);
     }
 
@@ -1787,7 +1787,7 @@ class Parser {
         // 特殊类型：device 和 null_t
         if (checkSpecialTypes && this.matchToken(TokenType.IDENTIFIER)) {
             const token = this.getCurrentToken();
-            if (token.value === 'device' || token.value === 'null_t') {
+            if (token.value === 'device' || token.value === 'null_t' || token.value === 'content_t') {
                 this.consumeToken();
                 typeNode = ASTBuilder.typeSpecifier(token.value);
                 typeNode.setAttribute('location', token.location);
@@ -2589,7 +2589,7 @@ class Parser {
         // 检查是否为已知的内置类型
         const builtinTypes = [
             'int', 'char', 'float', 'void', 'double', 'long', 'short',
-            'signed', 'unsigned', 'device', 'null_t'
+            'signed', 'unsigned', 'device', 'null_t', 'content_t'
         ];
         
         if (builtinTypes.includes(name)) {
@@ -3833,6 +3833,7 @@ class SemanticAnalyzer extends ASTVisitor {
         // 特殊类型
         this.typeTable.set('device', new TypeInfo('device', 'device', 1));
         this.typeTable.set('null_t', new TypeInfo('null_t', 'null', 1));
+		this.typeTable.set('content_t', new TypeInfo('content_t', 'device', 1));	// Similar to device
         
         // 指针类型的基础（void*）
 		// Pointer has a size of 2 !!
@@ -3857,10 +3858,10 @@ class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'getlink', returnType: 'device', parameters: ['int'] },
 			{ name: 'control', returnType: 'void', parameters: ['char', 'device'], hasVarArgs: true }, // 操作名称 + 设备 + 变长参数
 			{ name: 'radar', returnType: 'device', parameters: ['char', 'char', 'char', 'char', 'device', 'int'] },
-			{ name: 'sensor', returnType: 'null_t', parameters: ['device', 'int'] },	// Sensor may return ANY TYPE. PROCESS ON YOUR OWN
+			{ name: 'sensor', returnType: 'null_t', parameters: ['device', 'content_t'] },	// Sensor may return ANY TYPE. PROCESS ON YOUR OWN
 			{ name: 'set', returnType: 'void', parameters: [], hasVarArgs: true, special: 'set' }, // 特殊处理
 			{ name: 'op', returnType: 'void', parameters: [], hasVarArgs: true, special: 'op' }, // 特殊处理
-			{ name: 'lookup', returnType: 'int', parameters: ['char', 'int'] },
+			{ name: 'lookup', returnType: 'content_t', parameters: ['char', 'int'] },
 			{ name: 'wait', returnType: 'void', parameters: ['float'] },
 			{ name: 'stop', returnType: 'void', parameters: [] },
 			{ name: 'end', returnType: 'void', parameters: [] },
@@ -4510,7 +4511,7 @@ class SemanticAnalyzer extends ASTVisitor {
 			if (node.name === '@counter') {
 				this.addWarning(`Deprecated to use @counter inside program`, node.getAttribute('location'));
 			}
-			node.dataType = this.typeTable.get('int');
+			node.dataType = this.typeTable.get('content_t');
 			return;
 		}
         const symbol = this.currentScope.lookup(node.name);
@@ -10435,6 +10436,12 @@ class InstructionBuilder {
 			InstructionBuilder.write(target, "__curb", position)
 		]);
 	}
+	static lookup(category, target, id) {
+		return new SingleInstruction({
+			content: `lookup ${category} ${target} ${id}`,
+			referrer: []
+		});
+	}
 	static end() {
 		return new SingleInstruction({
 			content: `end`,
@@ -11798,9 +11805,15 @@ class CodeGenerator extends ASTVisitor {
 		 * @param {TypeInfo} typeLayer
 		 */
 		const initializerProcessor = (obj, typeLayer) => {
+
+			const warnedTypes = ['content_t', 'device', 'null_t'];
+
 			if (obj.type === 'InitializerList') {
 				obj.children.forEach(child => initializerProcessor(child, typeLayer ? typeLayer.pointerTo : null));
 			} else {
+				if (obj.dataType && warnedTypes.include(obj.dataType.name)) {
+					this.addWarning(`Initializing object of type ${obj.dataType.toString()} in initializer list is an undefined behavior`, node.location);
+				}
 				const valueFetch = this.visit(obj);
 				result.concat(valueFetch);
 				// Process assignment-like
@@ -11981,6 +11994,12 @@ class CodeGenerator extends ASTVisitor {
 					casting = this.implicitToNumeric(node.expression);
 				} else if (node.dataType.name === 'bool' && node.expression.dataType.name !== 'bool') {
 					casting = this.implicitToBoolean(node.expression);
+				} else if (node.expression.dataType.name === 'content_t' && node.dataType.name === 'int') {
+					const returner = this.getTempVariable(), visiting = this.visit(node.expression);
+					casting = new Instruction([
+						visiting,
+						InstructionBuilder.sensor(returner, visiting.instructionReturn, '@id')
+					], returner);
 				}
 			}
 		} 
@@ -12598,7 +12617,13 @@ class CodeGenerator extends ASTVisitor {
 				return packer(`sensor`, ast.arguments, true);
 			},
 			lookup: ast => {
-				return packer(`lookup`, ast.arguments, true);
+				if (ast.arguments[0].type === 'StringLiteral') {
+					const instruction = ast.arguments[0].value;
+					return packer(`lookup ${instruction}`, ast.arguments.slice(1), true);
+				} else {
+					throw `Parameter 1 for lookup() must be a string literal`;
+				}
+				//return packer(`lookup`, ast.arguments, true);
 			},
 			sin: ast => {
 				return opProcesser(`sin`, ast.arguments);
