@@ -1299,7 +1299,8 @@ class Parser {
 		// 添加已知类型集合
         this.knownTypeNames = new Set([
             'int', 'char', 'float', 'void', 'double', 'long', 'short',
-            'signed', 'unsigned', 'device', 'null_t', 'content_t'
+            'signed', 'unsigned', 'device', 'null_t', 'content_t',
+			'item_t', 'liquid_t', 'unit_t', 'block_t'
         ]);
     }
 
@@ -1787,7 +1788,8 @@ class Parser {
         // 特殊类型：device 和 null_t
         if (checkSpecialTypes && this.matchToken(TokenType.IDENTIFIER)) {
             const token = this.getCurrentToken();
-            if (token.value === 'device' || token.value === 'null_t' || token.value === 'content_t') {
+			const specials = ['device', 'null_t', 'content_t', 'item_t', 'liquid_t', 'unit_t', 'block_t']
+            if (specials.includes(token.value)) {
                 this.consumeToken();
                 typeNode = ASTBuilder.typeSpecifier(token.value);
                 typeNode.setAttribute('location', token.location);
@@ -2589,7 +2591,8 @@ class Parser {
         // 检查是否为已知的内置类型
         const builtinTypes = [
             'int', 'char', 'float', 'void', 'double', 'long', 'short',
-            'signed', 'unsigned', 'device', 'null_t', 'content_t'
+            'signed', 'unsigned', 'device', 'null_t', 'content_t',
+			'item_t', 'liquid_t', 'unit_t', 'block_t'
         ];
         
         if (builtinTypes.includes(name)) {
@@ -3834,7 +3837,11 @@ class SemanticAnalyzer extends ASTVisitor {
         this.typeTable.set('device', new TypeInfo('device', 'device', 1));
         this.typeTable.set('null_t', new TypeInfo('null_t', 'null', 1));
 		this.typeTable.set('content_t', new TypeInfo('content_t', 'device', 1));	// Similar to device
-        
+        // 'item_t', 'liquid_t', 'unit_t', 'block_t'
+		for (const contentTypes of ['item_t', 'liquid_t', 'unit_t', 'block_t']) {
+			this.typeTable.set(contentTypes, new TypeInfo(contentTypes, 'basic', 1));
+		}
+
         // 指针类型的基础（void*）
 		// Pointer has a size of 2 !!
 		/*
@@ -4165,9 +4172,9 @@ class SemanticAnalyzer extends ASTVisitor {
 		
         // 从类型表获取类型信息
         if (this.typeTable.has(typeName)) {
-            result = this.typeTable.get(typeName);
+            result = this.typeTable.get(typeName).duplicate();
         } else if (this.structTable.has(typeName)) {
-            result = this.structTable.get(typeName);
+            result = this.structTable.get(typeName).duplicate();
         } else {
 			return null;	// Unable to fetch information
 		}
@@ -4515,11 +4522,52 @@ class SemanticAnalyzer extends ASTVisitor {
     }
 
     visitIdentifier(node) {
+
+		const convert = s => s.split(',').map(t => t.trim());
+		const objectList = convert(
+			'@copper, @lead, @coal, @graphite, @scrap, @sand, @pyratite, @silicon, @spore-pod, @blast-compound, @titanium, @plastanium, @thorium, @phase-fabric, @surge-alloy, @beryllium, @tungsten, @oxide, @carbide'
+		);
+		const liquidList = convert(
+			'@water, @slag, @oil, @cryofluid, @neoplasm, @gallium, @ozone, @hydrogen, @cyanogen, @nitrogen'
+		);
+		const unitList = convert(
+			'@Aegires, @Alpha, @Anthicus, @Antumbra, @Arkyid, @Atrax, @Avert, @Beta, @Bryde, @Cleroi, @Collaris, @Conquer, @Corvus, @Crawler, @Cyerce, @Dagger, @Disrupt, @Eclipse, @Elude, @Emanate, @Evoke, @Flare, @Fortress, @Gamma, @Guardian, @Horizon, @Incite, @Latum, @Locus, @Mace, @Manifold, @Mega, @Merui, @Minke, @Mono, @Navanax, @Nova, @Obviate, @Oct, @Omura, @Oxynoe, @Poly, @Precept, @Pulsar, @Quad, @Quasar, @Quell, @Reign, @Renale, @Retusa, @Risso, @Scepter, @Sei, @Spiroct, @Stell, @Tecta, @Toxopid, @Vanquish, @Vela, @Zenith'
+		).map(s => s.toLowerCase());
+		const buildingList = convert(
+			[
+				'@core-shard, @core-foundation, @core-nucleus, @core-bastion, @core-acropolis',
+				'@mechanical-drill, @pneumatic-drill, @laser-drill, @blast-drill, @water-extractor, @cultivator, @oil-extractor',
+				'@conveyor, @titanium-conveyor, @plastanium-conveyor, @armored-conveyor, @junction, @bridge-conveyor, @phase-conveyor, @sorter, @inverted-sorter, @router, @distributor, @overflow-gate, @underflow-gate, @mass-driver',
+				'@conduit, @pulse-conveyor, @plated-conveyor, @rotary-pump, @thermal-pump, @conduit, @pipeline, @plated-pipeline, @liquid-router, @liquid-tank, @liquid-junction, @bridge-conduit, @phase-conveyor',
+				'@combustion-generator, @thermal-generator, @steam-generator, @differential-generator, @rtg-generator, @solar-panel, @large-solar-panel, @thorium-reactor, @impact-reactor, @battery, @large-battery, @power-node, @power-node-large, @surge-tower, @diode',
+				'@copper-wall, @large-copper-wall, @titanium-wall, @large-titanium-wall, @durium-wall, @large-durium-wall, @thorium-wall, @large-thorium-wall, @phase-wall, @large-phase-wall, @surge-wall, @large-surge-wall, @door, @large-door, @mender, @mend-projector, @force-projector, @overdrive-projector, @overdrive-dome, @repair-point, @repair-turret',
+				'@duo, @scatter, @scorch, @hail, @arc, @wave, @lancer, @swarmer, @salvo, @fuse, @ripple, @cyclone, @foreshadow, @spectre, @meltdown, @segment, @parallax, @tsunami',
+				'@dagger-factory, @mace-factory, @fortress-factory, @scepter-factory, @reign-factory',
+				'@nova-factory, @pulsar-factory, @quasar-factory, @vela-factory, @corvus-factory',
+				'@crawler-factory, @atrax-factory, @spiroct-factory, @arkyid-factory, @toxopid-factory',
+				'@silicon-smelter, @silicon-smelter2, @silicon-smelter3, @kiln, @plastanium-compressor, @phase-weaver, @surge-smelter, @cryofluid-mixer, @pyratite-mixer, @blast-mixer, @melter, @separator, @disassembler, @spore-press, @pulverizer, @coal-centrifuge, @multi-press',
+				'@container, @vault, @core-shard, @core-foundation, @core-nucleus, @unloader',
+				'@liquid-tank, @conduit, @liquid-router',
+				'@container, @vault, @unloader',
+				'@illuminator, @payload-conveyor, @payload-router, @incinerator, @power-source, @power-void, @item-source, @item-void, @liquid-source, @liquid-void, @payload-source, @payload-void, @message, @switch, @micro-processor, @logic-processor, @hyper-processor, @memory-cell, @memory-bank, @logic-display, @large-logic-display',
+				'@oxidis'
+			].join(',')
+		);
+
 		if (node.name.length && node.name[0] === '@') {
 			if (node.name === '@counter') {
 				this.addWarning(`Deprecated to use @counter inside program`, node.getAttribute('location'));
 			}
-			node.dataType = this.typeTable.get('content_t');
+			if (objectList.includes(node.name)) {
+				node.dataType = this.typeTable.get('item_t');
+			} else if (liquidList.includes(node.name)) {
+				node.dataType = this.typeTable.get('liquid_t');
+			} else if (unitList.includes(node.name)) {
+				node.dataType = this.typeTable.get('unit_t');
+			} else {
+				node.dataType = this.typeTable.get('content_t');
+			}
+			
 			return;
 		}
         const symbol = this.currentScope.lookup(node.name);
@@ -5221,6 +5269,21 @@ class SemanticAnalyzer extends ASTVisitor {
 		return operator === '.' || operator === '->';
 	}
 
+	/**
+	 * 
+	 * @param {TypeInfo} targetTypeRaw
+	 * @param {TypeInfo} sourceTypeRaw
+	 */
+	isSameType(targetTypeRaw, sourceTypeRaw) {
+		const targetType = targetTypeRaw.duplicate(), sourceType = sourceTypeRaw.duplicate();
+		const ignoredQualifiers = ['auto', 'volatile', 'static'];
+		sourceType.qualifiers = sourceType.qualifiers.filter(
+			item => (!ignoredQualifiers.includes(item)));	// 'const' of source does not matter
+		targetType.qualifiers = targetType.qualifiers.filter(
+			item => (!ignoredQualifiers.includes(item) && item !== 'const'));
+		return this.typeToString(sourceType) == this.typeToString(targetType);
+	}
+
     // 修改类型兼容性检查以支持指针和结构体
     isTypeCompatible(targetTypeRaw, sourceTypeRaw) {
 		
@@ -5238,13 +5301,19 @@ class SemanticAnalyzer extends ASTVisitor {
 		// Remove auto and volatile qualifier for both sides:
 		const ignoredQualifiers = ['auto', 'volatile', 'static'];
 		sourceType.qualifiers = sourceType.qualifiers.filter(
-			item => (!ignoredQualifiers.includes(item) && item !== 'const'));	// 'const' of source does not matter
-		targetType.qualifiers = targetType.qualifiers.filter(item => (!ignoredQualifiers.includes(item)));
+			item => (!ignoredQualifiers.includes(item)));	// 'const' of source does not matter
+		targetType.qualifiers = targetType.qualifiers.filter(
+			item => (!ignoredQualifiers.includes(item) && item !== 'const'));
+
+		const specialContents = ['item_t', 'liquid_t', 'unit_t', 'block_t', 'content_t'];
 		
         // 相同类型总是兼容
         if (this.typeToString(targetType) === this.typeToString(sourceType)) {
             return true;
         }
+		if (specialContents.includes(targetType.name) && specialContents.includes(sourceType.name)) {
+			return true;
+		}
 		// Clear names for checker
 		if (targetType.kind === 'function' && sourceType.kind === 'function') {
 			const duplicateTarget = targetType.duplicate(), duplicateSource = sourceType.duplicate();
@@ -5522,7 +5591,7 @@ class Optimizer {
         this.functionCallGraph = new Map();
         this.functionInfo = new Map();
         this.constants = new Map(); // 全局常量表
-        this.localConstants = new Map(); // 局部常量表 {scopePath: Map<varName, value>}
+        this.localConstants = new Map(); // 局部常量表 
         this.variableUses = new Map(); // 变量使用统计 {scopePath: Map<varName, {reads, writes}>}
 		//this.visitedSideEffects = false;
         
@@ -5574,6 +5643,7 @@ class Optimizer {
 
     optimizationPass() {
         // 1. 收集全局信息（函数调用图等）
+		this.functionInfo.clear();
         this.collectGlobalInfo();
         
         // 3. 按作用域递归分析
@@ -5674,7 +5744,14 @@ class Optimizer {
 			targetVariableScope = new Map();
 			this.variableUses.set(targetPath, targetVariableScope);
 		}
-		targetVariableScope.set(targetName, { ...variableScope.get(varName) });
+		let varState = variableScope.get(varName);
+		if (!varState || !varState.reads || !varState.writes ) {
+			varState = {
+				reads: 1,
+				writes: 1
+			};	// Prevent unexpected optimizing
+		}
+		targetVariableScope.set(targetName, { ...varState });
 	}
 
     // =============== 节点分析 ===============
@@ -5910,12 +5987,14 @@ class Optimizer {
         // Must be in current scope, so it's correct
         node.declarators.forEach(declarator => {
             if (!declarator.name) return;
+			const symbol = this.currentScope.lookup(declarator.name);
+			const canOptimizeThis = !(symbol.isVolatile || symbol.isStatic);
             
             // 初始化使用统计
             variableUses.set(declarator.name, {
                 reads: 0,
                 writes: 1, // 初始化算作一次写入
-				canOptimize: true,	// False: already symbolized as no-optimize
+				canOptimize: canOptimizeThis,	// False: already symbolized as no-optimize
                 location: declarator.location,
                 node: declarator
             });
@@ -5923,17 +6002,18 @@ class Optimizer {
             // 检查常量初始化
             if (declarator.initializer) {
                 this.analyzeNode(declarator.initializer, info);
+                if (canOptimizeThis) {
+					const constValue = this.evaluateConstantExpression(declarator.initializer);
+					if (constValue !== undefined) {
+						localConstants.set(declarator.name, constValue);
+						
+						// 标记符号为常量
+						if (symbol) {
+							symbol.markAsConstant(constValue);
+						}
+					}
+				}
                 
-                const constValue = this.evaluateConstantExpression(declarator.initializer);
-                if (constValue !== undefined) {
-                    localConstants.set(declarator.name, constValue);
-                    
-                    // 标记符号为常量
-                    const symbol = this.currentScope.lookup(declarator.name);
-                    if (symbol) {
-                        symbol.markAsConstant(constValue);
-                    }
-                }
             }
         });
     }
@@ -7634,7 +7714,7 @@ class Optimizer {
 		if (typeof varName === 'string') {
 			symbol = this.currentScope.lookup(varName);
 		}
-		return (!symbol.isVolatile) && (!symbol.isAddressed);
+		return (!symbol.isVolatile) && (!symbol.isStatic) && (!symbol.isAddressed);
 	}
 
 	/**
@@ -7885,7 +7965,7 @@ class Optimizer {
                     isDefinition: funcNode.body !== null,
                     isInline: funcNode.isInline || false,
 					isAddressed: symbol.isAddressed,
-					canInline: false,
+					canInline: funcNode.body !== null,
                     node: funcNode,
                     scope: symbol.scope,
                     size: this.estimateFunctionSize(funcNode)
@@ -7959,7 +8039,11 @@ class Optimizer {
         
         this.functionInfo.forEach((info, funcName) => {
 			if (info.isAddressed) return;	// Can't be inlined!
-            if (info.calls === 1 || info.isInline || info.size <= 3) {
+			if (!info.node || !info.node.body) return;
+			const paraSize = (info.node.parameters ? (info.node.parameters.length ?? 0) : 0);
+			const inlineEstimate = info.calls * info.size;
+			const noInlineEstimate = (info.size + 16 + (8 + paraSize) * info.calls + paraSize * 2);
+            if (info.calls === 1 || info.isInline || inlineEstimate <= noInlineEstimate) {
                 inlineCandidates.push(funcName);
             }
         });
@@ -8084,10 +8168,13 @@ class Optimizer {
 
 	// ! This function has TO-DOs !
 	// This function is manually merged from AI output.
-    hasSideEffects(node) {
+    hasSideEffects(node, special = null) {
         if (!node) return false;
 		const selectedScope = node.scope ?? this.currentScope;
-        
+		const inFunction = special && special.inFunction;
+
+		const functionBuiltin = ['set', 'op', 'jump', 'asm'];
+
         // 检查节点是否有副作用
         switch (node.type) {
 			case 'VariableDeclarator':
@@ -8096,7 +8183,7 @@ class Optimizer {
 					return true;
 				}
 				if (node.initializer) {
-					return this.hasSideEffects(node.initializer);
+					return this.hasSideEffects(node.initializer, special);
 				}
 				break;
             case 'AssignmentExpression':
@@ -8104,15 +8191,21 @@ class Optimizer {
 					return true;
 				}
 			case 'BinaryExpression':
-				return (this.hasSideEffects(node.left)) || (this.hasSideEffects(node.right));
+				return (this.hasSideEffects(node.left, special)) || (this.hasSideEffects(node.right, special));
 				// TODO: Double-check logic here
 				break;
 			//case 'InitializerList':	// Depending on its children
 			case 'FunctionCall':
-            case 'BuiltinCall':
+				//return !inFunction;
+				//break;
 			case 'AsmStatement':
 				// There won't be cross-function optimizing
 				return true;
+				break;
+			case 'BuiltinCall':
+				// Exclusion of some
+				if (!inFunction) return true;
+				return functionBuiltin.includes(node.functionName);
 				break;
             case 'UnaryExpression':
 				// ++ and -- itself actually have no side effect.
@@ -8134,22 +8227,22 @@ class Optimizer {
 			case 'ReturnStatement':
 				// return可能有副作用（返回值表达式）
 				// Abortion of control is dealt with elsewhere
-				return node.argument ? this.hasSideEffects(node.argument) : false;
+				return node.argument ? this.hasSideEffects(node.argument, special) : false;
 			case 'IfStatement':
 			case 'WhileStatement':
 			case 'ForStatement':
 				// 控制语句可能有副作用
-				return (node.test && this.hasSideEffects(node.test)) ||
-					   (node.consequent && this.hasSideEffects(node.consequent)) ||
-					   (node.alternate && this.hasSideEffects(node.alternate)) ||
-					   (node.body && this.hasSideEffects(node.body)) ||
-					   (node.init && this.hasSideEffects(node.init)) ||
-					   (node.update && this.hasSideEffects(node.update));
+				return (node.test && this.hasSideEffects(node.test, special)) ||
+					   (node.consequent && this.hasSideEffects(node.consequent, special)) ||
+					   (node.alternate && this.hasSideEffects(node.alternate, special)) ||
+					   (node.body && this.hasSideEffects(node.body, special)) ||
+					   (node.init && this.hasSideEffects(node.init, special)) ||
+					   (node.update && this.hasSideEffects(node.update, special));
 			case 'CompoundStatement':
 				// 如果其任何子语句有副作用，复合语句有副作用
 				if (node.statements) {
 					for (const stmt of node.statements) {
-						if (this.hasSideEffects(stmt)) {
+						if (this.hasSideEffects(stmt, special)) {
 							return true;
 						}
 					}
@@ -8174,13 +8267,13 @@ class Optimizer {
 		if (node.declarators) {
 			let hasSideEffects = false;
 			node.declarators.forEach(declarator => {
-				hasSideEffects = hasSideEffects || this.hasSideEffects(declarator);
+				hasSideEffects = hasSideEffects || this.hasSideEffects(declarator, special);
 			});
 			return hasSideEffects;
 		}
         if (node.children) {
             for (const child of node.children) {
-                if (this.hasSideEffects(child)) {
+                if (this.hasSideEffects(child, special)) {
                     return true;
                 }
             }
@@ -8657,6 +8750,9 @@ class Optimizer {
                 case 'ForStatement':
                     size++;
                     break;
+				case 'FunctionCall':
+					size += 3 + node.arguments.length;
+					break;
             }
             
             if (node.children) {
@@ -8688,7 +8784,9 @@ class Optimizer {
         const info = this.functionInfo.get(funcName);
         if (!info || !info.node.body) return false;
 		if (!info.canInline) return false;
-		if (this.hasSideEffects(info.node.body)) return false;
+		if (this.hasSideEffects(info.node.body, {
+			inFunction: true
+		})) return false;
         
         // 检查递归调用
         const calledFunctions = this.functionCallGraph.get(funcName) || new Set();
@@ -8790,26 +8888,32 @@ class Optimizer {
 	 * @param {FunctionCallNode} callNode 
 	 * @param {ASTNode} parentNode 
 	 * @param {any} context 
-	 * @returns 
+	 * @returns {boolean} Whether the inlining is successful
 	 */
 	inlineFunctionAtSite(funcNode, callNode, parentNode, context) {
 		// Cloned body must be a compound statement
 		// 检查是否适合内联
 		if (!this.isSuitableForInlining(funcNode, callNode, context)) {
-			return;
+			return false;
 		}
-		
+		/*
+		const funcSymbol = funcNode.scope.lookup(funcNode.name);
+		if (!funcSymbol) {
+			return false;	// Can't inline
+		}
+		*/
 		// 复制函数体
 		if (funcNode.body.type !== 'CompoundStatement') {
-			return;
+			return false;
 		}
 		const clonedBody = this.cloneAST(funcNode.body);
-		if (!clonedBody) return;
+		if (!clonedBody) return false;
 		
 		// 创建参数映射
 		const paramMap = new Map();
 		funcNode.parameters.forEach((param, index) => {
 			if (index < callNode.arguments.length && param.name) {
+				//const paramSymbol = funcNode.scope.lookup(param.name).duplicate();
 				const symbolName = funcNode.name + ':' + param.name;
 				const ident = ASTBuilder.identifier(symbolName);
 				const value = this.cloneAST(callNode.arguments[index]);
@@ -8820,12 +8924,13 @@ class Optimizer {
 				clonedBody.statements.unshift(assigner);
 				assigner.parent = clonedBody;
 				assigner.dataType = ident.dataType;
+				ident.scope = value.scope = assigner.scope = parentNode.scope ?? callNode.scope;
 				//paramMap.set(param.name, callNode.arguments[index]);
 				paramMap.set(param.name, ident);
 
-				if (callNode.scope) {
+				if (parentNode.scope) {
 					// TODO: Add new symbol into caller's symbol table!
-					this.duplicateVariable(funcNode.scope, param.name, callNode.scope, symbolName);
+					this.duplicateVariable(funcNode.scope, param.name, parentNode.scope, symbolName);
 				}
 			}
 		});
@@ -8966,7 +9071,7 @@ class Optimizer {
 		
 		// 检查函数体大小
 		const functionSize = this.estimateFunctionSize(funcNode);
-		if (functionSize > 20) { // 阈值，可根据需要调整
+		if (functionSize > 25) { // 阈值，可根据需要调整
 			return false;
 		}
 		
@@ -10456,6 +10561,12 @@ class InstructionBuilder {
 			referrer: []
 		});
 	}
+	static stop() {
+		return new SingleInstruction({
+			content: `stop`,
+			referrer: []
+		});
+	}
 	static print(data) {
 		return new SingleInstruction({
 			content: `print ${data}`,
@@ -10511,7 +10622,7 @@ class FunctionRegisterer {
 	 */
 	addFunction(name, body, scope = null, givenStackSymbols = [], specialBuiltin = false) {
 		let stackTotal = 0;
-		let stackSymbols = givenStackSymbols;
+		let stackSymbols = [ ...givenStackSymbols ];
 		stackSymbols.push(new SymbolEntry('__stackpos', '__builtin_int', scope, 'variable', null, 1));
 		stackSymbols.forEach(element => {
 			if (element.size != null) stackTotal += element.size;
@@ -10615,8 +10726,9 @@ class FunctionRegisterer {
 			connector.concat(new InstructionReferrer(jumper, 'end_of_body'));
 			// ...
 			let header = new Instruction([
-				InstructionBuilder.set(`_${name}`, '@counter'),
-				InstructionBuilder.op('add', `_${name}`, `_${name}`, 2)	// counter refer to the next line
+				//InstructionBuilder.set(`_${name}`, '@counter'),
+				//InstructionBuilder.op('add', `_${name}`, `_${name}`, 2)	// counter refer to the next line
+				InstructionBuilder.op('add', `_${name}`, '@counter', 1)
 			]);
 			result.concat(header);
 			result.concat(connector);
@@ -11014,7 +11126,7 @@ class MemoryManager {
 
 	outputPointerValueFunction(funcReg) {
 		funcReg.addFunction('__pointerValue', new Instruction([
-			InstructionBuilder.read('__builtin_return', '__ptrblock', 3),
+			InstructionBuilder.reads('__builtin_return', '__ptrblock', 3),
 			InstructionBuilder.op('add', '__builtin_return', '__builtin_return', '__ptrpos')
 		]), null, [], true);
 	}
@@ -11095,6 +11207,7 @@ class CodeGenerator extends ASTVisitor {
     constructor(compiler) {
         super(compiler);
 		this.semantic = compiler.semanticAnalyzer;
+		this.functionCallGraph = compiler.optimizer.functionCallGraph;
 		this.registryId = 0;
 		this.temporarySpaceId = 0;
         this.outputCode = new Instruction();
@@ -11162,16 +11275,28 @@ class CodeGenerator extends ASTVisitor {
 	/**
 	 * 
 	 * @param {Scope} scope 
-	 * @param {boolean} [staticAllocOnly=false] 
+	 * @param {boolean} [staticAllocOnly=false]
+	 * @param {boolean} [mustAlloc=false] 
+	 * @param {string} [insideFunctionName=""] Unused
 	 * @remark Adding all heap memories (static variable and global variables)
 	 * Note:
 	 * accessThroughPointer - This value is stored in heap memory area (e.g. volatile int)
 	 * implementAsPointer - This value is a pointer
 	 * (These can be used simultaneously)
 	 */
-	processHeapMemory(scope, staticAllocOnly = false) {
+	processHeapMemory(scope, staticAllocOnly = false, mustAlloc = false, insideFunctionName = "") {
+		if (scope.astNode && scope.astNode.type === 'FunctionDeclaration') {
+			const callRef = this.functionCallGraph.get(scope.astNode.name);
+			if (callRef && callRef.has(scope.astNode.name)) {
+				mustAlloc = true;
+			}
+		}
 		scope.getAllSymbols().forEach(symbol => {
 			// Update symbol size information
+			if (mustAlloc) {
+				symbol.accessThroughPointer = true;
+				symbol.needMemoryAllocation = true;
+			}
 			switch (symbol.kind) {
 				case 'variable':
 				case 'struct':
@@ -11185,6 +11310,8 @@ class CodeGenerator extends ASTVisitor {
 								symbol.implementAsPointer = false;
 								symbol.accessThroughPointer = false;
 								symbol.needMemoryAllocation = false;
+							} else if (symbol.accessThroughPointer || symbol.implementAsPointer || symbol.needMemoryAllocation) {
+								this.addWarning(`symbol ${symbol.name} with device-like type ('device' or 'content_t') is stored in memory. This will result in data loss.`);
 							}
 							break;
 						case 'basic':
@@ -11219,7 +11346,7 @@ class CodeGenerator extends ASTVisitor {
 			}
 		});
 		scope.children.forEach(child => {
-			this.processHeapMemory(child, true);
+			this.processHeapMemory(child, true, mustAlloc);
 		});
 	}
 
@@ -11238,6 +11365,7 @@ class CodeGenerator extends ASTVisitor {
 	generateSymbolRead(symbol, duplicate = false, givenName = null) {
 		let result = new Instruction();
 		if (!duplicate || (!symbol.isVolatile && symbol.isConst)) {
+			// Never considering whether it's indirect
 			if (givenName) {
 				return new Instruction([
 					InstructionBuilder.set(givenName, symbol.getAssemblySymbol())
@@ -11712,6 +11840,9 @@ class CodeGenerator extends ASTVisitor {
 	 */
 	visitVariableDeclarator(node) {
 		// Simple symbols can have direct lookup in scope
+		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
+		const referrer = typeName => typeName.slice(0, typeName.length - 2);
+
 		const symbol = this.currentScope.lookup(node.name);
 		if (!symbol) {
 			throw new InternalGenerationFailure(`Could not get symbol ${node.name}`, node);
@@ -11730,9 +11861,17 @@ class CodeGenerator extends ASTVisitor {
 				endJumper = InstructionBuilder.jump('{skip_init}', 'equal', endTag, 'true');
 				finalize.concat(endJumper);
 			}
-			const evaluation = node.initializer ? this.visit(node.initializer) : new Instruction();
+			let evaluation = node.initializer ? this.visit(node.initializer) : new Instruction();
 			finalize.concat(evaluation);
 			if (node.initializer) {
+				if (node.initializer.dataType) {
+					if (symbol.type.type.name === 'content_t' && special.includes(node.initializer.dataType.name)) {
+						evaluation = this.implicitToContentRaw(evaluation, referrer(node.initializer.dataType.name));
+					} else if (special.includes(symbol.type.name) && !this.semantic.isSameType(symbol.type.type, node.initializer.dataType)) {
+						evaluation = this.implicitContentToNumericRaw(evaluation);
+					}
+				}
+				
 				if (!symbol.implementAsPointer && symbol.accessThroughPointer) {
 					let pointerCopy = new Instruction([
 						InstructionBuilder.set(`${symbol.getAssemblySymbol()}_block`, `${evaluation.instructionReturn}_block`),
@@ -11768,18 +11907,16 @@ class CodeGenerator extends ASTVisitor {
 	 * 
 	 * @param {string} pointer 
 	 * @returns {Instruction}
-	 * @removed (Removed)
 	 */
-	/*
 	castPointerToValue(pointer) {
 		let result = new Instruction();
 		const returner = this.getTempVariable();
-		result.concat(InstructionBuilder.read(returner, `${pointer}_block`, 4));
+		result.concat(InstructionBuilder.reads(returner, `${pointer}_block`, 4));
 		result.concat(InstructionBuilder.op('add', returner, `${pointer}_pos`));
 		result.instructionReturn = returner;
 		return result;
 	}
-	*/
+	
 
 	/**
 	 * 
@@ -11844,6 +11981,14 @@ class CodeGenerator extends ASTVisitor {
 		return result;
 	}
 
+	implicitContentToNumericRaw(inst) {
+		const temporary = this.getTempVariable();
+		let result = new Instruction([inst]);
+		result.concat(InstructionBuilder.sensor(temporary, inst.instructionReturn, '@id'));
+		result.instructionReturn = temporary;
+		return result;
+	}
+
 	/**
 	 * 
 	 * @param {ASTNode} node 
@@ -11869,6 +12014,43 @@ class CodeGenerator extends ASTVisitor {
 					temporary = this.getTempVariable();
 					result.concat(InstructionBuilder.op('floor', temporary, result.instructionReturn));
 					result.instructionReturn = temporary;
+					return result;
+					break;
+				case 'content_t':
+					return this.implicitContentToNumericRaw(this.visit(node));
+					break;
+			}
+		}
+		return this.visit(node);
+	}
+
+	implicitToContentRaw(inst, contentType) {
+		let result = inst;
+		const temporary = this.getTempVariable();
+		result.concat(InstructionBuilder.lookup(contentType, temporary, result.instructionReturn));
+		result.instructionReturn = temporary;
+		return result;
+	}
+
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 * @param {string | null} [contentTypeGiven=null]
+	 * @return {Instruction}
+	 */
+	implicitToContent(node, contentTypeGiven = null) {
+		let result, temporary;
+		let contentType = contentTypeGiven;
+		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
+		const referrer = typeName => typeName.slice(0, typeName.length - 2);
+		if (node.dataType) {
+			if (!contentType && special.includes(node.dataType.name)) {
+				contentType = referrer(node.dataType.name);
+			}
+			switch (node.dataType.name) {
+				// These types are actually stored in integral form
+				case 'int': case 'item_t': case 'liquid_t': case 'unit_t': case 'block_t':
+					return this.implicitToContentRaw(this.visit(node), contentType);
 					break;
 			}
 		}
@@ -11960,7 +12142,7 @@ class CodeGenerator extends ASTVisitor {
 			result.concat(sequence);
 		} else {
 			this.addWarning('Going to assignment through binary expression:', node);
-			result = this.processAssignment(node.left, right);
+			result = this.visitAssignmentExpression(node);
 		}
 		return result;
 	}
@@ -11988,7 +12170,8 @@ class CodeGenerator extends ASTVisitor {
 				if (node.expression.dataType.kind === 'pointer' && node.dataType.name === 'int') {
 					casting = this.visit(node.expression);
 					const receiver = this.getTempVariable();
-					const result = this.memory.outputPointerValueCall(casting.instructionReturn, this.functionManagement);
+					//const result = this.memory.outputPointerValueCall(casting.instructionReturn, this.functionManagement);
+					const result = this.castPointerToValue(casting.instructionReturn);
 					casting.concat(result);
 					casting.concat(InstructionBuilder.set(receiver, '__builtin_return'));
 					casting.instructionReturn = receiver;
@@ -12002,12 +12185,28 @@ class CodeGenerator extends ASTVisitor {
 					casting = this.implicitToNumeric(node.expression);
 				} else if (node.dataType.name === 'bool' && node.expression.dataType.name !== 'bool') {
 					casting = this.implicitToBoolean(node.expression);
-				} else if (node.expression.dataType.name === 'content_t' && node.dataType.name === 'int') {
+				} else if (
+					['item_t', 'liquid_t', 'unit_t', 'block_t', 'content_t'].includes(node.expression.dataType.name)
+					 && ['item_t', 'liquid_t', 'unit_t', 'block_t', 'int'].includes(node.dataType.name)) {
+						/*
 					const returner = this.getTempVariable(), visiting = this.visit(node.expression);
 					casting = new Instruction([
 						visiting,
 						InstructionBuilder.sensor(returner, visiting.instructionReturn, '@id')
 					], returner);
+					*/
+					casting = this.implicitToNumeric(node.expression);
+				} else if (['item_t', 'liquid_t', 'unit_t', 'block_t', 'int'].includes(node.expression.dataType.name) && node.dataType.name === 'content_t') {
+					const referrer = typeName => typeName.slice(0, typeName.length - 2);
+					/*
+					
+					const returner = this.getTempVariable(), visiting = this.visit(node.expression);
+					casting = new Instruction([
+						visiting,
+						InstructionBuilder.lookup(referrer(node.dataType.name), returner, visiting.instructionReturn)
+					], returner);
+					*/
+					casting = this.implicitToContent(node.expression, referrer(node.dataType.name));
 				}
 			}
 		} 
@@ -12024,14 +12223,19 @@ class CodeGenerator extends ASTVisitor {
 	 * @todo Make simple numeric operations simplified (direct operation through op, etc.)
 	 */
 	visitAssignmentExpression(node) {
-		let value;
+		let value = null;
+		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
+		const referrer = typeName => typeName.slice(0, typeName.length - 2);
+
 		if (node.operator !== '=') {
 			value = this.visitBinaryExpression(ASTBuilder.binaryExpression(
 				node.operator.slice(null, -1),
 				node.left, node.right
 			));
 		} else {
-			if (node.right.type === 'InitializerList') {
+			// struct will be copied through memcpy.
+			// Note that arrays or pointers are "byref".
+			if (node.right.type === 'InitializerList' || (node.right.dataType && node.right.dataType === 'struct')) {
 				// Pre-evaluated pointer with initializer list, perform something like memcpy
 				let result = new Instruction();
 				const leftPointer = this.processLValGetter(node.left, true);
@@ -12044,8 +12248,15 @@ class CodeGenerator extends ASTVisitor {
 				));
 				result.instructionReturn = leftPointer.instructionReturn;
 				return result;
+			} else if (node.left.dataType && node.right.dataType) {
+				if (special.includes(node.right.dataType.name) && node.left.dataType.name === 'content_t') {
+					value = this.implicitToContent(node.right, referrer(node.right.dataType.name));
+				} else if (special.includes(node.left.dataType.name) 
+					&& !this.semantic.isSameType(node.left.dataType, node.right.dataType)) {
+					value = this.implicitToNumeric(node.right);
+				}
 			}
-			value = this.visit(node.right);
+			if (!value) value = this.visit(node.right);
 		}
 		
 		return this.processAssignment(node.left, value);
@@ -12058,7 +12269,8 @@ class CodeGenerator extends ASTVisitor {
 	 * @todo Similar to the simplifier of assignment expressions
 	 */
 	visitUnaryExpression(node) {
-		let result, collector;
+		let result, collector, temp;
+		let asPointer = false;
 		switch (node.operator) {
 			case '+':
 				return this.visit(node.argument);
@@ -12068,20 +12280,39 @@ class CodeGenerator extends ASTVisitor {
 					return new Instruction([], -node.argument.value);
 				}
 				result = this.visit(node.argument);
-				result.concat(InstructionBuilder.op('sub', result.instructionReturn, 0, result.instructionReturn));
+				temp = this.getTempVariable();
+				result.concat(InstructionBuilder.op('sub', temp, 0, result.instructionReturn));
+				result.instructionReturn = temp;
 				return result;
 				break;
 			case '++': case '--':
+				// Note: this does not have copy because it has actions on its own
 				result = this.visit(node.argument);
 				let duplicate;
+				asPointer = node.argument.dataType && node.argument.dataType.isPointerImpl();
 				if (!node.prefix) {
 					duplicate = this.getTempVariable();
-					result.concat(InstructionBuilder.set(duplicate, result.instructionReturn));
+					if (asPointer) {
+						result.concat(new Instruction([
+							InstructionBuilder.set(`${duplicate}_block`, `${result.instructionReturn}_block`),
+							InstructionBuilder.set(`${duplicate}_ptr`, `${result.instructionReturn}_ptr`)
+						]));
+					} else {
+						result.concat(InstructionBuilder.set(duplicate, result.instructionReturn));
+					}
+					
 				} else {
 					duplicate = result.instructionReturn;
 				}
-				result.concat(InstructionBuilder.op(node.operator === '++' ? 'add' : 'sub', result.instructionReturn, result.instructionReturn, '1'));
-				result.concat(this.processLValGetter(node.argument).replace('value_entry', result.instructionReturn));
+				if (asPointer) {
+					result.concat(node.operator === '++'
+						? this.memory.outputPointerForwardCall(1, result.instructionReturn, this.functionManagement)
+						: this.memory.outputPointerBackwardCall(1, result.instructionReturn, this.functionManagement));
+					result.concat(this.processLValGetter(node.argument).replace('pointer_block_entry', `${result.instructionReturn}_block`).replace('pointer_ptr_entry', `${result.instructionReturn}_pos`));
+				} else {
+					result.concat(InstructionBuilder.op(node.operator === '++' ? 'add' : 'sub', result.instructionReturn, result.instructionReturn, '1'));
+					result.concat(this.processLValGetter(node.argument).replace('value_entry', result.instructionReturn));
+				}
 				result.instructionReturn = duplicate;
 				return result;
 				break;
@@ -12097,15 +12328,20 @@ class CodeGenerator extends ASTVisitor {
 				collector = this.getTempVariable();
 				result = this.visit(node.argument);
 				result.concat(InstructionBuilder.reads(collector, `${result.instructionReturn}_block`, `${result.instructionReturn}_pos`));
+				result.instructionReturn = collector;
 				return result;
 				break;
 			case '!':
 				result = this.visit(node.argument);
-				result.concat(InstructionBuilder.op('equal', result.instructionReturn, result.instructionReturn, 'false'));
+				temp = this.getTempVariable();
+				result.concat(InstructionBuilder.op('equal', temp, result.instructionReturn, 'false'));
+				result.instructionReturn = temp;
 				return result;
 			case '~':
 				result = this.visit(node.argument);
-				result.concat(InstructionBuilder.op('not', result.instructionReturn, result.instructionReturn));
+				temp = this.getTempVariable();
+				result.concat(InstructionBuilder.op('not', temp, result.instructionReturn));
+				result.instructionReturn = temp;
 				return result;
 				break;
 		}
@@ -12281,8 +12517,7 @@ class CodeGenerator extends ASTVisitor {
 		let lval = this.processLValGetter(left);
 		result.concat(right);
 		if (lval.getAttribute('isPointer')) {
-			result.concat(lval.replace('pointer_block_entry', `${right.instructionReturn}_block`));
-			result.concat(lval.replace('pointer_ptr_entry', `${right.instructionReturn}_pos`));
+			result.concat(lval.replace('pointer_block_entry', `${right.instructionReturn}_block`).replace('pointer_ptr_entry', `${right.instructionReturn}_pos`));
 		} else {
 			let returns = right.instructionReturn;
 			result.concat(lval.replace('value_entry', returns));
@@ -12299,6 +12534,9 @@ class CodeGenerator extends ASTVisitor {
 	 * @todo To make it suitable for function pointer (in order of parameter...)
 	 */
 	visitFunctionCall(node) {
+		const referrer = typeName => typeName.slice(0, typeName.length - 2);
+		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
+		
 		let result = new Instruction();
 		// Prepare for all parameters
 		let relevantFunction = node.callee ? node.callee.symbol : null, isFunctionPointer = false;
@@ -12332,6 +12570,14 @@ class CodeGenerator extends ASTVisitor {
 					InstructionBuilder.set(`__param_${i}_block`, `${param.instructionReturn}_block`),
 					InstructionBuilder.set(`__param_${i}_pos`, `${param.instructionReturn}_pos`)
 				]));
+			} else if (actualType.name === 'content_t' && node.arguments[i].dataType && special.includes(node.arguments[i].dataType.name)) {
+				const implicitConv = this.implicitToContentRaw(param.instructionReturn, referrer(node.arguments[i].dataType.name));
+				result.concat(implicitConv);
+				result.concat(InstructionBuilder.set(`__param_${i}`, implicitConv.instructionReturn));
+			} else if (special.includes(actualType.name)) {
+				const implicitConv = this.implicitContentToNumericRaw(param, referrer(node.arguments[i].dataType.name));
+				result.concat(implicitConv);
+				result.concat(InstructionBuilder.set(`__param_${i}`, implicitConv.instructionReturn));
 			} else {
 				result.concat(InstructionBuilder.set(`__param_${i}`, param.instructionReturn));
 			}
@@ -12376,15 +12622,24 @@ class CodeGenerator extends ASTVisitor {
 	/**
 	 * 
 	 * @param {IdentifierNode} node 
+	 * @remark This function has a major change in Jan 31 version (no duplicate by default now).
+	 * @remark Therefore, any duplicate function must have its own copy-processing!
 	 */
 	visitIdentifier(node) {
 		const isBuiltinConstant = node.name.length && node.name[0] == '@';
 		const isConstant = node.dataType && node.dataType.qualifiers.includes('const') 
 			&& (!node.dataType.qualifiers.includes('volatile'));
+		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
+		const referrer = typeName => typeName.slice(0, typeName.length - 2);
 		if (isBuiltinConstant) {
-			return new Instruction([], node.name);
+			// If the value is a builtin constant with type...
+			if (node.dataType && special.includes(node.dataType.name)) {
+				return this.implicitContentToNumericRaw(new Instruction([], node.name));	// Make a conversion
+			} else {
+				return new Instruction([], node.name);
+			}
 		}
-		return this.generateSymbolRead(this.currentScope.lookup(node.name), true);
+		return this.generateSymbolRead(this.currentScope.lookup(node.name));	// Major change: now changed to false!!!
 	}
 
 	/**
@@ -12433,17 +12688,33 @@ class CodeGenerator extends ASTVisitor {
 	/**
 	 * 
 	 * @param {BuiltinCallNode} node 
-	 * @todo <Not completed>
+	 * @remarks In fact, only in this part does the program include interactions
 	 */
 	visitBuiltinCall(node) {
 
 		const packer = (prefix, params, hasReturn = false, parameterSize = -1) => {
 			let varNames = [];
-			let result = new Instruction(params.map(ast => {
-				const fetcher = this.visit(ast);
-				varNames.push(fetcher.instructionReturn);
-				return fetcher;
-			}));
+			let result = new Instruction(params.map(
+				/**
+				 * 
+				 * @param {AstNode} ast 
+				 * @returns {Instruction}
+				 * @remark The implicit convertor is actually hardly used!
+				 */
+				ast => {
+					const converts = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
+					const referrer = typeName => typeName.slice(0, typeName.length - 2);
+					let fetcher;
+					// If providing device types, try it
+					if (ast.dataType && converts.includes(ast.dataType.name)) {
+						fetcher = this.implicitToContent(ast, referrer(ast.dataType.name));
+					} else {
+						fetcher = this.visit(ast);
+					}
+					varNames.push(fetcher.instructionReturn);
+					return fetcher;
+				}
+			));
 			let returner = "";
 			if (hasReturn) {
 				returner = this.getTempVariable();
@@ -12481,6 +12752,12 @@ class CodeGenerator extends ASTVisitor {
 		};
 
 		const handlers = {
+			end: ast => {
+				return InstructionBuilder.end();
+			},
+			stop: ast => {
+				return InstructionBuilder.stop();
+			},
 			print: ast => {
 				//const result = this.visit(ast.arguments[0]);
 				let result = new Instruction();
@@ -12693,7 +12970,7 @@ class CodeGenerator extends ASTVisitor {
 					sourceSpace.instructionReturn, sizeValue.instructionReturn, this.functionManagement));
 				return result;
 			},
-			memst: ast => {
+			memsp: ast => {
 				let result = new Instruction();
 				const returner = this.getTempVariable();
 				const blockRef = this.visit(ast.arguments[0]);
@@ -12716,7 +12993,7 @@ class CodeGenerator extends ASTVisitor {
 				return new Instruction();
 			}
 		}
-
+		this.addWarning(`Calling unimplemented builtin function ${node.functionName} function`, node.location);
 		return new Instruction({
 			content: '{not_implemented}',
 			referrer: []
