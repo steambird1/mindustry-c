@@ -7709,6 +7709,9 @@ class Optimizer extends ASTVisitor {
 			});
 			replacementNode = compoundStmt;
 		}
+		replacementStatements.forEach(stmt => {
+			stmt.scope = loopNode.scope;
+		});
 		
 		// 替换原循环
 		this.replaceNode(loopNode, replacementNode);
@@ -7732,6 +7735,7 @@ class Optimizer extends ASTVisitor {
 		newLoop.test = originalLoop.test;
 		newLoop.update = originalLoop.update;
 		newLoop.body = originalLoop.body;
+		newLoop.scope = originalLoop.scope;
 		// Shallow copy only!!!
 		
 		// 修改初始化部分：将循环变量设置为已完成的迭代后的值
@@ -7792,6 +7796,7 @@ class Optimizer extends ASTVisitor {
 		packer.statements.push(assigner);
 		packer.statements.push(originalLoop);
 		assigner.parent = packer;
+		packer.scope = ident.scope = numeric.scope = assigner.scope = originalLoop.scope;
 		originalLoop.parent = packer;
 		originalLoop.setAttribute('confirmedSideEffects', true);
 		return packer;
@@ -8441,7 +8446,11 @@ class Optimizer extends ASTVisitor {
 				return true;
 			case 'Identifier':
 				if (node.name.length > 0 && node.name[0] === '@') return true;
-				const scopePath = selectedScope.lookupScopeOf(node.name).getPath();
+				const scopeInfo = selectedScope.lookupScopeOf(node.name);
+				if (!scopeInfo) {
+					return true;	// Cannot get information
+				}
+				const scopePath = scopeInfo.getPath();
 				const variableUses = this.variableUses.get(scopePath);
 				const variableState = variableUses.get(node.name);
 				if (variableState && (!variableState.canOptimize)) {
@@ -8969,6 +8978,7 @@ class Optimizer extends ASTVisitor {
 
     shouldInlineFunction(funcName) {
         const info = this.functionInfo.get(funcName);
+		if (funcName === 'main') return false;
         if (!info || !info.node.body) return false;
 		if (!info.canInline) return false;
 		if (this.hasSideEffects(info.node.body, {
