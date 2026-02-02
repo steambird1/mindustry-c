@@ -2,13 +2,11 @@
 
 ## What is Mindustry-C?
 
-**NOTICE: Currently, works are still in progress.**
-
 ## Current Plan
 
 Incomplete parts:
 
-- Comprehensive testing (will be done after my upcoming January gaokao)
+- Comprehensive testing (will be done as I occasionally use it)
 
 ----
 
@@ -68,9 +66,11 @@ Following functions **rely on** memory allocation:
 - Any `struct` or `union`
 - Any array
 
+If functions aren't called recursively, they does not take up memory space.
+
 A pointer takes up 2 units of spaces, respectively storing the memory cell and address of the element it points to.
 
-Using heap memory might be costly. Avoid declaring memory-demanding variables (listed above) in non-main functions (place them in global scope instead).
+Using heap memory might be costly. Avoid declaring memory-demanding variables (listed above) in non-main functions (place them in global scope instead). It is also **strongly** recommended to prevent using recursive functions. They are supported but unstable and costly as the compiler is unsure about every variable's state.
 
 Arrays might also take up additional spaces to store its previous/next cell of storage. Designing memory structure for this strange "cyber-" hardware is hard.
 
@@ -79,10 +79,9 @@ Arrays might also take up additional spaces to store its previous/next cell of s
 ### Specialized for Mindustry
 
 - Use `auto device conveyor1;` to register a connected device (**`auto` is essential**).
-- Use `(volatile int*)` (or similar) to force to transmit registry variables to some functions (reserved for builtin calls).
+- Use `(volatile int*)` (or similar) to force to transmit registry variables to some functions (for builtin calls, especially `ulocate`).
 - Function pointers must have a `typedef` declared.
 
 ### Different from C/C++
 
 - Initializer lists should be unwrapped (or, an initializer list will be considered a preprocessed pointer literal).
-- Structs delivered in parameters are **by reference instead of by value** (given that it can be costly to copy anything in Mindustry).
