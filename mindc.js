@@ -3612,6 +3612,7 @@ class SymbolEntry {
 
 		this.isAutoDevice = false;
 		this.isVirtualSymbol = false;
+		this.isRecursiveSymbol = false;
 		// (for struct, union, pointer and array)
 
         this.isGlobal = false;
@@ -4351,7 +4352,7 @@ class SemanticAnalyzer extends ASTVisitor {
 		}
 		
 		for (let i = 0; i < ptrSize; i++) {
-			const ptrType = new TypeInfo('', 'pointer', '2');
+			const ptrType = new TypeInfo('', 'pointer', 2);
 			ptrType.pointerTo = result;
 			result = ptrType;
 		}
@@ -10987,6 +10988,25 @@ class FunctionRegisterer {
 		const header = memoryState.getAssignmentInstruction('__stackframe');
 		return header;
 	}
+
+	getFunctionStackStorage(functionName) {
+		const func = this.functionCollection.get(functionName);
+		return new Instruction(func.stackSymbols.flatMap(
+			symbol => {
+				if (symbol.name === '__stackpos') return [];
+				if (symbol.implementAsPointer) {
+					return [
+						this.memoryObject.outputPointerStorageOf(`${symbol.getAssemblySymbol()}.__pointer`, `${symbol.getAssemblySymbol()}_block`),
+						this.memoryObject.outputPointerForwardCall(1, `${symbol.getAssemblySymbol()}.__pointer`, this, false, false),
+						this.memoryObject.outputPointerStorageOf('__ptr', `${symbol.getAssemblySymbol()}_pos`)
+					];
+				} else {
+					return [this.memoryObject.outputPointerStorageOf(`${symbol.getAssemblySymbol()}.__pointer`, symbol.getAssemblySymbol())];
+				}
+				
+			}
+		));
+	}
 	
 	getFunctionStackRollback(functionName) {
 		const totalStackframeSize = this.functionCollection.get(functionName).stackTotal;
@@ -11043,6 +11063,11 @@ class FunctionRegisterer {
 					} else {
 						temp.concat(this.memoryObject.outputPointerFetchOf(`${stackPositionPointer}.__pointer`, '__internal_stackpos'));
 					}
+					// Requires something more for resetting
+					refFunction.stackSymbols.forEach(symb => {
+						if (symb.name === '__stackpos') return;	// Already considered
+						temp.concat(this.memoryObject.outputPointerFetchOf(`${symb.getAssemblySymbol()}.__pointer`, symb.getAssemblySymbol()));
+					});
 					return temp;
 				};
 
@@ -11090,6 +11115,7 @@ class FunctionRegisterer {
 	 * 
 	 * @param {string} functionName
 	 * @returns {Instruction}
+	 * @remarks This rollback is also used for default function returning!
 	 */
 	getRollbackCall(functionName) {
 		const func = this.functionCollection.get(functionName);
@@ -11101,6 +11127,23 @@ class FunctionRegisterer {
 			InstructionBuilder.set('__set_stackpos', 'false'),
 			InstructionBuilder.op('add', '__builtin_return_pos', '@counter', 1),
 			InstructionBuilder.set('@counter', `_${functionName}__builtin_mem`)
+		]);
+	}
+
+	/**
+	 * 
+	 * @param {string} functionName
+	 * @returns {Instruction}
+	 */
+	getPreservationCall(functionName) {
+		const func = this.functionCollection.get(functionName);
+		if (!func.recursive) {
+			throw new InternalGenerationFailure(`Function ${functionName} does not support recursive call`);
+		}
+		// This is a CALL insteaad of a output
+		return new Instruction([
+			InstructionBuilder.op('add', '__builtin_return_pos', '@counter', 1),
+			InstructionBuilder.set('@counter', `_${functionName}__builtin_prsv`)
 		]);
 	}
 
@@ -11152,11 +11195,18 @@ class FunctionRegisterer {
 						// builtin_mem
 						const stkJumper = InstructionBuilder.jump('{stkjump}', 'equal', '__set_stackpos', 'true');
 						result.concat(stkJumper);
-						result.concat(this.getFunctionStackRollback(name));
+						result.concat(this.getFunctionStackRollback(name));				// When resetting
 						result.concat(new InstructionReferrer(stkJumper, 'stkjump'));
-						result.concat(this.getFunctionStackAssignment(name, null));	
+						result.concat(this.getFunctionStackAssignment(name, null));		// When setting
 						result.concat(InstructionBuilder.set('@counter', '__builtin_return_pos'));
 						result.concat(new InstructionReferrer(tmpSetter, 'retpos'));
+						// Another function: builtin stack preservation
+						const skipPrsv = InstructionBuilder.jump('{noprsv}', 'always');
+						result.concat(InstructionBuilder.op('add', `_${name}__builtin_prsv`, '@counter', 1));
+						result.concat(skipPrsv);
+						result.concat(this.getFunctionStackStorage(name));
+						result.concat(InstructionBuilder.set('@counter', '__builtin_return_pos'));
+						result.concat(new InstructionReferrer(skipPrsv, 'noprsv'));
 						return result;
 					})()
 				) : this.getFunctionStackAssignment(name, true);
@@ -11548,7 +11598,9 @@ class MemoryManager {
 			process.concat(InstructionBuilder.set(variable + '_pos', this.reservedSize));
 			process.concat(InstructionBuilder.set(variable + '_block', `${this.memoryBlocks[0].name}_id`));
 		}
-		const caller = funcReg.getFunctionCall('__pointerForward', new Map([["__ptrpos", variable + '_pos'], ["__ptrblock", variable + '_block'], ["__step", step]]), this);
+		let caller;
+		caller = funcReg.getFunctionCall('__pointerForward', new Map([["__ptrpos", variable + '_pos'], ["__ptrblock", variable + '_block'], ["__step", step]]), this);
+		// TODO: Special calls when step === 1
 		if (doSet) {
 			caller.concat(InstructionBuilder.set(variable + '_pos', "__ptrpos"));
 			caller.concat(InstructionBuilder.set(variable + '_block', "__ptrblock"));
@@ -11678,6 +11730,7 @@ class CodeGenerator extends ASTVisitor {
 		this.functionCallGraph = compiler.optimizer.functionCallGraph;
 		this.registryId = 0;
 		this.registrySymbolId = 0;
+		this.registryPointerSymbolId = 0;
 		this.temporarySpaceId = 0;
         this.outputCode = new Instruction();
 		this.memory = new MemoryManager(compiler.memoryInfo);
@@ -11758,11 +11811,13 @@ class CodeGenerator extends ASTVisitor {
 	 * (These can be used simultaneously)
 	 */
 	processHeapMemory(scope, staticAllocOnly = false, mustAlloc = false, insideFunctionName = "") {
+		/*
 		if (scope.astNode && scope.astNode.type === 'FunctionDeclaration') {
 			if (this.recuriveInfo.has(scope.astNode.name)) {
 				mustAlloc = true;
 			}
 		}
+			*/
 		scope.getAllSymbols().forEach(
 			/**
 			 * 
@@ -11924,10 +11979,19 @@ class CodeGenerator extends ASTVisitor {
 		if (symbol.implementAsPointer) {
 			//throw new InternalGenerationFailure(`Pointer can't be directly written: ${symbol.name}`);
 			if (symbol.accessThroughPointer) {
-				return new Instruction([
-					this.memory.outputStorageOf(symbol.memoryLocation, hasTemplate ? `{${hasTemplate}_block_entry}` : `${data}_block`),
-					this.memory.outputStorageOf(symbol.memoryLocation.duplicate().forwarding(1), hasTemplate ? `{${hasTemplate}_pos_entry}` :`${data}_pos`)
-				]);
+				if (symbol.memoryLocation) {
+					return new Instruction([
+						this.memory.outputStorageOf(symbol.memoryLocation, hasTemplate ? `{${hasTemplate}_block_entry}` : `${data}_block`),
+						this.memory.outputStorageOf(symbol.memoryLocation.duplicate().forwarding(1), hasTemplate ? `{${hasTemplate}_pos_entry}` :`${data}_pos`)
+					]);
+				} else {
+					return new Instruction([
+						this.memory.outputPointerStorageOf(`${symbol.getAssemblySymbol()}.__pointer`, `${data}_block`),
+						this.memory.outputPointerForwardCall(1, `${symbol.getAssemblySymbol()}.__pointer`, this.functionManagement,
+							false, false),
+						this.memory.outputPointerStorageOf('__ptr', `${data}_pos`)
+					]);
+				}
 			} else {
 				return new Instruction([
 					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_block`, hasTemplate ? `{${hasTemplate}_block_entry}` : `${data}_block`),
@@ -13265,7 +13329,7 @@ class CodeGenerator extends ASTVisitor {
 	visitFunctionCall(node) {
 		const referrer = typeName => typeName.slice(0, typeName.length - 2);
 		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
-		
+		const recursive = this.recuriveInfo.has(this.currentFunction);
 		let result = new Instruction();
 		// Prepare for all parameters
 		let relevantFunction = node.callee ? node.callee.symbol : null, isFunctionPointer = false;
@@ -13275,6 +13339,9 @@ class CodeGenerator extends ASTVisitor {
 		}
 		if (!relevantFunction) {
 			throw new InternalGenerationFailure(`Unknown function ${node.callee ? node.callee.name : '<error-function>'}`);
+		}
+		if (recursive) {
+			result.concat(this.functionManagement.getPreservationCall(this.currentFunction));
 		}
 		//let paramDelivery = new Map();
 		for (let i = 0; i < relevantFunction.type.parameters.length && i < node.arguments.length; i++) {
@@ -13326,7 +13393,6 @@ class CodeGenerator extends ASTVisitor {
 
 		// If recursive:
 		// (The position will be otherwise incorrect!!!)
-		const recursive = this.recuriveInfo.has(this.currentFunction);
 		if (recursive) {
 			// Restore all information (by rolling back and then forward)
 			result.concat(this.functionManagement.getRollbackCall(this.currentFunction));
@@ -13821,6 +13887,7 @@ class CodeGenerator extends ASTVisitor {
 	 * @param {string | null} [kind=null] 
 	 * @param {TypeInfo | null} [type=null] 
 	 * @remark Visit comes first, so the symbols will be added normally!
+	 * @remark Notice: there's no "naturally-in-memory" symbol now as they are costly.
 	 * @returns {SymbolEntry}
 	 */
 	getTempSymbol(type = null, kind = null) {
@@ -13831,7 +13898,9 @@ class CodeGenerator extends ASTVisitor {
 		if (!kind) {
 			kind = symbolType.kind;
 		}
-		let symbol = new SymbolEntry(`__tempsym_${this.registrySymbolId++}`, symbolType, this.currentScope, kind, null, symbolType.size);
+		const isPointer = kind === 'pointer';
+		let symbol = new SymbolEntry(`__tempsym_${isPointer ? `ptr_${this.registryPointerSymbolId++}` : this.registrySymbolId++}`, symbolType, this.currentScope, kind, null, symbolType.size);
+
 		symbol.isVirtualSymbol = true;
 		// The only thing necessary is to restore them after function's exiting
 		if (this.currentScope) {
@@ -13839,8 +13908,9 @@ class CodeGenerator extends ASTVisitor {
 		}
 
 		if (this.recuriveInfo.has(this.currentFunction)) {
-			symbol.accessThroughPointer = true;
-			symbol.needMemoryAllocation = true;
+			//symbol.accessThroughPointer = true;
+			//symbol.needMemoryAllocation = true;
+			symbol.isRecursiveSymbol = true;
 			let sTarget = this.functionManagement.functionCollection.get(this.currentFunction).stackSymbols;
 			/*if (!sTarget.map(symb => symb.describe()).includes(symbol.describe())) {
 				sTarget.push(symbol);
@@ -13860,6 +13930,7 @@ class CodeGenerator extends ASTVisitor {
 
 	releaseTempSymbol() {
 		this.registrySymbolId = 0;
+		this.registryPointerSymbolId = 0;
 	}
 
 	getTempSpace() {
