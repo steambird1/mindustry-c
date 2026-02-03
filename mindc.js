@@ -13484,11 +13484,11 @@ class CodeGenerator extends ASTVisitor {
 		 * @returns 
 		 */
 		const packer = (prefix, params, hasReturnAs = null, parameterSize = -1) => {
-			let varNames = [];
+			let varNames = [], vid = 0;
 			let result = new Instruction(params.map(
 				/**
 				 * 
-				 * @param {AstNode} ast 
+				 * @param {ASTNode} ast 
 				 * @returns {Instruction}
 				 * @remark The implicit convertor is actually hardly used!
 				 */
@@ -13502,7 +13502,8 @@ class CodeGenerator extends ASTVisitor {
 					} else {
 						fetcher = this.visitAndRead(ast);
 					}
-					varNames.push(fetcher.instructionReturn);
+					//varNames.push(fetcher.instructionReturn);
+					varNames.push(`{op_r${vid++}}`);
 					return fetcher;
 				}
 			));
@@ -13514,10 +13515,13 @@ class CodeGenerator extends ASTVisitor {
 			for (let i = varNames.length; i < parameterSize; i++) {
 				varNames.push('x');	// null filler
 			}
-			result.concat(new SingleInstruction({
-				content: prefix + ' ' + varNames.join(' '),
-				referrer: []
-			}));
+			result = this.operatesReads(
+				result.instructions,
+				new SingleInstruction({
+					content: prefix + ' ' + varNames.join(' '),
+					referrer: []
+				})
+			);
 			if (hasReturnAs) {
 				const returnSymbol = this.getTempSymbol(hasReturnAs);
 				result = this.operates(result, returnSymbol);
@@ -13527,21 +13531,25 @@ class CodeGenerator extends ASTVisitor {
 		};
 
 		const opProcesser = (name, params, parameterSize = 2) => {
-			let varNames = [];
+			let varNames = [], vid = 0;
 			let result = new Instruction(params.map(ast => {
 				const fetcher = this.visitAndRead(ast);
-				varNames.push(fetcher.instructionReturn);
+				//varNames.push(fetcher.instructionReturn);
+				varNames.push(`{op_r${vid++}}`);
 				return fetcher;
 			}));
 			let returner = this.getTempSymbol();//this.getTempVariable();
 			for (let i = varNames.length; i < parameterSize; i++) {
 				varNames.push('x');	// null filler
 			}
-			result.concat(this.operates(
+			result = (this.operates(
+				this.operatesReads(
+					result.instructions,
 					new SingleInstruction({
-					content: `op ${name} {op} ${varNames.join(' ')}`,
-					referrer: []
-				}), returner
+						content: `op ${name} {op} ${varNames.join(' ')}`,
+						referrer: []
+					})
+				), returner
 			));
 			result.set_returns(returner);
 			return result;
