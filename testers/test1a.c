@@ -31,23 +31,8 @@ void main() {
    w = 5;
    r = 0;
    t = 0;
-   if (r + 1) {
-	int q = w*3, i;
-	tester.q = subcall(q, w);
-	if (q) {
-		w++;
-	}
-	for (i = 0; i < w; i++) {
-		while (r % 5) {
-			r++;
-		}
-		t++;
-		if (t == 114) {
-			break;
-		}
-	}
-    testptr = &tester;
-   }
+   int q = 15;
+   tester.q = subcall(q, w);
    
    wp = &tester.q;
    (*wp) = 1919810;

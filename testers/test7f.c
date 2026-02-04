@@ -10,4 +10,5 @@ void main() {
      i++;
    }
    test += foo(5,6);
+   print(test);
 }
