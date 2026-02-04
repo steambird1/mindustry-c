@@ -44,7 +44,7 @@ Here provides a short reference table for some of the useful functions:
 | `void ubind(content_t type)` | Bind a unit |
 | ... | |
 
-(*More descriptions are coming soon!*)
+(Refer to [this](https://github.com/steambird1/mindustry-c/blob/main/docs/TYPES_AND_FUNCTIONS.md) to learn more.)
 
 ## Major Differences
 
