@@ -1465,7 +1465,12 @@ class Lexer {
 
 // 语法分析器
 class Parser {
-    constructor(lexer) {
+	/**
+	 * 
+	 * @param {Lexer} lexer 
+	 * @param {AttributeClass} config 
+	 */
+    constructor(lexer, config = new AttributeClass()) {
         this.lexer = lexer;
         this.tokens = [];
         this.currentTokenIndex = 0;
@@ -1476,7 +1481,7 @@ class Parser {
         this.knownTypeNames = new Set([
             'int', 'char', 'float', 'void', 'double', 'long', 'short',
             'signed', 'unsigned', 'device', 'null_t', 'content_t',
-			'item_t', 'liquid_t', 'unit_t', 'block_t'
+			'item_t', 'liquid_t', 'unit_t', 'block_t', ...(config.getAttribute('extraTypes') ?? [])
         ]);
     }
 
@@ -4093,7 +4098,7 @@ class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'jump', returnType: 'void', parameters: [], hasVarArgs: true, special: 'jump' }, // 特殊处理
 			{ name: 'read', returnType: 'void', parameters: [], special: 'read'}, // 特殊处理
 			{ name: 'write', returnType: 'void', parameters: [], special: 'write'}, // 特殊处理
-			{ name: 'ubind', returnType: 'void', parameters: ['int']},
+			{ name: 'ubind', returnType: 'void', parameters: ['content_t']},
 			{ name: 'ucontrol', returnType: 'void', parameters: [], hasVarArgs: true},
 			{ name: 'uradar', returnType: 'device', parameters: ['char', 'char', 'char', 'char', 'int', 'int'] },
 			{ name: 'ulocate', returnType: 'int', parameters: [], hasVarArgs: true},
@@ -7968,6 +7973,11 @@ class Optimizer extends ASTVisitor {
         this.traverseAndReplaceConstants(scope.astNode, localConstants);
     }
 
+	/**
+	 * 
+	 * @param {number | boolean | string | extBuiltinConstant} value 
+	 * @returns 
+	 */
 	getLiteral(value) {
 		if (typeof value === 'number' || typeof value === 'boolean') {
 			const result = ASTBuilder.numericLiteral(value);
@@ -7977,6 +7987,14 @@ class Optimizer extends ASTVisitor {
 			const result = ASTBuilder.stringLiteral(value);
 			result.dataType = this.typeTable.get('char');
 			return result;
+		} else if (typeof value === 'object') {
+			if (value.isBuiltinConstant) {
+				const result = ASTBuilder.identifier(value.name);
+				result.dataType = this.typeTable.get('content_t');
+				return result;
+			} else {
+				return null;
+			}
 		} else if (value == null) {
 			const result = ASTBuilder.nullLiteral();
 			result.dataType = this.typeTable.get('null_t');
@@ -8277,13 +8295,18 @@ class Optimizer extends ASTVisitor {
     // =============== 辅助方法 ===============
 
 	/**
+	 * @typedef {{
+	 * 	isBuiltinConstant: boolean,
+	 *  category: string,
+	 *  name: string
+	 * }} extBuiltinConstant
+	 * 
+	 */
+	/**
 	 * 
 	 * @param {ASTNode} node 
 	 * @param {boolean} [allowConstants=true] Whether to allow builtin constants to be regarded as constants
-	 * @returns {number | string | {
-	 * 	isBuiltinConstant: boolean,
-	 *  category: string
-	 * }}
+	 * @returns {number | string | extBuiltinConstant}
 	 */
     evaluateConstantExpression(node, allowConstants = true) {
         if (!node) return undefined;
@@ -8297,8 +8320,9 @@ class Optimizer extends ASTVisitor {
 				if (node.name[0] === '@' && allowConstants) {
 					// Regard this as a constant value...
 					return {
-						isBuiltinContent: true,
-						category: ConstantManager.categorize(node.name)
+						isBuiltinConstant: true,
+						category: ConstantManager.categorize(node.name),
+						name: node.name
 					};
 				}
 				if (scope != null) {
@@ -13979,21 +14003,63 @@ class CodeGenerator extends ASTVisitor {
     
 }
 
+// This function is in progress, and won't be done until I figure out how
+// dependencies work in browsers on earth
+/**
+ * @deprecated Unsupported currently!
+ */
+class CompilerExtensionBase {
+	/**
+	 * 
+	 * @typedef {{
+	 * 		name: string,
+	 * 		returnType: string,
+	 * 		parameters: string[],
+	 * 		hasVarArgs: boolean | undefined,
+	 * 		special: string | null | undefined
+	 * }} addinFunctionInfo
+	 */
+	/**
+	 * @callback codeGenerationCallback
+	 * @param {CodeGenerator} codeGenerationInst
+	 * @param {BuiltinCallNode} callNode
+	 * @returns {Instruction}
+	 */
+	/** 
+	 * 
+	 * @param {Map<string, TypeInfo>} types 
+	 * @param {Map<string, addinFunctionInfo>} functions 
+	 * @param {Map<string, codeGenerationCallback>} handlers
+	 */
+	constructor(types, functions, handlers) {
+		this.types = types;
+		this.functions = functions;
+		this.handlers = handlers;
+	}
+}
+
 // 主编译器接口
 class Compiler {
 	/**
 	 * 
 	 * @param {List<Object>} memoryInfo 
 	 * @param {AttributeClass} config 
+	 * @param {CompilerExtensionBase[]} extensions (Currently not working!!!)
 	 */
-    constructor(sourceCode, memoryInfo, config) {
+    constructor(sourceCode, memoryInfo, config, extensions = []) {
+
+		const exTypeNames = extensions.flatMap(ext => [...ext.types].map(([name, type]) => name));
+		let parserConfig = new AttributeClass();
+		parserConfig.setAttribute('extraTypes', exTypeNames);
+
 		this.memoryInfo = memoryInfo;
 		this.config = config ?? new AttributeClass();
         this.lexer = new Lexer(sourceCode);
-        this.parser = new Parser(this.lexer);
+        this.parser = new Parser(this.lexer, parserConfig);
         this.semanticAnalyzer = new SemanticAnalyzer(this);
         this.optimizer = new Optimizer(this);
         this.codeGenerator = new CodeGenerator(this);
+		this.extensions = extensions;
     }
     
     compile() {
@@ -14061,51 +14127,63 @@ class Compiler {
 }
 
 // 导出主要接口
-// Not done now
-// NO LONGER USED (1 Dec)
-if (false) {
-	module.exports = {
-		Compiler,
-		C89ToMindustryCompiler,
-		BuiltinFunctionHandler,			/* From then on: merged in 2nd conv (AST Tree). */
-		ASTNodeType,
-		ASTNode,
-		ProgramNode,
-		FunctionDeclarationNode,
-		FunctionCallNode,
-		BuiltinCallNode,
-		VariableDeclarationNode,
-		VariableDeclaratorNode,
-		BinaryExpressionNode,
-		UnaryExpressionNode,
-		AssignmentExpressionNode,
-		LogicalExpressionNode,
-		ConditionalExpressionNode,
-		IfStatementNode,
-		WhileStatementNode,
-		ForStatementNode,
-		ReturnStatementNode,
-		CompoundStatementNode,
-		IdentifierNode,
-		NumericLiteralNode,
-		StringLiteralNode,
-		CharacterLiteralNode,
-		NullLiteralNode,
-		TypeSpecifierNode,
-		AsmStatementNode,
-		ASTBuilder,
-		ASTVisitorm,					/* From then on: merged in 3rd conv (Lexer) */
-		TokenType,
-		Token,
-		Lexer,
-		KEYWORDS,
-		SPECIAL_INSTRUCTIONS,
-		OPERATORS,
-		PUNCTUATORS,
-		Parser,							/* merged in 4nd conv (Parser) */
-		SemanticAnalyzer,
-		SymbolEntry,
-		Scope,
-		Optimizer
-	};
-}
+/*
+export default {
+	Compiler,
+	ASTNode,
+	ProgramNode,
+	FunctionDeclarationNode,
+	FunctionCallNode,
+	BuiltinCallNode,
+	VariableDeclarationNode,
+	VariableDeclaratorNode,
+	BinaryExpressionNode,
+	UnaryExpressionNode,
+	AssignmentExpressionNode,
+	LogicalExpressionNode,
+	ConditionalExpressionNode,
+	IfStatementNode,
+	WhileStatementNode,
+	ForStatementNode,
+	ReturnStatementNode,
+	CompoundStatementNode,
+	IdentifierNode,
+	NumericLiteralNode,
+	StringLiteralNode,
+	CharacterLiteralNode,
+	NullLiteralNode,
+	TypeSpecifierNode,
+	TypedefDeclarationNode,
+	StructDefinitionNode,
+	UnionDefinitionNode,
+	StructMemberNode,
+	TypeQualifierNode,
+	AsmStatementNode,
+	PointerTypeNode,
+	DeclaratorNode,
+	ASTBuilder,
+	ASTVisitor,					// From then on: merged in 3rd conv (Lexer)
+	TokenType,
+	Token,
+	Lexer,
+	KEYWORDS,
+	SPECIAL_INSTRUCTIONS,
+	OPERATORS,
+	PUNCTUATORS,
+	Parser,							// merged in 4nd conv (Parser)
+	SemanticAnalyzer,
+	TypeInfo,
+	SymbolEntry,
+	Scope,
+	Optimizer,
+	MemoryBlock,
+	MemoryBlockInfo,
+	MemoryManager,
+	FunctionRegisterer,
+	BuildingLinker,
+	Instruction,
+	InstructionBuilder,
+	SingleInstruction,
+	CodeGenerator
+};
+*/
