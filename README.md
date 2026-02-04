@@ -41,11 +41,11 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
 
 - Memory mapping (adjusted outside the code)
 
-- Function call stack (whose size can be adjusted)
+- Function call stack
 
 - Mindustry "system calls"
-  - Building control (interfaces reserved)
-  - Unit control (to be done)
+  - Building control
+  - Unit control
 
 - Direct "assembly" insertion
 
@@ -64,7 +64,7 @@ Following functions **rely on** memory allocation:
 - Any `volatile` variable
 - Any variable that has address (`&var`)
 - Any `struct` or `union`
-- Any array
+- Any array (If you don't want to use memory but still want arrays, refer to documents to look for possible alternatives.)
 
 If functions aren't called recursively, they does not take up memory space.
 
@@ -74,7 +74,7 @@ Using heap memory might be costly. Avoid declaring memory-demanding variables (l
 
 Arrays might also take up additional spaces to store its previous/next cell of storage. Designing memory structure for this strange "cyber-" hardware is hard.
 
-## Special Grammar
+## An Overview of Special Grammar
 
 ### Specialized for Mindustry
 
@@ -84,4 +84,4 @@ Arrays might also take up additional spaces to store its previous/next cell of s
 
 ### Different from C/C++
 
-- Initializer lists should be unwrapped (or, an initializer list will be considered a preprocessed pointer literal).
+- Initializer lists are recommended to be unwrapped and must be **non-empty (or the compiler will crash!)**.
