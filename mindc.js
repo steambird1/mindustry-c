@@ -1069,6 +1069,52 @@ const PUNCTUATORS = {
     '?': TokenType.QUESTION
 };
 
+/**
+ * 
+ * @param {string} s 
+ */
+const __convert = s => s.split(',').map(t => t.trim());
+const objectList = __convert(
+	'@copper, @lead, @coal, @graphite, @scrap, @sand, @pyratite, @silicon, @spore-pod, @blast-compound, @titanium, @plastanium, @thorium, @phase-fabric, @surge-alloy, @beryllium, @tungsten, @oxide, @carbide'
+);
+const liquidList = __convert(
+	'@water, @slag, @oil, @cryofluid, @neoplasm, @gallium, @ozone, @hydrogen, @cyanogen, @nitrogen'
+);
+const unitList = __convert(
+	'@Aegires, @Alpha, @Anthicus, @Antumbra, @Arkyid, @Atrax, @Avert, @Beta, @Bryde, @Cleroi, @Collaris, @Conquer, @Corvus, @Crawler, @Cyerce, @Dagger, @Disrupt, @Eclipse, @Elude, @Emanate, @Evoke, @Flare, @Fortress, @Gamma, @Guardian, @Horizon, @Incite, @Latum, @Locus, @Mace, @Manifold, @Mega, @Merui, @Minke, @Mono, @Navanax, @Nova, @Obviate, @Oct, @Omura, @Oxynoe, @Poly, @Precept, @Pulsar, @Quad, @Quasar, @Quell, @Reign, @Renale, @Retusa, @Risso, @Scepter, @Sei, @Spiroct, @Stell, @Tecta, @Toxopid, @Vanquish, @Vela, @Zenith'
+).map(s => s.toLowerCase());
+const buildingList = __convert(
+	[
+		'@core-shard, @core-foundation, @core-nucleus, @core-bastion, @core-acropolis',
+		'@mechanical-drill, @pneumatic-drill, @laser-drill, @blast-drill, @water-extractor, @cultivator, @oil-extractor',
+		'@conveyor, @titanium-conveyor, @plastanium-conveyor, @armored-conveyor, @junction, @bridge-conveyor, @phase-conveyor, @sorter, @inverted-sorter, @router, @distributor, @overflow-gate, @underflow-gate, @mass-driver',
+		'@conduit, @pulse-conveyor, @plated-conveyor, @rotary-pump, @thermal-pump, @conduit, @pipeline, @plated-pipeline, @liquid-router, @liquid-tank, @liquid-junction, @bridge-conduit, @phase-conveyor',
+		'@combustion-generator, @thermal-generator, @steam-generator, @differential-generator, @rtg-generator, @solar-panel, @large-solar-panel, @thorium-reactor, @impact-reactor, @battery, @large-battery, @power-node, @power-node-large, @surge-tower, @diode',
+		'@copper-wall, @large-copper-wall, @titanium-wall, @large-titanium-wall, @durium-wall, @large-durium-wall, @thorium-wall, @large-thorium-wall, @phase-wall, @large-phase-wall, @surge-wall, @large-surge-wall, @door, @large-door, @mender, @mend-projector, @force-projector, @overdrive-projector, @overdrive-dome, @repair-point, @repair-turret',
+		'@duo, @scatter, @scorch, @hail, @arc, @wave, @lancer, @swarmer, @salvo, @fuse, @ripple, @cyclone, @foreshadow, @spectre, @meltdown, @segment, @parallax, @tsunami',
+		'@dagger-factory, @mace-factory, @fortress-factory, @scepter-factory, @reign-factory',
+		'@nova-factory, @pulsar-factory, @quasar-factory, @vela-factory, @corvus-factory',
+		'@crawler-factory, @atrax-factory, @spiroct-factory, @arkyid-factory, @toxopid-factory',
+		'@silicon-smelter, @silicon-smelter2, @silicon-smelter3, @kiln, @plastanium-compressor, @phase-weaver, @surge-smelter, @cryofluid-mixer, @pyratite-mixer, @blast-mixer, @melter, @separator, @disassembler, @spore-press, @pulverizer, @coal-centrifuge, @multi-press',
+		'@container, @vault, @core-shard, @core-foundation, @core-nucleus, @unloader',
+		'@liquid-tank, @conduit, @liquid-router',
+		'@container, @vault, @unloader',
+		'@illuminator, @payload-conveyor, @payload-router, @incinerator, @power-source, @power-void, @item-source, @item-void, @liquid-source, @liquid-void, @payload-source, @payload-void, @message, @switch, @micro-processor, @logic-processor, @hyper-processor, @memory-cell, @memory-bank, @logic-display, @large-logic-display',
+		'@oxidis'
+	].join(',')
+);
+
+
+class ConstantManager {
+	static categorize(token) {
+		if (objectList.includes(token)) return 'object';
+		else if (liquidList.includes(token)) return 'liquid';
+		else if (unitList.includes(token)) return 'unit';
+		else if (buildingList.includes(token)) return 'building';
+		else return 'unknown';
+	}
+}
+
 class Lexer {
     constructor(sourceCode) {
         this.sourceCode = sourceCode;
@@ -4695,37 +4741,6 @@ class SemanticAnalyzer extends ASTVisitor {
 
     visitIdentifier(node) {
 
-		const convert = s => s.split(',').map(t => t.trim());
-		const objectList = convert(
-			'@copper, @lead, @coal, @graphite, @scrap, @sand, @pyratite, @silicon, @spore-pod, @blast-compound, @titanium, @plastanium, @thorium, @phase-fabric, @surge-alloy, @beryllium, @tungsten, @oxide, @carbide'
-		);
-		const liquidList = convert(
-			'@water, @slag, @oil, @cryofluid, @neoplasm, @gallium, @ozone, @hydrogen, @cyanogen, @nitrogen'
-		);
-		const unitList = convert(
-			'@Aegires, @Alpha, @Anthicus, @Antumbra, @Arkyid, @Atrax, @Avert, @Beta, @Bryde, @Cleroi, @Collaris, @Conquer, @Corvus, @Crawler, @Cyerce, @Dagger, @Disrupt, @Eclipse, @Elude, @Emanate, @Evoke, @Flare, @Fortress, @Gamma, @Guardian, @Horizon, @Incite, @Latum, @Locus, @Mace, @Manifold, @Mega, @Merui, @Minke, @Mono, @Navanax, @Nova, @Obviate, @Oct, @Omura, @Oxynoe, @Poly, @Precept, @Pulsar, @Quad, @Quasar, @Quell, @Reign, @Renale, @Retusa, @Risso, @Scepter, @Sei, @Spiroct, @Stell, @Tecta, @Toxopid, @Vanquish, @Vela, @Zenith'
-		).map(s => s.toLowerCase());
-		const buildingList = convert(
-			[
-				'@core-shard, @core-foundation, @core-nucleus, @core-bastion, @core-acropolis',
-				'@mechanical-drill, @pneumatic-drill, @laser-drill, @blast-drill, @water-extractor, @cultivator, @oil-extractor',
-				'@conveyor, @titanium-conveyor, @plastanium-conveyor, @armored-conveyor, @junction, @bridge-conveyor, @phase-conveyor, @sorter, @inverted-sorter, @router, @distributor, @overflow-gate, @underflow-gate, @mass-driver',
-				'@conduit, @pulse-conveyor, @plated-conveyor, @rotary-pump, @thermal-pump, @conduit, @pipeline, @plated-pipeline, @liquid-router, @liquid-tank, @liquid-junction, @bridge-conduit, @phase-conveyor',
-				'@combustion-generator, @thermal-generator, @steam-generator, @differential-generator, @rtg-generator, @solar-panel, @large-solar-panel, @thorium-reactor, @impact-reactor, @battery, @large-battery, @power-node, @power-node-large, @surge-tower, @diode',
-				'@copper-wall, @large-copper-wall, @titanium-wall, @large-titanium-wall, @durium-wall, @large-durium-wall, @thorium-wall, @large-thorium-wall, @phase-wall, @large-phase-wall, @surge-wall, @large-surge-wall, @door, @large-door, @mender, @mend-projector, @force-projector, @overdrive-projector, @overdrive-dome, @repair-point, @repair-turret',
-				'@duo, @scatter, @scorch, @hail, @arc, @wave, @lancer, @swarmer, @salvo, @fuse, @ripple, @cyclone, @foreshadow, @spectre, @meltdown, @segment, @parallax, @tsunami',
-				'@dagger-factory, @mace-factory, @fortress-factory, @scepter-factory, @reign-factory',
-				'@nova-factory, @pulsar-factory, @quasar-factory, @vela-factory, @corvus-factory',
-				'@crawler-factory, @atrax-factory, @spiroct-factory, @arkyid-factory, @toxopid-factory',
-				'@silicon-smelter, @silicon-smelter2, @silicon-smelter3, @kiln, @plastanium-compressor, @phase-weaver, @surge-smelter, @cryofluid-mixer, @pyratite-mixer, @blast-mixer, @melter, @separator, @disassembler, @spore-press, @pulverizer, @coal-centrifuge, @multi-press',
-				'@container, @vault, @core-shard, @core-foundation, @core-nucleus, @unloader',
-				'@liquid-tank, @conduit, @liquid-router',
-				'@container, @vault, @unloader',
-				'@illuminator, @payload-conveyor, @payload-router, @incinerator, @power-source, @power-void, @item-source, @item-void, @liquid-source, @liquid-void, @payload-source, @payload-void, @message, @switch, @micro-processor, @logic-processor, @hyper-processor, @memory-cell, @memory-bank, @logic-display, @large-logic-display',
-				'@oxidis'
-			].join(',')
-		);
-
 		if (node.name.length && node.name[0] === '@') {
 			if (node.name === '@counter') {
 				this.addWarning(`Deprecated to use @counter inside program`, node.getAttribute('location'));
@@ -8261,7 +8276,16 @@ class Optimizer extends ASTVisitor {
 
     // =============== 辅助方法 ===============
 
-    evaluateConstantExpression(node) {
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 * @param {boolean} [allowConstants=true] Whether to allow builtin constants to be regarded as constants
+	 * @returns {number | string | {
+	 * 	isBuiltinConstant: boolean,
+	 *  category: string
+	 * }}
+	 */
+    evaluateConstantExpression(node, allowConstants = true) {
         if (!node) return undefined;
         
         switch (node.type) {
@@ -8270,6 +8294,13 @@ class Optimizer extends ASTVisitor {
             case 'Identifier':
 				// Try evaluating in current environment
 				const scope = this.currentScope.lookupScopeOf(node.name);
+				if (node.name[0] === '@' && allowConstants) {
+					// Regard this as a constant value...
+					return {
+						isBuiltinContent: true,
+						category: ConstantManager.categorize(node.name)
+					};
+				}
 				if (scope != null) {
 					const scopePath = scope.getPath();
 					const localConstantRef = this.localConstants.get(scopePath).get(node.name);
@@ -12758,6 +12789,9 @@ class CodeGenerator extends ASTVisitor {
 		let contentType = contentTypeGiven;
 		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
 		const referrer = typeName => typeName.slice(0, typeName.length - 2);
+		if (node.type === 'Identifier' && node.name[0] === '@') {
+			return new Instruction([], node.name);
+		}
 		if (node.dataType) {
 			if (!contentType && special.includes(node.dataType.name)) {
 				contentType = referrer(node.dataType.name);
@@ -13944,7 +13978,6 @@ class CodeGenerator extends ASTVisitor {
 	}
     
 }
-
 
 // 主编译器接口
 class Compiler {
