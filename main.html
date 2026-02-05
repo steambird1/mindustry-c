@@ -443,6 +443,7 @@ void main() {
     
     <script>
         // 等待DOM加载完成
+
         document.addEventListener('DOMContentLoaded', function() {
             // 获取关键DOM元素
             const codeInput = document.getElementById('code-input');
@@ -776,7 +777,12 @@ void main() {
                         // 根据 Compiler 类构造函数的参数说明：
                         // 1. sourceCode: C 源代码字符串
                         // 2. memoryInfo: MemoryBlock 对象组成的列表
-                        // 3. config: 始终传入 null
+                        
+                        // Providing an example of compiler extension:
+
+
+                        // End.
+
                         const compiler = new Compiler(code, memoryBlocks, null);
                         
                         // 执行编译

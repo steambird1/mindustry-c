@@ -159,6 +159,7 @@ class CompilationPhase {
 	 */
     constructor(compiler) {
         this.compiler = compiler;
+		this.extraConfig = compiler ? compiler.extraConfig : new AttributeClass();
         this.errors = [];
         this.warnings = [];
     }
@@ -1481,8 +1482,16 @@ class Parser {
         this.knownTypeNames = new Set([
             'int', 'char', 'float', 'void', 'double', 'long', 'short',
             'signed', 'unsigned', 'device', 'null_t', 'content_t',
-			'item_t', 'liquid_t', 'unit_t', 'block_t', ...(config.getAttribute('extraTypes') ?? [])
+			'item_t', 'liquid_t', 'unit_t', 'block_t', ...(config.getAttribute('extraTypes').map(
+				/**
+				 * 
+				 * @param {TypeInfo} type 
+				 * @returns {string}
+				 */
+				type => type.name
+			) ?? [])
         ]);
+		this.extraFunctions = config.getAttribute('extraFunctions') ?? [];
     }
 
     parse() {
@@ -3550,7 +3559,7 @@ class Parser {
 			'draw', 'print', 'drawflush', 'printflush', 'getlink', 'ceil', 'floor', 'sqrt', 'rand', 'abs', 'memcpy',
 			'control', 'radar', 'sensor', 'set', 'op', 'lookup', 'ubind', 'ulocate', 'ucontrol', 'uradar', 'min', 'max',
 			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'adiff',
-			'memsp'
+			'memsp', ...(this.extraFunctions.map(func => func.name))
 		];
         return builtins.includes(name);
     }
@@ -3817,6 +3826,13 @@ class Scope {
 
 // 首先，添加一些辅助类
 class TypeInfo {
+	/**
+	 * 
+	 * @param {string} name 
+	 * @param {string} kind 
+	 * @param {number} size 
+	 * @param {any[] | null} members 
+	 */
     constructor(name, kind, size = 1, members = null) {
         this.name = name; // 类型名称
         this.kind = kind; // 'basic', 'struct', 'union', 'pointer', 'array', 'function', 'device', 'null'
@@ -3889,8 +3905,12 @@ class MemberInfo {
 
 class SemanticAnalyzer extends ASTVisitor {
 	// !! Global scope is being manually established !!
+	/**
+	 * 
+	 * @param {Compiler} compiler 
+	 */
     constructor(compiler = null) {
-        super();
+        super(compiler);
         this.errors = [];
         this.warnings = [];
         this.currentScope = null;
@@ -4065,6 +4085,17 @@ class SemanticAnalyzer extends ASTVisitor {
 			this.typeTable.set(contentTypes, new TypeInfo(contentTypes, 'basic', 1));
 		}
 
+		const extraTypes = this.extraConfig.getAttribute('extraTypes');
+		if (extraTypes) {
+			extraTypes.forEach(
+				/**
+				 * @param {TypeInfo} type 
+				 */
+				type => {
+					this.typeTable.set(type.name, type);
+			});
+		}
+
         // 指针类型的基础（void*）
 		// Pointer has a size of 2 !!
 		/*
@@ -4118,7 +4149,8 @@ class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'abs', returnType: 'float', parameters: ['float']},
 			{ name: 'rand', returnType: 'float', parameters: []},
 			{ name: 'memcpy', returnType: 'void', parameters: ['void*', 'void*', 'unsigned']},
-			{ name: 'memsp', returnType: 'void*', parameters: ['device', 'int']}
+			{ name: 'memsp', returnType: 'void*', parameters: ['device', 'int']},
+			...(this.extraConfig.getAttribute('extraFunctions') ?? [])
 		];
 
         builtins.forEach(func => {
@@ -5776,7 +5808,7 @@ class ContinueException {
 
 class Optimizer extends ASTVisitor {
     constructor(compiler = null) {
-		super();
+		super(compiler);
         this.modified = false;
         this.errors = [];
         this.warnings = [];
@@ -11044,6 +11076,11 @@ class FunctionRegisterer {
 		return header;
 	}
 
+	/**
+	 * Get stack storage of the function.
+	 * WHEN CALLING THIS, IT IS ASSUMED THAT all relevant symbols in the function are "accessThroughPointer".
+	 * @param {string} functionName 
+	 */
 	getFunctionStackStorage(functionName) {
 		const func = this.functionCollection.get(functionName);
 		return new Instruction(func.stackSymbols.flatMap(
@@ -11094,10 +11131,19 @@ class FunctionRegisterer {
 			totalStackframeSize += symbol.size;
 			const memFwdCall = this.getFunctionCall('__stackframe_forward', new Map([['__step', symbol.size]]), null);
 			//memoryObject.outputPointerForwardCall(symbol.size, '__stackframe', this);
-			heapPreparation.concat(new Instruction([
-				InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_block`, '__stackframe_block'),
-				InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_pos`, '__stackframe_pos')
-			]));
+			if (symbol.implementAsPointer && !symbol.accessThroughPointer) {
+				// Already pointer, simply assigning memory space
+				heapPreparation.concat(new Instruction([
+					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_block`, '__stackframe_block'),
+					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_pos`, '__stackframe_pos')
+				]));
+			} else {
+				heapPreparation.concat(new Instruction([
+					InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_block`, '__stackframe_block'),
+					InstructionBuilder.set(`${symbol.getAssemblySymbol()}.__pointer_pos`, '__stackframe_pos')
+				]));
+			}
+			
 			heapPreparation.concat(memFwdCall);
 			if (symbol.name === '__stackpos') {
 				stackPositionPointer = symbol.getAssemblySymbol();
@@ -11744,7 +11790,7 @@ class MemoryManager {
 			InstructionBuilder.getlink('__tgtblock', '__curb'),								// 17
 			InstructionBuilder.set('__tgtpos', this.reservedSize),							// 18
 			InstructionBuilder.op('sub', '__remain', '__remain', 1),						// 19
-			InstructionBuilder.jump('{0}', 'always', null, null, [0])						// 20
+			InstructionBuilder.jump('{0}', 'always', null, null, [2])						// 20
 		]), null, [], true);
 	}
 
@@ -11912,7 +11958,7 @@ class CodeGenerator extends ASTVisitor {
 							break;
 						case 'pointer':
 							symbol.size = 2;
-							symbol.implementAsPointer = true;
+							symbol.implementAsPointer = true;	// There's no need to give them memory space
 							break;
 						case 'array':
 							symbol.implementAsPointer = true;
@@ -12287,8 +12333,8 @@ class CodeGenerator extends ASTVisitor {
 			if (sym.kind !== 'parameter') return [];
 			const paramName = `__param_${paramId++}`;
 			if (sym.type.type.kind === 'struct' || sym.type.type.kind === 'union') {
-				// Must be copied
-				return [this.memory.outputMemcpyCall(`${sym.getAssemblySymbol()}.__pointer`, paramName, sym.type.type.size, this.functionManagement)];
+				// Must be copied (NOTE: They are NOT .__pointer NOw!)
+				return [this.memory.outputMemcpyCall(`${sym.getAssemblySymbol()}`, paramName, sym.type.type.size, this.functionManagement)];
 			}
 			return [this.generateSymbolWrite(sym, paramName)];
 		})));	// Copy the parameters
@@ -13922,6 +13968,17 @@ class CodeGenerator extends ASTVisitor {
 				return new Instruction();
 			}
 		}
+
+		const extra = this.extraConfig.getAttribute('extraHandler') ?? new Map();
+		if (extra.has(node.functionName)) {
+			try {
+				return extra.get(node.functionName)(this, node);
+			} catch (err) {
+				this.addError(err, node.getAttribute('location'));
+				return new Instruction();
+			}
+		}
+
 		this.addWarning(`Calling unimplemented builtin function ${node.functionName} function`, node.location);
 		return new Instruction({
 			content: '{not_implemented}',
@@ -14004,10 +14061,7 @@ class CodeGenerator extends ASTVisitor {
 }
 
 // This function is in progress, and won't be done until I figure out how
-// dependencies work in browsers on earth
-/**
- * @deprecated Unsupported currently!
- */
+// dependencies work in browsers on eart
 class CompilerExtensionBase {
 	/**
 	 * 
@@ -14038,6 +14092,68 @@ class CompilerExtensionBase {
 	}
 }
 
+// Example extension
+// (This is just an example and won't be included in the compiler...)
+/**
+ * @deprecated
+ */
+const exampleExtension = new CompilerExtensionBase(
+	new Map(	// Define types like this
+		[['test_t', new TypeInfo('test_t', 'basic', 1)]]
+		// Note: if you type is larger, it is recommended to label them as struct to enable automatic copying
+	),
+	new Map(	// Declare function signatures like this (they will be regarded as builtin calls!)
+		[['hello', {
+			name: 'hello',
+			returnType: 'int',
+			parameters: ['int', 'int']
+		}]]
+	),
+	new Map(	// Declare builtin call processor like this
+		[['hello', 
+			/**
+			 * 
+			 * @param {CodeGenerator} cg
+			 * @param {BuiltinCallNode} ast 
+			 */
+			(cg, ast) => {
+				return cg.operates(
+					cg.operatesReads(
+						ast.arguments.map(arg => cg.visitAndRead(arg)),
+						InstructionBuilder.op('add', '{op}', '{op_r0}', '{op_r1}')
+					),
+					cg.getTempSymbol(cg.semantic.getTypeInfo('int'))
+				);
+			}
+		]]
+	)
+);
+
+// Here are default extensions
+// THIS IS STILL IN PROGRESS!
+/**
+ * @deprecated
+ */
+const pseudoList = new CompilerExtensionBase(
+	new Map(
+		/**
+		 * pdlist_t: The handler type of pseudo list.
+		 * It is integers (currently) like a function pointer, referring to
+		 * the actual operator.
+		 */
+		[['pdlist_t', new TypeInfo('pdlist_t', 'struct', 2)]]
+	),
+	new Map(
+
+	)
+);
+// End.
+
+/**
+ * @type {CompilerExtensionBase[]}
+ */
+const defaultExtensions = [];
+
 // 主编译器接口
 class Compiler {
 	/**
@@ -14046,11 +14162,27 @@ class Compiler {
 	 * @param {AttributeClass} config 
 	 * @param {CompilerExtensionBase[]} extensions (Currently not working!!!)
 	 */
-    constructor(sourceCode, memoryInfo, config, extensions = []) {
+    constructor(sourceCode, memoryInfo, config, extensions = defaultExtensions) {
 
 		const exTypeNames = extensions.flatMap(ext => [...ext.types].map(([name, type]) => name));
+		const exTypes = extensions.flatMap(ext => [...ext.types].map(([name, type]) => type));
+		const exFuncNames = extensions.flatMap(ext => [...ext.functions].map(([name, func]) => name));
+		const exFuncs = extensions.flatMap(ext => [...ext.functions].map(([name, func]) => func));
+
+		if (exTypeNames.length != new Set(exTypeNames).size) {
+			throw new InternalGenerationFailure('Ambiguous type name in imported extensions');
+		}
+
+		if (exFuncNames.length != new Set(exFuncNames).size) {
+			throw new InternalGenerationFailure('Ambiguous function name in imported extensions');
+		}
+
 		let parserConfig = new AttributeClass();
-		parserConfig.setAttribute('extraTypes', exTypeNames);
+		parserConfig.setAttribute('extraTypes', exTypes);
+		parserConfig.setAttribute('extraFunctions', exFuncs);
+		parserConfig.setAttribute('extraHandler', new Map(extensions.flatMap(ext => [...ext.handlers])));
+
+		this.extraConfig = parserConfig;
 
 		this.memoryInfo = memoryInfo;
 		this.config = config ?? new AttributeClass();
@@ -14127,8 +14259,9 @@ class Compiler {
 }
 
 // 导出主要接口
+
 /*
-export default {
+	export {
 	Compiler,
 	ASTNode,
 	ProgramNode,
