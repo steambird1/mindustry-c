@@ -1,5 +1,9 @@
 import sys
 from typing import Dict, List, Any, Union, Optional
+from collections import deque
+
+# The code has manual changes merged by steambird
+# on 5 Feb.
 
 class MindustryLogicSimulator:
     """
@@ -7,8 +11,10 @@ class MindustryLogicSimulator:
     支持指令: set, op, read, write, jump, end, stop, getlink
     """
     
-    def __init__(self, debug: bool = False, strict_mode: bool = False):
+    def __init__(self, debug: bool = False, strict_mode: bool = False, debug_output_mode: int = 0):
+        self.eptr: int = 0
         self.debug = debug
+        self.debug_output_mode = debug_output_mode  # 调试输出模式: 0=所有变量, 1=最近10条指令变量, 2=当前指令变量
         self.strict_mode = strict_mode  # 严格模式开关
         self.variables: Dict[str, Any] = {}
         self.memory: Dict[str, List[Any]] = {}
@@ -18,6 +24,8 @@ class MindustryLogicSimulator:
         self.pc: int = 0
         self.current_loop: int = 0
         self.running: bool = True
+        self.recent_vars = deque(maxlen=10)  # 记录最近10条指令涉及的变量
+        self.current_vars = set()  # 当前指令涉及的变量
         
     def parse_value(self, token: str) -> Any:
         """解析一个值，可以是数字、null、变量或字符串"""
@@ -27,6 +35,7 @@ class MindustryLogicSimulator:
             return self.pc + 1
         if len(token) and token[0] == "@":
             # 手工添加，与其它部分区分
+            # (by steambird)
             return f"@@special@{token}"
         if token == "true":
             return True
@@ -44,9 +53,13 @@ class MindustryLogicSimulator:
             except ValueError:
                 # 如果是变量名，则返回变量的值
                 if token in self.variables:
+                    # 记录当前指令涉及的变量
+                    # (Manually added!)
+                    self.current_vars.add(token)
                     return self.variables[token]
                 # 否则作为字符串（可能是建筑名）
                 return token
+        
     
     def get_value(self, token: str) -> Any:
         """获取一个值（解析token）"""
@@ -57,6 +70,8 @@ class MindustryLogicSimulator:
         if var_name == "@counter":
             self.pc = int(value) - 1
         self.variables[var_name] = value
+        # 记录当前指令涉及的变量
+        self.current_vars.add(var_name)
     
     def read_memory(self, mem_name: str, index: int) -> Any:
         """从内存建筑读取值"""
@@ -274,8 +289,27 @@ class MindustryLogicSimulator:
                 break
             self.code.append(line)
     
+    def get_debug_variables(self):
+        """根据调试输出模式获取要显示的变量"""
+        if self.debug_output_mode == 0:
+            # 模式0: 输出所有变量
+            return self.variables
+        elif self.debug_output_mode == 1:
+            # 模式1: 输出最近10条指令涉及到的变量
+            recent_vars = set()
+            for var_set in self.recent_vars:
+                recent_vars.update(var_set)
+            return {var: self.variables[var] for var in recent_vars if var in self.variables}
+        elif self.debug_output_mode == 2:
+            # 模式2: 输出当前指令涉及到的变量
+            return {var: self.variables[var] for var in self.current_vars if var in self.variables}
+        else:
+            return self.variables
+    
     def execute_instruction(self, line: str) -> Optional[str]:
         """执行单条指令，返回指令类型或None（如果是end/stop）"""
+        self.current_vars = set()
+        self.eptr += 1
         parts = line.split()
         if not parts:
             return None
@@ -419,6 +453,7 @@ class MindustryLogicSimulator:
             print(f"代码行数: {len(self.code)}")
             print(f"循环次数: {self.loop_count}")
             print(f"严格模式: {self.strict_mode}")
+            print(f"调试状态：{self.debug_output_mode}")
             print("=" * 50)
         
         while self.running and self.current_loop < self.loop_count:
@@ -432,12 +467,18 @@ class MindustryLogicSimulator:
             
             if self.debug:
                 print(f"[循环 {self.current_loop+1}/{self.loop_count}, 行 {self.pc}] 执行: {line}")
-            
+
             try:
                 result = self.execute_instruction(line)
                 
                 if self.debug:
-                    print(f"  变量状态: {self.variables}")
+                    # 将当前指令涉及的变量添加到最近变量记录中
+                    if self.current_vars:
+                        self.recent_vars.append(self.current_vars.copy())
+                    
+                    # 根据调试输出模式获取要显示的变量
+                    debug_vars = self.get_debug_variables()
+                    print(f"  变量状态: {debug_vars}")
                     print("-" * 30)
                 
                 if result in ["end", "stop"]:
@@ -548,13 +589,21 @@ write value cell1 0
 if __name__ == "__main__":
     debugging = input("debug (Y/N)?").strip().lower() == 'y'
     strict = input("strict mode (Y/N)?").strip().lower() == 'y'
+    if debugging:
+        print("调试输出模式: 0=所有变量, 1=最近10条指令变量, 2=当前指令变量")
+        try:
+            debug_mode = int(input("选择调试输出模式 (0/1/2): "))
+        except:
+            debug_mode = 0
+    else:
+        debug_mode = 0
     print("Input code:")
     code = []
     res = ""
     while res != "@":
         res = input()
         code.append(res)
-    simu = MindustryLogicSimulator(debug=debugging, strict_mode=strict)
+    simu = MindustryLogicSimulator(debug=debugging, strict_mode=strict, debug_output_mode=debug_mode)
     simu.parse_input("\n".join(code))
     results = simu.run()
     
