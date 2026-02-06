@@ -11868,6 +11868,10 @@ class InternalGenerationFailure {
 		this.message = message;
 		this.node = node;
 	}
+
+	toString() {
+		return this.message;
+	}
 }
 
 // 代码生成器
@@ -14020,7 +14024,7 @@ class CodeGenerator extends ASTVisitor {
 			try {
 				return handlers[node.functionName](node);
 			} catch (err) {
-				this.addError(err, node.getAttribute('location'));
+				this.addError(err.toString(), node.getAttribute('location'));
 				return new Instruction();
 			}
 		}
@@ -14030,7 +14034,7 @@ class CodeGenerator extends ASTVisitor {
 			try {
 				return extra.get(node.functionName)(this, node);
 			} catch (err) {
-				this.addError(err, node.getAttribute('location'));
+				this.addError(err.toString(), node.getAttribute('location'));
 				return new Instruction();
 			}
 		}
