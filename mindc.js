@@ -10656,21 +10656,39 @@ class InstructionReferrerException {
 // Notice: forwarding reference is prohibited.
 class InstructionReferrer {
 	/**
+	 * @callback referrerTransmission
+	 * @param {number} position
+	 * @param {InstructionReferrer | null} sich
+	 * @returns {number}
+	 */
+	/**
 	 * 
 	 * @param {Instruction} towards 
 	 * @param {string} name 
-	 * @param {number} offset 
+	 * @param {number} offset Unused!!!
+	 * @param {referrerTransmission | null} [transmission=null] 
 	 */
-	constructor(towards, name, offset = 0) {
+	constructor(towards, name, offset = 0, transmission = null) {
 		this.isInstructionReferrer = true;
 		this.isInstructionGroup = false;
 		this.name = name;
 		this.towards = towards;
 		this.offset = offset;
+		/**
+		 * @type {referrerTransmission}
+		 */
+		this.transmission = transmission ?? ((pos, sich) => pos);
+	}
+
+	duplicate() {
+		return new InstructionReferrer(this.towards, this.name, this.offset, this.transmission);
 	}
 
 	register(position) {
-		this.towards.raw_replace(this.name, position);
+		const val = this.transmission(position + this.offset, this);
+		if (this.towards) {
+			this.towards.raw_replace(this.name, val);
+		}
 	}
 }
 
@@ -10692,6 +10710,10 @@ class Instruction extends AttributeClass {
 		this._attributes = attributes;
 	}
 	
+	duplicate() {
+		return new Instruction(instructSequence.map(inst => inst.duplicate()), this.instructionReturn, new Map([...this.attributes]));
+	}
+
 	/**
 	 Connect 2 instruction types.
 	 @param {Instruction} other
@@ -10817,7 +10839,7 @@ class Instruction extends AttributeClass {
 		this.instructions.forEach(stmt => {
 			if (stmt.isInstructionGroup) {
 				stmt.raw_replace(variable, value);
-			} else {
+			} else if (stmt.content) {
 				stmt.content = stmt.content.replace(new RegExp(`\\{${variable}\\}`, 'g'), value);
 			}
 		});
@@ -10835,7 +10857,7 @@ class Instruction extends AttributeClass {
 		this.instructions.forEach(stmt => {
 			if (stmt.isInstructionGroup) {
 				stmt.replace(variable, value);
-			} else {
+			} else if (stmt.content && stmt.referrer) {
 				stmt.content = stmt.content.replace(new RegExp(`\\{${variable}\\}`, 'g'), `{${stmt.referrer.length}}`);
 				stmt.referrer.push(value);
 			}
@@ -10848,7 +10870,7 @@ class Instruction extends AttributeClass {
 		this.instructions.forEach(instruction => {
 			if (instruction.isInstructionGroup) {
 				currentSize += instruction.size();
-			} else {
+			} else if (instruction.content) {
 				currentSize++;
 			}
 		});
@@ -10857,7 +10879,7 @@ class Instruction extends AttributeClass {
 }
 
 class SingleInstruction extends Instruction {
-	constructor(data, instructionReturn) {
+	constructor(data, instructionReturn = null) {
 		super(data, instructionReturn);
 		this.content = data.content;
 		this.referrer = data.referrer;
@@ -10870,6 +10892,17 @@ class SingleInstruction extends Instruction {
 			return this;
 		} else {
 			return super.raw_replace(variable, value);
+		}
+	}
+
+	duplicate() {
+		if (this.isInstructionGroup) {
+			return super.duplicate();
+		} else {
+			return new SingleInstruction({
+				content: this.content,
+				referrer: this.referrer
+			}, this.instructionReturn);
 		}
 	}
 
@@ -10889,6 +10922,23 @@ class SingleInstruction extends Instruction {
 		}
 	}
 
+	raw_replace(variable, value) {
+		if (!this.isInstructionGroup) {
+			this.content = this.content.replace(new RegExp(`\\{${variable}\\}`, 'g'), value);
+			return this;
+		} else {
+			return super.raw_replace(variable, value);
+		}
+	}
+
+	size() {
+		if (!this.isInstructionGroup) {
+			return 1;
+		} else {
+			return super.size();
+		}
+	}
+
 	concat(other) {
 		if (!this.isInstructionGroup) {
 			this.instructions = [new Instruction({
@@ -10900,6 +10950,7 @@ class SingleInstruction extends Instruction {
 		} else {
 			super.concat(other);
 		}
+		return this;
 	}
 
 }
@@ -12177,10 +12228,15 @@ class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
-	 * 
+	 * Do **NOT** use this with `visitAndRead()` or it will return unexpected results.
+	 * This function perform re-reading of return results to ensure correctness for operations
+	 * using multiple values. If your operation uses only single value, then this is not necessary
+	 * (just use `visitAndRead` then, although usage of this function will not significantly affect
+	 * efficiency).
 	 * @param {Instruction[]} instructions
 	 * @param {Instruction} operation
 	 * @returns {Instruction} 
+	 * @example operateReads(node.arguments.map(arg => this.visit(arg)), new Instruction())
 	 */
 	operatesReads(instructions, operation) {
 		let result = new Instruction([...instructions]);
@@ -13703,7 +13759,7 @@ class CodeGenerator extends ASTVisitor {
 		const opProcesser = (name, params, parameterSize = 2) => {
 			let varNames = [], vid = 0;
 			let result = new Instruction(params.map(ast => {
-				const fetcher = this.visitAndRead(ast);
+				const fetcher = this.visit(ast);
 				//varNames.push(fetcher.instructionReturn);
 				varNames.push(`{op_r${vid++}}`);
 				return fetcher;
@@ -14132,7 +14188,8 @@ const exampleExtension = new CompilerExtensionBase(
 // Here are default extensions
 // THIS IS STILL IN PROGRESS!
 /**
- * @deprecated
+ * Pseudo list type (so that you can store device/content_t!)
+ * The pseudo list uses binary search.
  */
 const pseudoList = new CompilerExtensionBase(
 	new Map(
@@ -14140,11 +14197,154 @@ const pseudoList = new CompilerExtensionBase(
 		 * pdlist_t: The handler type of pseudo list.
 		 * It is integers (currently) like a function pointer, referring to
 		 * the actual operator.
+		 * 
+		 * btw It is a little foolish to use a struct to contain such structure
+		 * (especially when this has become an alternative when no memory block is available.)
+		 * So we use A * 16384 + B to store the function reference (A reading, B writing)
+		 * 
+		 * fyi: for a 60-element array the operations by theory takes approx 0.75 s
 		 */
-		[['pdlist_t', new TypeInfo('pdlist_t', 'struct', 2)]]
+		[['pdlist_t', new TypeInfo('pdlist_t', 'basic', 1)]]
 	),
 	new Map(
+		[['pdcreate', {
+			name: 'pdcreate',
+			returnType: 'pdlist_t',
+			parameters: ['int']					// pdlist_t pdcreate(int size)
+		}],
+		['pdread', {
+			name: 'pdread',
+			returnType: 'null_t',
+			parameters: ['pdlist_t', 'int']		// null_t pdread(pdlist_t list, int pos)
+		}],
+		['pdwrite', {
+			name: 'pdwrite',
+			returnType: 'void',
+			parameters: ['pdlist_t', 'int', 'null_t']	// void pdwrite(pdlist_t list, int pos, null_t data)
+		}]]
+	),
+	new Map(
+		[['pdcreate',
+			/**
+			 * 
+			 * @param {CodeGenerator} cg 
+			 * @param {BuiltinCallNode} ast 
+			 */
+			(cg, ast) => {
+				if (ast.arguments.length != 1 || ast.arguments[0].type !== 'NumericLiteral') {
+					throw new InternalGenerationFailure(`Parameter 1 of pdcreate() must be an integer literal`, ast.location);
+				}
+				/**
+				 * @type {number}
+				 */
+				const arraySize = ast.arguments[0].value;
+				if (arraySize <= 0) {
+					throw new InternalGenerationFailure(`Inappropriate array size`, ast.location)
+				}
+				
+				const randomIdentifier = Math.floor(10000 * Math.random());
+				/**
+				 * 
+				 * @param {number} l 
+				 * @param {number} r 
+				 * @param {Instruction} action Action to be done if reaching that value, with relevant number labelled as "{sval}"
+				 * @returns {Instruction} Note: this returns with {exit}.
+				 */
+				const generateOperations = (l, r, action) => {
+					if (l > r) {
+						return new SingleInstruction({
+							content: '{exit}',
+							referrer: []
+						});
+					}
+					else if (l == r) {
+						return action.duplicate().raw_replace('sval', l).concat(new SingleInstruction({
+							content: '{exit}',
+							referrer: []
+						}));
+					} else {
+						let result = new Instruction();
+						let mid = Math.floor((l+r)/2);
+						const tgtName = `tgt_${l}_${r}_at${randomIdentifier}`;
+						const jumper = InstructionBuilder.jump(`{${tgtName}}`, 'lessThanEq', '{input}', mid);
+						result.concat(jumper);
+						// Condition of 'greater'
+						result.concat(generateOperations(mid+1, r, action));
+						result.concat(new InstructionReferrer(jumper, tgtName));
+						result.concat(generateOperations(l, mid, action));
+						return result;
+					}
+				};
+				const funcManager = cg.functionManagement;
 
+				const readerName = `__ps_read_${randomIdentifier}`;
+				const writerName = `__ps_write_${randomIdentifier}`;
+				const tmpReturner = cg.getTempSymbol(cg.semantic.getTypeInfo('pdlist_t'));
+				const returnedObject = new Instruction([
+					InstructionBuilder.op('mul', '__putmp', `_${readerName}`, 16384),
+					InstructionBuilder.op('add', '__putmp', '__putmp', `_${writerName}`),
+					cg.generateSymbolWrite(tmpReturner, '__putmp')
+				]).set_returns(tmpReturner);
+
+				const reader = generateOperations(0, arraySize - 1, InstructionBuilder.set('__return', `_pu_${randomIdentifier}_{sval}`))
+						.raw_replace('input', '__pos').raw_replace('exit', 
+							InstructionBuilder.set('@counter', '__stackpos').content
+						);
+				funcManager.addFunction(readerName, reader, null, [], true);
+				const writer = generateOperations(0, arraySize - 1, InstructionBuilder.set(`_pu_${randomIdentifier}_{sval}`, '__value'))
+						.raw_replace('input', '__pos').raw_replace('exit',
+							InstructionBuilder.set('@counter', '__stackpos').content
+						);
+				funcManager.addFunction(writerName, writer, null, [], true);
+				// Create a local variable (but the problem is: how to get function info?):
+				
+				return returnedObject;
+			}
+		],
+		['pdread',
+			/**
+			 * 
+			 * @param {CodeGenerator} cg 
+			 * @param {BuiltinCallNode} ast 
+			 */
+			(cg, ast) => {
+				const tmpSymb = cg.getTempSymbol(cg.semantic.getTypeInfo('int'));
+				return cg.operatesReads(
+					[cg.visit(ast.arguments[0]), cg.visit(ast.arguments[1])],
+					new Instruction([
+						// Evaluate reader part
+						InstructionBuilder.set('__pos', '{op_r1}'),
+						InstructionBuilder.op('shr', '__funcpos', '{op_r0}', 14),
+						InstructionBuilder.set('__internal_stackpos', '__stackpos'),
+						InstructionBuilder.op('add', '__stackpos', '@counter', 1),
+						InstructionBuilder.set('@counter', '__funcpos'),
+						InstructionBuilder.set('__stackpos', '__internal_stackpos'),
+						cg.generateSymbolWrite(tmpSymb, '__return')
+					]).set_returns(tmpSymb)
+				);
+			}
+		],
+		['pdwrite',
+			/**
+			 * 
+			 * @param {CodeGenerator} cg 
+			 * @param {BuiltinCallNode} ast 
+			 */
+			(cg, ast) => {
+				return cg.operatesReads(
+					[cg.visit(ast.arguments[0]), cg.visit(ast.arguments[1]), cg.visit(ast.arguments[2])],
+					new Instruction([
+						InstructionBuilder.set('__pos', '{op_r1}'),
+						InstructionBuilder.set('__value', '{op_r2}'),
+						InstructionBuilder.op('and', '__funcpos', '{op_r0}', 16383),
+						InstructionBuilder.set('__internal_stackpos', '__stackpos'),
+						InstructionBuilder.op('add', '__stackpos', '@counter', 1),
+						InstructionBuilder.set('@counter', '__funcpos'),
+						InstructionBuilder.set('__stackpos', '__internal_stackpos')
+					], 'null')
+				);
+			}
+		]]
 	)
 );
 // End.
@@ -14152,7 +14352,7 @@ const pseudoList = new CompilerExtensionBase(
 /**
  * @type {CompilerExtensionBase[]}
  */
-const defaultExtensions = [];
+const defaultExtensions = [pseudoList];
 
 // 主编译器接口
 class Compiler {
