@@ -10,9 +10,9 @@ Incomplete parts:
 
 ----
 
-Above all, please notice that: Mindustry-C is an **mainly AI-generated** and partially-experimental project. The AI tool used in this project is DeepSeek (for individuals).
+Please notice that: Mindustry-C has AI-generated code. The AI tool used in this project is DeepSeek (for individuals).
 
-> I have no time to code, though. I've written only prompts and a few lines of code for it. (Yet for sure, I have to do all bug-fixing.)
+> I have no time to code, though. I've written only prompts and some parts of code (including **100% part of final code generation**) for it. (Yet for sure, I also have to do all bug-fixing.)
 > (AI is just no so realiable as I've expected)
 
 Mindustry-C aims to compile C code to Mindustry Assembly, a brain-racking language for most of us.
