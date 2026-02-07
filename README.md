@@ -1,5 +1,7 @@
 # mindustry-c: A JavaScript program compiling C code to Mindustry Assembly
 
+[中文 README](https://github.com/steambird1/mindustry-c/blob/main/docs/LiyueSprache/README.md)
+
 ## What is Mindustry-C?
 
 ## Current Plan
