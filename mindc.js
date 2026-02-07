@@ -11895,6 +11895,8 @@ class CodeGenerator extends ASTVisitor {
 		this.currentReturns = [];
 		this.currentBreaks = [];
 		this.currentContinues = [];
+		this.breakStack = [];
+		this.continueStack = [];
 		/**
 		 * @type {Scope}
 		 */
@@ -12049,6 +12051,19 @@ class CodeGenerator extends ASTVisitor {
 	requireRValueMemory(size) {
 		this.RValueMax = Math.max(this.RValueMax, size);
 		return this.RValueAssigner.duplicate();
+	}
+
+
+	enterLoop() {
+		this.breakStack.push(this.currentBreaks);
+		this.continueStack.push(this.currentContinues);
+		this.currentBreaks = [];
+		this.currentContinues = [];
+	}
+
+	exitLoop() {
+		this.currentBreaks = this.breakStack.pop();
+		this.currentContinues = this.continueStack.pop();
 	}
 
 	/**
@@ -12576,8 +12591,7 @@ class CodeGenerator extends ASTVisitor {
 		const test = this.implicitToBoolean(node.test);
 		let connector = new Instruction();
 		let bodyProcessor = new Instruction();
-		this.currentBreaks = [];
-		this.currentContinues = [];
+		this.enterLoop();
 		const body = node.body ? this.visit(node.body) : new Instruction();
 		const conditBreak = this.operatesWith(
 			InstructionBuilder.jump('{loop_break}', 'notEqual', '{opw}', 'true'),
@@ -12603,8 +12617,7 @@ class CodeGenerator extends ASTVisitor {
 		this.currentBreaks.forEach(breaks => {
 			finalize.concat(new InstructionReferrer(breaks, 'loop_break'));
 		});
-		this.currentBreaks = [];
-		this.currentContinues = [];
+		this.exitLoop();
 		return finalize;
 	}
 
@@ -12614,8 +12627,7 @@ class CodeGenerator extends ASTVisitor {
 	 */
 	visitForStatement(node) {
 		let loopSystem = new Instruction();
-		this.currentBreaks = [];
-		this.currentContinues = [];
+		this.enterLoop();
 		const body = node.body ? this.visit(node.body) : new Instruction();
 		const update = node.update ? this.visit(node.update) : new Instruction();
 		let initSystem = new Instruction();
@@ -12652,8 +12664,7 @@ class CodeGenerator extends ASTVisitor {
 		this.currentBreaks.forEach(breaks => {
 			finalize.concat(new InstructionReferrer(breaks, 'loop_break'));
 		});
-		this.currentBreaks = [];
-		this.currentContinues = [];
+		this.exitLoop();
 		return finalize;
 	}
 
@@ -13711,9 +13722,10 @@ class CodeGenerator extends ASTVisitor {
 		 * @param {ASTNode[]} params 
 		 * @param {TypeInfo | null} [hasReturnAs=null]
 		 * @param {number} parameterSize 
+		 * @param {boolean} [returnAtEnd=null]
 		 * @returns 
 		 */
-		const packer = (prefix, params, hasReturnAs = null, parameterSize = -1) => {
+		const packer = (prefix, params, hasReturnAs = null, parameterSize = -1, returnAtEnd = false) => {
 			let varNames = [], vid = 0;
 			let result = new Instruction(params.map(
 				/**
@@ -13740,7 +13752,8 @@ class CodeGenerator extends ASTVisitor {
 			if (hasReturnAs) {
 				//returner = this.getTempSymbol(hasReturnAs);//this.getTempVariable();
 				//varNames.push(returner);
-				varNames.unshift("{op}");	// do returners!
+				if (returnAtEnd) varNames.push('{op}');
+				else varNames.unshift("{op}");	// do returners!
 			}
 			for (let i = varNames.length; i < parameterSize; i++) {
 				varNames.push('x');	// null filler
@@ -13881,7 +13894,7 @@ class CodeGenerator extends ASTVisitor {
 					}
 				}
 				const processSequence = ast.arguments.slice(0, 4).map(arg => arg.value).join(" ");
-				return packer(`uradar ${processSequence}`, ast.arguments.slice(4), this.semantic.getTypeInfo('device'));
+				return packer(`uradar ${processSequence}`, ast.arguments.slice(4), this.semantic.getTypeInfo('device'), -1, true);
 			},
 			draw: ast => {
 
@@ -13929,7 +13942,7 @@ class CodeGenerator extends ASTVisitor {
 					}
 				}
 				const processSequence = ast.arguments.slice(0, 4).map(arg => arg.value).join(" ");
-				return packer(`radar ${processSequence}`, ast.arguments.slice(4), this.semantic.getTypeInfo('device'));
+				return packer(`radar ${processSequence}`, ast.arguments.slice(4), this.semantic.getTypeInfo('device'), -1, true);
 			},
 			sensor: ast => {
 				return packer(`sensor`, ast.arguments, this.semantic.getTypeInfo('null_t'));
@@ -14253,8 +14266,25 @@ const pseudoList = new CompilerExtensionBase(
 				 * @param {number} r 
 				 * @param {Instruction} action Action to be done if reaching that value, with relevant number labelled as "{sval}"
 				 * @returns {Instruction} Note: this returns with {exit}.
+				 * @remarks This has {input} and {exit}.
 				 */
 				const generateOperations = (l, r, action) => {
+					
+					const actionSize = action.size() + 1;
+					let result = new Instruction([
+						InstructionBuilder.op('mul', '__tmpref', '{input}', actionSize),
+						InstructionBuilder.op('add', '@counter', '@counter', '__tmpref')
+					]);
+					for (let i = l; i <= r; i++) {
+						result.concat(action.duplicate().raw_replace('sval', `${i}`));
+						result.concat(new SingleInstruction({
+							content: '{exit}',
+							referrer: []
+						}));
+					}
+					return result;
+					// Implemented as binary search (deleted)
+					/*
 					if (l > r) {
 						return new SingleInstruction({
 							content: '{exit}',
@@ -14278,6 +14308,7 @@ const pseudoList = new CompilerExtensionBase(
 						result.concat(generateOperations(l, mid, action));
 						return result;
 					}
+						*/
 				};
 				const funcManager = cg.functionManagement;
 
