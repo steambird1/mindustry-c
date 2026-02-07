@@ -180,6 +180,20 @@ class MindustryLogicSimulator:
             if type(val1) == type(val2) and val1 == val2:
                 return 1
             return 0
+        elif op == "land":
+            return 1 if (val1 and val2) else 0
+        elif op == "lor":
+            return 1 if (val1 or val2) else 0
+        elif op == "and":
+            return int(val1) & int(val2)
+        elif op == "or":
+            return int(val1) | int(val2)
+        elif op == "xor":
+            return int(val1) ^ int(val2)
+        elif op == "shl":
+            return int(val1) << int(val2)
+        elif op == "shr":
+            return int(val1) >> int(val2)
         else:
             raise ValueError(f"不支持的运算符: {op}")
     
@@ -434,7 +448,7 @@ class MindustryLogicSimulator:
         else:
             raise ValueError(f"未知指令: {instr}")
         
-        if instr != "jump" and result_var != "@counter":
+        if instr != "jump":
             self.pc += 1
             
         return instr
