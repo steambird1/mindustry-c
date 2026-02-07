@@ -27,7 +27,7 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
 
 ## Features about Mindustry-C
 
-- Reserving most of C89 features
+- Most of C89 features
   - Yes, you'll have structs, pointers, unions, and `typedef`!
   - But you won't have `#pragma` or `#include`
   - Also, support for function pointers might be limited
@@ -64,7 +64,8 @@ Following functions **rely on** memory allocation:
 - Any `volatile` variable
 - Any variable that has address (`&var`)
 - Any `struct` or `union`
-- Any array (If you don't want to use memory but still want arrays, refer to documents to look for possible alternatives.)
+- Any array (If you don't want to use memory but still want arrays, refer to *pseudo list's* documents to look for possible alternatives.)
+- Any recursive function
 
 If functions aren't called recursively, they does not take up memory space.
 
@@ -78,9 +79,10 @@ Arrays might also take up additional spaces to store its previous/next cell of s
 
 ### Specialized for Mindustry
 
+- `device` type is used to describe buildings/units in Mindustry while `content_t` is used to describe objects.
 - Use `auto device conveyor1;` to register a connected device (**`auto` is essential**).
 - Use `(volatile int*)` (or similar) to force to transmit registry variables to some functions (for builtin calls, especially `ulocate`).
-- Function pointers must have a `typedef` declared.
+- Function pointers must have a `typedef` to declare its type before being used.
 
 ### Different from C/C++
 
