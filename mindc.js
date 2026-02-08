@@ -4532,7 +4532,7 @@ class SemanticAnalyzer extends ASTVisitor {
                 returnType: this.typeToString(this.getTypeNameFromTypeNode(node.returnType)),
                 parameters: node.parameters.map(param => ({
                     name: param.name,
-                    type: this.getTypeNameFromTypeNode(param.type) /*param.type.typeName*/
+                    type: this.getTypeNameFromTypeNode(param.pointerDepth ? param : param.type) /*param.type.typeName*/
 					/* Modified in 5th conversation. Whether this is correct remains to be seen! */
                 }))
             },
@@ -4557,7 +4557,7 @@ class SemanticAnalyzer extends ASTVisitor {
         node.parameters.forEach(param => {
             const paramSymbol = new SymbolEntry(
                 param.name,
-                { type: this.getTypeInfo(this.getTypeNameFromTypeNode(param.type)) },
+                { type: this.getTypeInfo(this.getTypeNameFromTypeNode(param.pointerDepth ? param : param.type)) },
                 this.currentScope,
                 'parameter',
                 param.location
@@ -4780,9 +4780,12 @@ class SemanticAnalyzer extends ASTVisitor {
         }
 		
         // 如果是TypeSpecifier节点
-        if (typeNode.typeName) {
+        if (typeNode.typeName && typeof typeNode.typeName === 'string') {
             return prefix + typeNode.typeName + ptrSuffix;
         }
+		if (typeof typeNode.type === 'object') {
+			return prefix + this.getTypeNameFromTypeNode(typeNode.type) + ptrSuffix;
+		}
         
         // 如果是标识符节点（处理typedef定义的类型）
         if (typeNode.type === 'Identifier') {
@@ -11017,6 +11020,12 @@ class InstructionBuilder {
 			referrer: referrer
 		});
 	}
+	static select(target, type, value1, value2, consequent, alternate, referrer = []) {
+		return new SingleInstruction({
+			content: `select ${target} ${type} ${value1} ${value2} ${consequent} ${alternate}`,
+			referrer: referrer
+		});
+	}
 	static jump(target, condition, value1 = null, value2 = null, referrer = []) {
 		return new SingleInstruction({
 			content: `jump ${target} ${condition} ${value1 ?? 'x'} ${value2 ?? '0'}`,
@@ -11964,6 +11973,8 @@ class CodeGenerator extends ASTVisitor {
 		this.currentScope = null;
 		this.errors = [];
 		this.warnings = [];
+
+		this.targetVersion = this.compiler ? this.compiler.config.getAttribute('targetVersion') : 0;
 	}
     
 	/**
@@ -12573,6 +12584,18 @@ class CodeGenerator extends ASTVisitor {
 	visitConditionalExpression(node) {
 		let result = new Instruction();
 		let returner = this.getTempSymbol(node.dataType);//this.getTempVariable();
+
+		// TODO if it is a single operation, then directly use 'select':
+		// currently we use sth else
+		if (this.targetVersion >= 152) {
+			return this.operatesReads(
+				[this.visit(node.test), this.visit(node.consequent), this.visit(node.alternate)],
+				this.operatesWrite(
+					InstructionBuilder.select('{op_write}', 'equal', '{op_r0}', 'true', '{op_r1}', '{op_r2}'), returner
+				)
+			);
+		}
+
 		const test = this.visitAndRead(node.test);
 		result.concat(test);
 		const jumper = this.operatesWith(
@@ -12602,7 +12625,7 @@ class CodeGenerator extends ASTVisitor {
 		}
 		result.concat(this.generateSymbolWrite(returner, alternate.instructionReturn));
 		result.concat(new InstructionReferrer(finalize, 'end', 0));
-		result.instructionReturn = returner.getAssemblySymbol();
+		result.set_returns(returner);
 		return result;
 	}
 
@@ -14509,10 +14532,15 @@ class Compiler {
 		parserConfig.setAttribute('extraFunctions', exFuncs);
 		parserConfig.setAttribute('extraHandler', new Map(extensions.flatMap(ext => [...ext.handlers])));
 
+		this.config = config ?? new AttributeClass();
+		if (!this.config.hasAttribute('targetVersion')) {
+			this.config.setAttribute('targetVersion', 154.3);
+		}
+
 		this.extraConfig = parserConfig;
 
 		this.memoryInfo = memoryInfo;
-		this.config = config ?? new AttributeClass();
+		
         this.lexer = new Lexer(sourceCode);
         this.parser = new Parser(this.lexer, parserConfig);
         this.semanticAnalyzer = new SemanticAnalyzer(this);
@@ -14520,9 +14548,7 @@ class Compiler {
         this.codeGenerator = new CodeGenerator(this);
 		this.extensions = extensions;
 
-		if (!this.config.hasAttribute('targetVersion')) {
-			this.config.setAttribute('targetVersion', 154.3);
-		}
+		
     }
     
     compile() {
