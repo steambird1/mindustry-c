@@ -2909,7 +2909,7 @@ class Parser {
         
         const update = this.matchToken(TokenType.RIGHT_PAREN)
             ? null
-            : this.parseExpression();
+            : this.parseExpressionStatement(false);
         this.expectToken(TokenType.RIGHT_PAREN);
 
         const body = this.parseStatement();
@@ -2977,20 +2977,31 @@ class Parser {
         return asmStmt;
     }
 
-    parseExpressionStatement() {
+    parseExpressionStatement(expectSemicolon = true) {
         const expression = this.parseExpression();
-        this.expectToken(TokenType.SEMICOLON);
-
         if (!expression) return null;
 
+		let sequence = [expression];
+		while (this.getCurrentToken().type == TokenType.COMMA) {
+			this.consumeToken();
+			const right = this.parseExpression();
+			if (!right) {
+                this.addError('Expected expression after comma');
+                return left;
+            }
+			sequence.push(right);
+		}
+		if (expectSemicolon) this.expectToken(TokenType.SEMICOLON);
         const exprStmt = new ASTNode('ExpressionStatement');
-        exprStmt.addChild(expression);
+        exprStmt.children = sequence;
+		sequence.forEach(ast => ast.parent = exprStmt);
         exprStmt.location = expression.location;
         return exprStmt;
     }
 
     parseExpression() {
-        return this.parseAssignmentExpression();
+		return this.parseAssignmentExpression();
+
     }
 
     parseAssignmentExpression() {
@@ -3864,6 +3875,12 @@ class TypeInfo {
     isVolatile() {
         return this.qualifiers.includes('volatile');
     }
+
+	isStrictPointerImpl() {
+		const pointerImplementation = ['pointer', 'array'];
+		return ((typeof this.kind === 'object') && this.kind.isStrictPointerImpl()) ||
+		 pointerImplementation.includes(this.kind);
+	}
 
 	isPointerImpl() {
 		const pointerImplementation = ['pointer', 'array', 'struct', 'union'];
@@ -4928,7 +4945,7 @@ class SemanticAnalyzer extends ASTVisitor {
 					return;
 				}
 				
-				if (!this.isNumericType(argType.name)) {
+				if (!this.isNumericType(argType.name) && !argType.isPointerImpl()) {
 					this.addError(`'${operator}' requires numeric type`, node.location);
 					return;
 				}
@@ -5423,6 +5440,10 @@ class SemanticAnalyzer extends ASTVisitor {
 	}
 
     // =============== 类型检查辅助方法 ===============
+	/**
+	 * @param {ASTNode} node 
+	 * @returns {TypeInfo | null}
+	 */
 	getExpressionType(node) {
         if (!node) return null;
 
@@ -5578,7 +5599,7 @@ class SemanticAnalyzer extends ASTVisitor {
 		// Remove auto and volatile qualifier for both sides:
 		const ignoredQualifiers = ['auto', 'volatile', 'static'];
 		sourceType.qualifiers = sourceType.qualifiers.filter(
-			item => (!ignoredQualifiers.includes(item)));	// 'const' of source does not matter
+			item => (!ignoredQualifiers.includes(item) && (sourceType.isStrictPointerImpl() || item !== 'const')) );	// 'const' of source does not matter
 		targetType.qualifiers = targetType.qualifiers.filter(
 			item => (!ignoredQualifiers.includes(item) && item !== 'const'));
 
