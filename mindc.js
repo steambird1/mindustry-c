@@ -834,6 +834,11 @@ const TokenType = {
     MULTIPLY_ASSIGN: 'MULTIPLY_ASSIGN',
     DIVIDE_ASSIGN: 'DIVIDE_ASSIGN',
     MODULO_ASSIGN: 'MODULO_ASSIGN',
+	LEFT_SHIFT_ASSIGN: 'LEFT_SHIFT_ASSIGN',
+	RIGHT_SHIFT_ASSIGN: 'RIGHT_SHIFT_ASSIGN',
+	BITWISE_AND_ASSIGN: 'BITWISE_AND_ASSIGN',
+	BITWISE_OR_ASSIGN: 'BITWISE_OR_ASSIGN',
+	BITWISE_XOR_ASSIGN: 'BITWISE_XOR_ASSIGN',
     
     // 比较运算符
     EQUAL: 'EQUAL',
@@ -882,6 +887,8 @@ const TokenType = {
     ASM: 'ASM',
     DRAW: 'DRAW',
     PRINT: 'PRINT',
+	PRINTCHAR: 'PRINTCHAR',
+	FORMAT: 'FORMAT',
     DRAWFLUSH: 'DRAWFLUSH',
     PRINTFLUSH: 'PRINTFLUSH',
     GETLINK: 'GETLINK',
@@ -989,10 +996,13 @@ const KEYWORDS = {
 };
 
 // 特殊指令映射
+// 'printchar' and 'format' is not added for compatibility.
 const SPECIAL_INSTRUCTIONS = {
     'asm': TokenType.ASM,
     'draw': TokenType.DRAW,
     'print': TokenType.PRINT,
+	'printchar': TokenType.PRINTCHAR,
+	'format': TokenType.FORMAT,
     'drawflush': TokenType.DRAWFLUSH,
     'printflush': TokenType.PRINTFLUSH,
     'getlink': TokenType.GETLINK,
@@ -3480,6 +3490,8 @@ class Parser {
 			case TokenType.ASM:
 			case TokenType.DRAW:
 			case TokenType.PRINT:
+			case TokenType.PRINTCHAR:
+			case TokenType.FORMAT:
 			case TokenType.DRAWFLUSH:
 			case TokenType.PRINTFLUSH:
 			case TokenType.GETLINK:
@@ -3559,7 +3571,7 @@ class Parser {
 			'draw', 'print', 'drawflush', 'printflush', 'getlink', 'ceil', 'floor', 'sqrt', 'rand', 'abs', 'memcpy',
 			'control', 'radar', 'sensor', 'set', 'op', 'lookup', 'ubind', 'ulocate', 'ucontrol', 'uradar', 'min', 'max',
 			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'adiff',
-			'memsp', ...(this.extraFunctions.map(func => func.name))
+			'memsp', 'printchar', 'format', ...(this.extraFunctions.map(func => func.name))
 		];
         return builtins.includes(name);
     }
@@ -3920,6 +3932,8 @@ class SemanticAnalyzer extends ASTVisitor {
         this.structTable = new Map(); // 专门存储结构体/联合体定义
         this.typedefTable = new Map(); // 存储typedef定义的类型别名
         
+		this.targetVersion = this.compiler ? this.compiler.config.getAttribute('targetVersion') : 0;
+
 		this.globalScope = null;	// ???
 		this.scopeCounter = 0;
 		this.virtualCounter = 0;
@@ -4114,6 +4128,8 @@ class SemanticAnalyzer extends ASTVisitor {
         const builtins = [
             { name: 'draw', returnType: 'void', parameters: ['char'], hasVarArgs: true }, // 操作名称 + 变长参数 (Actually, need further judgment)
 			{ name: 'print', returnType: 'void', parameters: [], hasVarArgs: true }, // 变长参数 (Actually, accepting multiple operations)
+			{ name: 'printchar', returnType: 'void', parameters: [], hasVarArgs: true }, 
+			{ name: 'format', returnType: 'void', parameters: [], hasVarArgs: true }, 
 			{ name: 'drawflush', returnType: 'void', parameters: ['device'] },
 			{ name: 'printflush', returnType: 'void', parameters: ['device'] },
 			{ name: 'getlink', returnType: 'device', parameters: ['int'] },
@@ -5062,11 +5078,28 @@ class SemanticAnalyzer extends ASTVisitor {
         
         if (!objectType) return;
         
-        // 数组下标访问
+        // 数组下标访问 (Updated 8 Feb: also for strings now!)
         if (computed) {
             if (objectType.kind !== 'array' && objectType.kind !== 'pointer') {
-                this.addError(`Cannot use subscript on non-array type`, node.location);
-                return;
+				if (objectType.kind === 'basic' && objectType.name === 'char') {
+					if (this.targetVersion < 150) {
+						this.addError('String index access requires at least v150', node.location);
+						return;
+					} else {
+						node.setAttribute('stringAccess', true);
+						/**
+						 * @type {TypeInfo}
+						 */
+						const dataType = objectType.duplicate();
+						dataType.qualifiers = [...new Set([...dataType.qualifiers, 'const'])];
+						node.dataType = dataType;
+					}
+					
+				} else {
+					this.addError(`Cannot use subscript on ${this.targetVersion >= 150 ? 'non-array nor string' : 'non-array'} type`, node.location);
+                	return;
+				}
+                
             }
             
             this.visit(member);
@@ -5212,6 +5245,12 @@ class SemanticAnalyzer extends ASTVisitor {
 
 		// 特殊的内建函数参数检查
 		switch (node.functionName) {
+			case 'printchar':
+			case 'format':
+				if (this.targetVersion < 154) {
+					this.addError(`${node.functionName} requires v154 or higher`, node.location);
+				}
+				break;
 			case 'set':
 				if (node.arguments.length < 2) {
 					this.addError(`'set' requires at least 2 arguments`, node.location);
@@ -5512,14 +5551,24 @@ class SemanticAnalyzer extends ASTVisitor {
     // 修改类型兼容性检查以支持指针和结构体
     isTypeCompatible(targetTypeRaw, sourceTypeRaw) {
 		
-		let targetType = targetTypeRaw, sourceType = sourceTypeRaw;
+		/**
+		 * @type {TypeInfo}
+		 */
+		let targetType = targetTypeRaw;
+		/**
+		 * @type {TypeInfo}
+		 */
+		let sourceType = sourceTypeRaw;
 		// TODO: Might be sth like '*'
 		if (typeof targetType === 'string') {
-			targetType = this.getTypeInfo(targetType).duplicate();
+			targetType = this.getTypeInfo(targetType);
 		}
 		if (typeof sourceType === 'string') {
-			sourceType = this.getTypeInfo(sourceType).duplicate();
+			sourceType = this.getTypeInfo(sourceType);
 		}
+
+		targetType = targetType.duplicate();
+		sourceType = sourceType.duplicate();
 		
 		if (!targetType || !sourceType) return false;
         
@@ -11022,6 +11071,18 @@ class InstructionBuilder {
 			referrer: []
 		});
 	}
+	static printchar(data) {
+		return new SingleInstruction({
+			content: `printchar ${data}`,
+			referrer: []
+		});
+	}
+	static format(data) {
+		return new SingleInstruction({
+			content: `format ${data}`,
+			referrer: []
+		});
+	}
 	static printflush(target) {
 		return new SingleInstruction({
 			content: `printflush ${target}`,
@@ -12978,14 +13039,28 @@ class CodeGenerator extends ASTVisitor {
 		let result = new Instruction();
 		if (operatorTranslation.has(node.operator)) {
 			// Boolean can't directly participate in this!
-			
-			const leftIsPointer = node.left.dataType && node.left.dataType.kind === 'pointer';
-			const rightIsPointer = node.right.dataType && node.right.dataType.kind === 'pointer';
+			const evaluatingKinds = ['pointer', 'array'];
+			const leftIsPointer = node.left.dataType && evaluatingKinds.includes(node.left.dataType.kind);
+			const rightIsPointer = node.right.dataType && evaluatingKinds.includes(node.right.dataType.kind);
 			if (leftIsPointer || rightIsPointer) {
 				const right = this.visitAndRead(node.right);
 				const left = this.visitAndRead(node.left);
-				const duplicate = this.getTempVariable();
+				//const duplicate = this.getTempVariable();
 				const duplicateResult = this.getTempSymbol(node.dataType);
+				const pointerSide = leftIsPointer ? left : right;
+				const nonPointerSide = rightIsPointer ? left : right;
+				result = this.operatesReads(
+					[pointerSide, nonPointerSide],
+					new Instruction([
+						//InstructionBuilder.set(`${duplicate}_block`, `{op_r0}_block`),
+						//InstructionBuilder.set(`${duplicate}_pos`, `{op_r0}_pos`),
+						(node.operator === '+')
+							? (this.memory.outputPointerForwardCall('{op_r1}', '{op_r0}', this.functionManagement, true, false))
+							: (this.memory.outputPointerBackwardCall('{op_r1}', '{op_r0}', this.functionManagement, false)),
+						InstructionBuilder.set(`${duplicateResult.getAssemblySymbol()}_block`, `__ptrblock`),
+						InstructionBuilder.set(`${duplicateResult.getAssemblySymbol()}_pos`, `__ptrpos`)
+					])).set_returns(duplicateResult);
+				/*
 				const pointerReferrer = leftIsPointer ? left.instructionReturn : right.instructionReturn;
 				result.instructionReturn = duplicate;
 				result.concat(left);
@@ -13005,6 +13080,7 @@ class CodeGenerator extends ASTVisitor {
 				}
 				result.concat(this.generateSymbolWrite(duplicateResult, duplicate));
 				result.instructionReturn = duplicateResult.getAssemblySymbol();
+						*/
 			} else {
 				const left = this.visit(node.left);
 				const right = this.visit(node.right);
@@ -13261,6 +13337,14 @@ class CodeGenerator extends ASTVisitor {
 	 */
 	resolveMemberExpression(node) {
 		let finalResult = new Instruction(), index;
+		if (node.getAttribute('stringAccess')) {
+			// Special string access
+			const finalSymbol = this.getTempSymbol(this.semantic.getTypeInfo('char'));
+			return this.operatesReads(node.children.map(child => this.visit(child)),
+				this.operatesWrite(
+					InstructionBuilder.read('{op_write}', '{op_r0}', '{op_r1}'), finalSymbol)
+			);
+		}
 		// TODO: WHAT IF IT IS A 'AccessThroughPointer'?
 		const leftsideOrigin = this.processLValGetter(node.children[0], true, true); // Thus it returns a duplicated version of address
 		finalResult.concat(leftsideOrigin);
@@ -13407,7 +13491,9 @@ class CodeGenerator extends ASTVisitor {
 			case 'MemberExpression':
 				// TODO: Here has been modified as symbolic!!!!!!!
 				// But you can't make it stored in registry right away
-
+				if (left.getAttribute('stringAccess')) {
+					throw new InternalGenerationFailure(`Strings in Mindustry-C are immutable`, left);
+				}
 				const resolution = this.convertInstructionForReading(this.resolveMemberExpression(left));
 				if (left.dataType.isPointerImpl()) {
 					isPointer = true;			// This determines whether it is about "accessThroughPointer"
@@ -13681,20 +13767,8 @@ class CodeGenerator extends ASTVisitor {
 		let result = new Instruction(), tmpVar;
 		const tmpSymb = this.getTempSymbol(node.dataType);
 		// Let still deliver them by reference
-		/*
-		if () {
-			const temporaryMemory = this.requireRValueMemory(node.dataType.size);
-			result.setAttribute('isRValueMem', true);
-			result.concat(temporaryMemory.getAssignmentInstruction(memberResolution.instructionReturn));
-			result.concat(this.memory.outputMemcpyCall(
-				tmpVar, memberResolution.instructionReturn, node.dataType.size, this.functionManagement));
-			// ...
-			return result;
-		}
-			
-			*/
 		// It is a pointer, keep it the same (until you make some explicit assignment works)
-		if (node.dataType.kind === 'pointer' || node.dataType.kind === 'array' || node.dataType.kind === 'struct' || node.dataType.kind === 'union') {	// [TODO:] Do a memory copy operation here (and point out that it has been a RValue!)
+		if (node.getAttribute('stringAccess') || node.dataType.kind === 'pointer' || node.dataType.kind === 'array' || node.dataType.kind === 'struct' || node.dataType.kind === 'union') {	// [TODO:] Do a memory copy operation here (and point out that it has been a RValue!)
 			return memberResolution;
 			//tmpVar = memberResolution.instructionReturn;
 		}
@@ -13811,6 +13885,24 @@ class CodeGenerator extends ASTVisitor {
 					const printing = this.visitAndRead(arg);
 					result.concat(printing);
 					result.concat(InstructionBuilder.print(printing.instructionReturn));
+				});
+				return result;
+			},
+			printchar: ast => {
+				let result = new Instruction();
+				ast.arguments.forEach(arg => {
+					const printing = this.visitAndRead(arg);
+					result.concat(printing);
+					result.concat(InstructionBuilder.printchar(printing.instructionReturn));
+				});
+				return result;
+			},
+			format: ast => {
+				let result = new Instruction();
+				ast.arguments.forEach(arg => {
+					const printing = this.visitAndRead(arg);
+					result.concat(printing);
+					result.concat(InstructionBuilder.format(printing.instructionReturn));
 				});
 				return result;
 			},
@@ -14427,6 +14519,10 @@ class Compiler {
         this.optimizer = new Optimizer(this);
         this.codeGenerator = new CodeGenerator(this);
 		this.extensions = extensions;
+
+		if (!this.config.hasAttribute('targetVersion')) {
+			this.config.setAttribute('targetVersion', 154.3);
+		}
     }
     
     compile() {
