@@ -3664,7 +3664,7 @@ class SymbolEntry {
 	/**
 	 * 
 	 * @param {string} name 
-	 * @param {TypeInfo | string} type 
+	 * @param {TypeInfo | string | {returnType: string, parameters: {name: string, type: string}[]}} type 
 	 * @param {Scope | null} scope 
 	 * @param {string} kind 
 	 * @param {*} location 
@@ -12619,15 +12619,18 @@ class CodeGenerator extends ASTVisitor {
 		this.currentFunction = node.name;
 		this.currentReturns = [];
 		let result = new Instruction(), paramId = 0;
-		result.concat(new Instruction(node.scope.getAllSymbols().flatMap(sym => {
-			if (sym.kind !== 'parameter') return [];
-			const paramName = `__param_${paramId++}`;
-			if (sym.type.type.kind === 'struct' || sym.type.type.kind === 'union') {
-				// Must be copied (NOTE: They are NOT .__pointer NOw!)
-				return [this.memory.outputMemcpyCall(`${sym.getAssemblySymbol()}`, paramName, sym.type.type.size, this.functionManagement)];
-			}
-			return [this.generateSymbolWrite(sym, paramName)];
-		})));	// Copy the parameters
+		if (!(node.symbol && !node.symbol.isAddressed)) {
+			result.concat(new Instruction(node.scope.getAllSymbols().flatMap(sym => {
+				if (sym.kind !== 'parameter') return [];
+				const paramName = `__param_${paramId++}`;
+				if (sym.type.type.kind === 'struct' || sym.type.type.kind === 'union') {
+					// Must be copied (NOTE: They are NOT .__pointer NOw!)
+					return [this.memory.outputMemcpyCall(`${sym.getAssemblySymbol()}`, paramName, sym.type.type.size, this.functionManagement)];
+				}
+				return [this.generateSymbolWrite(sym, paramName)];
+			})));	// Copy the parameters
+			// If there's no function address calling, this is not necessary
+		}
 		let body = this.visit(node.body);
 		//body.replace('func_ret', body.size() + 1);
 		this.currentReturns.forEach(rets => {
@@ -13819,9 +13822,12 @@ class CodeGenerator extends ASTVisitor {
 		let result = new Instruction();
 		// Prepare for all parameters
 		let relevantFunction = node.callee ? node.callee.symbol : null, isFunctionPointer = false;
+		let detFunctionSymbol = null;
 		if (relevantFunction.kind !== 'function') {
 			relevantFunction = relevantFunction.type.type.functionTo;
 			isFunctionPointer = true;
+		} else {
+			detFunctionSymbol = relevantFunction;
 		}
 		if (!relevantFunction) {
 			throw new InternalGenerationFailure(`Unknown function ${node.callee ? node.callee.name : '<error-function>'}`);
@@ -13830,6 +13836,35 @@ class CodeGenerator extends ASTVisitor {
 			result.concat(this.functionManagement.getPreservationCall(this.currentFunction));
 		}
 		//let paramDelivery = new Map();
+
+		/**
+		 * 
+		 * @param {TypeInfo} actualType
+		 * @param {string} paramName
+		 * @param {Instruction} param
+		 * @returns {Instruction}
+		 */
+		const tackleWithParam = (actualType, paramName, param) => {
+			if (actualType.kind === 'pointer' || actualType.kind === 'array' || actualType.kind === 'struct'
+				|| actualType.kind === 'union'
+			) {
+				result.concat(new Instruction([
+					InstructionBuilder.set(`${paramName}_block`, `${param.instructionReturn}_block`),
+					InstructionBuilder.set(`${paramName}_pos`, `${param.instructionReturn}_pos`)
+				]));
+			} else if (actualType.name === 'content_t' && node.arguments[i].dataType && special.includes(node.arguments[i].dataType.name)) {
+				const implicitConv = this.implicitToContentRaw(new Instruction([], param.instructionReturn), referrer(node.arguments[i].dataType.name));
+				result.concat(implicitConv);
+				result.concat(InstructionBuilder.set(paramName, implicitConv.instructionReturn));
+			} else if (special.includes(actualType.name)) {
+				const implicitConv = this.implicitContentToNumericRaw(param, referrer(node.arguments[i].dataType.name));
+				result.concat(implicitConv);
+				result.concat(InstructionBuilder.set(paramName, implicitConv.instructionReturn));
+			} else {
+				result.concat(InstructionBuilder.set(paramName, param.instructionReturn));
+			}
+		};
+
 		for (let i = 0; i < relevantFunction.type.parameters.length && i < node.arguments.length; i++) {
 			const param = this.visitAndRead(node.arguments[i]);
 			result.concat(param);
@@ -13846,23 +13881,13 @@ class CodeGenerator extends ASTVisitor {
 				actualType = relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name).type.type;
 			}
 			// This is so-called "post-processing"
-			if (actualType.kind === 'pointer' || actualType.kind === 'array' || actualType.kind === 'struct'
-				|| actualType.kind === 'union'
-			) {
-				result.concat(new Instruction([
-					InstructionBuilder.set(`__param_${i}_block`, `${param.instructionReturn}_block`),
-					InstructionBuilder.set(`__param_${i}_pos`, `${param.instructionReturn}_pos`)
-				]));
-			} else if (actualType.name === 'content_t' && node.arguments[i].dataType && special.includes(node.arguments[i].dataType.name)) {
-				const implicitConv = this.implicitToContentRaw(new Instruction([], param.instructionReturn), referrer(node.arguments[i].dataType.name));
-				result.concat(implicitConv);
-				result.concat(InstructionBuilder.set(`__param_${i}`, implicitConv.instructionReturn));
-			} else if (special.includes(actualType.name)) {
-				const implicitConv = this.implicitContentToNumericRaw(param, referrer(node.arguments[i].dataType.name));
-				result.concat(implicitConv);
-				result.concat(InstructionBuilder.set(`__param_${i}`, implicitConv.instructionReturn));
+			
+			if (isFunctionPointer) {
+				tackleWithParam(actualType, `__param_${i}`, param);
 			} else {
-				result.concat(InstructionBuilder.set(`__param_${i}`, param.instructionReturn));
+				tackleWithParam(actualType, 
+					relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name).getAssemblySymbol(),
+				param);
 			}
 			
 		}
