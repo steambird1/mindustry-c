@@ -1825,10 +1825,14 @@ export class SemanticAnalyzer extends ASTVisitor {
                         node.argument.location
                     );
                 }
+
+				node.dataType = this.getTypeInfo(returnType);
             }
         } else if (this.currentFunction && this.currentFunction.type.returnType !== 'void') {
             this.addError(`Function must return a value`, node.location);
-        }
+        } else {
+			node.dataType = this.getTypeInfo('void');
+		}
     }
 
     visitCompoundStatement(node) {

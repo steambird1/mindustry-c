@@ -132,13 +132,13 @@ export class CodeGenerator extends ASTVisitor {
 	 * (These can be used simultaneously)
 	 */
 	processHeapMemory(scope, staticAllocOnly = false, mustAlloc = false, insideFunctionName = "") {
-		/*
+		
 		if (scope.astNode && scope.astNode.type === 'FunctionDeclaration') {
 			if (this.recuriveInfo.has(scope.astNode.name)) {
 				mustAlloc = true;
 			}
 		}
-			*/
+			
 		scope.getAllSymbols().forEach(
 			/**
 			 * 
@@ -808,7 +808,8 @@ export class CodeGenerator extends ASTVisitor {
 		} else if (result.getAttribute('isPointer')) {
 			stmt.concat(this.memory.outputPointerFetchOf(result.instructionReturn, "__return"));
 		} else {
-			stmt.concat(InstructionBuilder.set('__return', result.instructionReturn));
+			stmt.concat(this.copyObject('__return', result.instructionReturn, node.dataType, node.argument.dataType, true));
+			//stmt.concat(InstructionBuilder.set('__return', result.instructionReturn));
 		}
 		this.releaseTempVariable();
 		let jumper = InstructionBuilder.jump(`{func_ret}`, 'always');

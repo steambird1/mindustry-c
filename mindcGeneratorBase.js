@@ -1,7 +1,7 @@
 
 import { AttributeClass } from "./mindcBase.js";
 
-import { SymbolEntry } from "./mindcSemantic.js";
+import { SymbolEntry, TypeInfo } from "./mindcSemantic.js";
 
 export class InstructionReferrerException {
 	constructor(obj, caller = null, info = "") {
@@ -556,11 +556,16 @@ export class FunctionRegisterer {
 	 * Get stack storage of the function.
 	 * WHEN CALLING THIS, IT IS ASSUMED THAT all relevant symbols in the function are "accessThroughPointer".
 	 * @param {string} functionName 
+	 * @todo
 	 */
 	getFunctionStackStorage(functionName) {
 		const func = this.functionCollection.get(functionName);
-		return new Instruction(func.stackSymbols.flatMap(
-			symbol => {
+		/**
+		 * 
+		 * @param {SymbolEntry} symbol 
+		 * @returns {Instruction[]}
+		 */
+		const mapper = symbol => {
 				if (symbol.name === '__stackpos') return [];
 				if (symbol.implementAsPointer) {
 					return [
@@ -572,8 +577,8 @@ export class FunctionRegisterer {
 					return [this.memoryObject.outputPointerStorageOf(`${symbol.getAssemblySymbol()}.__pointer`, symbol.getAssemblySymbol())];
 				}
 				
-			}
-		));
+			};
+		return new Instruction(func.stackSymbols.flatMap(mapper));
 	}
 	
 	getFunctionStackRollback(functionName) {
@@ -582,7 +587,7 @@ export class FunctionRegisterer {
 	}
 
 	/**
-	 * 
+	 * Allocating heap memory for function symbols.
 	 * @param {string} functionName 
 	 * @param {boolean | null} setStackpos 
 	 * @returns {Instruction}
@@ -607,6 +612,7 @@ export class FunctionRegisterer {
 			totalStackframeSize += symbol.size;
 			const memFwdCall = this.getFunctionCall('__stackframe_forward', new Map([['__step', symbol.size]]), null);
 			//memoryObject.outputPointerForwardCall(symbol.size, '__stackframe', this);
+			// This has even taken array into account
 			if (symbol.implementAsPointer && !symbol.accessThroughPointer) {
 				// Already pointer, simply assigning memory space
 				heapPreparation.concat(new Instruction([
