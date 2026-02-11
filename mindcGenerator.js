@@ -1568,7 +1568,7 @@ export class CodeGenerator extends ASTVisitor {
 				result.setAttribute('isPointer', true);	// Must be a pointer...
 				result.instructionReturn = leftPointer.instructionReturn;
 				return result;
-			} else if (node.right.dataType && (node.right.dataType === 'struct' || node.right.dataType === 'union')) {
+			} else if (node.right.dataType && (node.right.dataType.kind === 'struct' || node.right.dataType.kind === 'union')) {
 				const leftPointer = this.processLValGetter(node.left, true, true);
 				const structData = this.visitAndRead(node.right, {
 					assignmentTarget: leftPointer.instructionReturn
