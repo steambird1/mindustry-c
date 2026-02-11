@@ -7,7 +7,6 @@
     <!-- Bootstrap 5 CSS -->
     <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.8/css/bootstrap.min.css" rel="stylesheet">
     <!-- 代码高亮样式 -->
-    <script src="mindc.js"></script>
     <style>
         :root {
             --primary-color: #4361ee;
@@ -441,8 +440,13 @@ void main() {
     <!-- Font Awesome for icons -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/js/all.min.js"></script>
     
-    <script>
+    <script type="module">
         // 等待DOM加载完成
+        import { TokenType, Token, KEYWORDS, SPECIAL_INSTRUCTIONS, OPERATORS,
+            PUNCTUATORS, Lexer
+        } from "./mindcLexer.js";
+        import { MemoryBlock } from "./mindcGeneratorBase.js";
+        import { Compiler } from "./mindc.js";
 
         document.addEventListener('DOMContentLoaded', function() {
             // 获取关键DOM元素
@@ -563,12 +567,12 @@ void main() {
                             //console.log(tokenText);
                             cssClass = 'string';
                         } else if (tokenType.includes('OPERATOR') || 
-                                   Object.values(TokenType).slice(41, 69).includes(tokenType)) { // 运算符范围
+                                   Object.values(TokenType).slice(41, 70).includes(tokenType)) { // 运算符范围
                             cssClass = 'operator';
                         } else if (tokenType.includes('PUNCTUATOR') || 
-                                   Object.values(TokenType).slice(69, 80).includes(tokenType)) { // 标点符号范围
+                                   Object.values(TokenType).slice(70, 87).includes(tokenType)) { // 标点符号范围
                             cssClass = 'punctuator';
-                        } else if (Object.values(TokenType).slice(80, 110).includes(tokenType)) { // 特殊指令
+                        } else if (Object.values(TokenType).slice(87, 111).includes(tokenType)) { // 特殊指令
                             cssClass = 'special';
                         } else if (tokenType === TokenType.PREDEFINED_CONSTANT) {
                             cssClass = 'predefined';
