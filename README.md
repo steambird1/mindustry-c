@@ -1,6 +1,6 @@
 # mindustry-c: A JavaScript program compiling C code to Mindustry Assembly
 
-[中文 README](https://github.com/steambird1/mindustry-c/blob/main/docs/LiyueSprache/README.md)
+[中文 README（更新可能有延迟）](https://github.com/steambird1/mindustry-c/blob/main/docs/LiyueSprache/README.md)
 
 ## What is Mindustry-C?
 
@@ -23,7 +23,15 @@ There have been many similar softwares aiming at using languages like C/C++ (ali
 
 ## Installation
 
-Installation is not needed. Just download `main.html` and `mindc.js` and ensure that you have Internet connection (UI requires Bootstrap from CDN; or the display might be a little bit weird). Then, input your code and start compiling!
+Installation is not needed. Just download `main.html` and all javascript files and ensure that you have Internet connection (UI requires Bootstrap from CDN; or the display might be a little bit weird).
+
+Then, **start a server and browse `main.html` from it (or you will be blocked by CORS policy of browsers)**. Execute the following command in the root directory of the download files if you have python 3:
+
+```
+python -m http.server
+```
+
+Or [if you want to make it 100% steambird-made](https://github.com/steambird1/MinServer-Old).
 
 For grammar introduction (about the features unique to Mindustry-C) and examples, refer to docs (might be in progress).
 
