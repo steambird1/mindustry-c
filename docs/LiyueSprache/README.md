@@ -10,7 +10,9 @@ Mindustry-C 将 C 代码编译为 Mindustry 逻辑——因为后者太烧脑。
 
 ## 安装
 
-Mindustry-C 不需要安装。你只需要下载 `main.html` 和 `mindc.js` 然后用较新的浏览器打开 `main.html` 即可。
+Mindustry-C 不需要安装。你只需要下载 `main.html` 和所有 JavaScript 文件，然后在同一目录下启动一个 HTTP 服务器（这一步是必要的，否则脚本会被 CORS 策略阻止）。
+
+用较新的浏览器（至少支持 ES6）访问 `main.html` 即可。
 
 建议保持网络连接，因为 `main.html` 中使用了来自 CDN 的 Bootstrap 以实现界面。
 
