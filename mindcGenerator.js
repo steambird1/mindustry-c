@@ -63,7 +63,7 @@ export class CodeGenerator extends ASTVisitor {
 		this.currentScope = null;
 		this.errors = [];
 		this.warnings = [];
-
+		
 		this.targetVersion = this.compiler ? this.compiler.config.getAttribute('targetVersion') : 0;
 		this.guaranteeTemporarySymbolReg = true;
 	}
@@ -147,10 +147,15 @@ export class CodeGenerator extends ASTVisitor {
 			symbol => {
 			// Update symbol size information
 			if ((mustAlloc || symbol.isAddressed || symbol.isVolatile) && symbol.kind !== 'function') {
+				/*
 				if (symbol.isBasic()) {
 					symbol.accessThroughPointer = true;
 				} else {
 					symbol.implementAsPointer = true;
+				}
+					*/
+				if (symbol.isStructOrUnion()) {
+					symbol.implementAsPointer = true;	// Use recursive processor otherwise
 				}
 				symbol.needMemoryAllocation = true;
 			}
@@ -276,7 +281,7 @@ export class CodeGenerator extends ASTVisitor {
 					InstructionBuilder.set(givenName, symbol.getAssemblySymbol())
 				], givenName);
 			} else {
-				return new Instruction([], symbol.getAssemblySymbol());
+				return new Instruction([], symbol.getAssemblySymbol(), new Map([['disallowReplacement', true]]));
 			}	
 		};
 
@@ -584,7 +589,9 @@ export class CodeGenerator extends ASTVisitor {
 					return this.generateSymbolRead(symbol, instructionSplit[0] === ":varStorageCp", instructionSplit[1]);
 					break;
 				case ":varRead":
-					return new Instruction([], instructionSplit.length >= 2 ? instructionSplit[1] : "null");
+					return new Instruction([], instructionSplit.length >= 2 ? instructionSplit[1] : "null",
+						new Map([['disallowReplacement', true]])
+					);
 					break;
 			}
 		} 
@@ -633,7 +640,7 @@ export class CodeGenerator extends ASTVisitor {
 				throw new InternalGenerationFailure(`Cannot generate copy from ${source} to ${target}`);
 			}
 		} else if (finalSourceType.name === 'content_t' && special.includes(actualType.name)) {
-			const implicitConv = this.implicitToContentRaw(new Instruction([], source), referrer(actualType.name));
+			const implicitConv = this.implicitToContentRaw(new Instruction([], source, new Map([['disallowReplacement', true]])), referrer(actualType.name));
 			result.concat(implicitConv);
 			result.concat(InstructionBuilder.set(target, implicitConv.instructionReturn));
 		} else if (special.includes(actualType.name)) {
@@ -744,7 +751,8 @@ export class CodeGenerator extends ASTVisitor {
 		this.currentFunction = node.name;
 		this.currentReturns = [];
 		let result = new Instruction(), paramId = 0;
-		if (!(node.symbol && !node.symbol.isAddressed)) {
+		const functionSymbol = this.currentScope.lookup(node.name);
+		if (!(functionSymbol && !functionSymbol.isAddressed)) {
 			result.concat(new Instruction(node.scope.getAllSymbols().flatMap(sym => {
 				if (sym.kind !== 'parameter') return [];
 				const paramName = `__param_${paramId++}`;
@@ -797,19 +805,20 @@ export class CodeGenerator extends ASTVisitor {
 		const result = node.argument ? this.visitAndRead(node.argument) : new Instruction();
 		let stmt = new Instruction();
 		stmt.concat(result);
-		//stmt.concat(InstructionBuilder.set("__return", result.instructionReturn));
-		// Copying should be done in callers, not callees
-		if (node.dataType && node.dataType.isPointerImpl()) {
-			stmt.setAttribute('isPointer', true);
-			stmt.concat([
-				InstructionBuilder.set(`__return_block`, `${result.instructionReturn}_block`),
-				InstructionBuilder.set(`__return_pos`, `${result.instructionReturn}_pos`)
-			])
-		} else if (result.getAttribute('isPointer')) {
-			stmt.concat(this.memory.outputPointerFetchOf(result.instructionReturn, "__return"));
-		} else {
-			stmt.concat(this.copyObject('__return', result.instructionReturn, node.dataType, node.argument.dataType, true));
-			//stmt.concat(InstructionBuilder.set('__return', result.instructionReturn));
+		if (node.argument) {
+			// Copying should be done in callers, not callees
+			if (node.dataType && node.dataType.isPointerImpl()) {
+				stmt.setAttribute('isPointer', true);
+				stmt.concat([
+					InstructionBuilder.set(`__return_block`, `${result.instructionReturn}_block`),
+					InstructionBuilder.set(`__return_pos`, `${result.instructionReturn}_pos`)
+				])
+			} else if (result.getAttribute('isPointer')) {
+				stmt.concat(this.memory.outputPointerFetchOf(result.instructionReturn, "__return"));
+			} else {
+				stmt.concat(this.copyObject('__return', result.instructionReturn, node.dataType, node.argument.dataType, true));
+				//stmt.concat(InstructionBuilder.set('__return', result.instructionReturn));
+			}
 		}
 		this.releaseTempVariable();
 		let jumper = InstructionBuilder.jump(`{func_ret}`, 'always');
@@ -841,7 +850,8 @@ export class CodeGenerator extends ASTVisitor {
 	visitExpressionStatement(node, param) {
 		let instruction = new Instruction();
 		node.children.forEach(stmt => {
-			this.releaseTempVariable();	// Split expressions won't affect each other
+			//this.releaseTempVariable();
+			// As we apply variable replacement, we can't release temporary variable here
 			const result = this.visitAndRead(stmt, param);
 			instruction.concat_returns(result);
 		});
@@ -1091,7 +1101,7 @@ export class CodeGenerator extends ASTVisitor {
 			}
 			// This is reserved
 			let evaluation = node.initializer ? this.visitAndRead(node.initializer) : new Instruction();
-			finalize.concat(evaluation);
+			
 			if (node.initializer) {
 				// Necessary implicit converts that is not supported by the Mindustry VM
 				if (node.initializer.dataType) {
@@ -1107,8 +1117,14 @@ export class CodeGenerator extends ASTVisitor {
 				if (node.initializer.dataType && (
 					node.initializer.dataType.kind === 'struct' || node.initializer.dataType.kind === 'union'
 				)) {
-					finalize.concat(this.copyStruct(symbol.getAssemblySymbol(), evaluation.instructionReturn ?? 'null', symbol.myType(), node.initializer.dataType));
+					if (evaluation.getAttribute('disallowReplacement')) {
+						finalize.concat(evaluation);
+						finalize.concat(this.copyStruct(symbol.getAssemblySymbol(), evaluation.instructionReturn ?? 'null', symbol.myType(), node.initializer.dataType));
+					} else {
+						finalize.concat(evaluation.replace_variable(symbol.getAssemblySymbol(), evaluation.instructionReturn));
+					}
 				} else {
+					finalize.concat(evaluation);
 					finalize.concat(this.generateSymbolWrite(symbol, evaluation.instructionReturn ?? 'null'));
 				}
 				
@@ -1284,7 +1300,7 @@ export class CodeGenerator extends ASTVisitor {
 		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
 		const referrer = typeName => typeName.slice(0, typeName.length - 2);
 		if (node.type === 'Identifier' && node.name[0] === '@') {
-			return new Instruction([], node.name);
+			return new Instruction([], node.name, new Map([['disallowReplacement', true]]));
 		}
 		if (node.dataType) {
 			if (!contentType && special.includes(node.dataType.name)) {
@@ -1343,7 +1359,8 @@ export class CodeGenerator extends ASTVisitor {
 			if (!(leftIsPointer || rightIsPointer)) {
 				return this.operatesReads(
 					[this.visit(node.left), this.visit(node.right)],
-					new Instruction([], `${requireOpposite ? oppositeTranslation.get(node.operator) : comparerTranslation.get(node.operator)} {op_r0} {op_r1}`)
+					new Instruction([], `${requireOpposite ? oppositeTranslation.get(node.operator) : comparerTranslation.get(node.operator)} {op_r0} {op_r1}`,
+					new Map([['disallowReplacement', true]]))
 				);
 			}
 		}
@@ -1486,10 +1503,10 @@ export class CodeGenerator extends ASTVisitor {
 				if (node.expression.type === 'Identifier') {
 					// Directly return it.
 					if (node.expression.name.length > 0 && node.expression.name[0] == '@') {
-						return new Instruction([], node.expression.name);
+						return new Instruction([], node.expression.name, new Map([['disallowReplacement', true]]));
 					}
 					const symbol = this.currentScope.lookup(node.expression.name);
-					casting = new Instruction([], symbol.getAssemblySymbol());
+					casting = new Instruction([], symbol.getAssemblySymbol(), new Map([['disallowReplacement', true]]));
 				} else {
 					casting = this.visit(node.expression);	// Don't convert it directly, if volatile is given
 				}
@@ -1574,10 +1591,17 @@ export class CodeGenerator extends ASTVisitor {
 				const structData = this.visitAndRead(node.right, {
 					assignmentTarget: leftPointer.instructionReturn
 				});
-				return leftPointer
-					.concat(structData)
-					.concat(this.copyStruct(leftPointer.instructionReturn, structData.instructionReturn, 
-						node.right.dataType, node.left.dataType));
+				
+				if (structData.getAttribute('disallowReplacement')) {	// Rarely used
+					return leftPointer
+						.concat(structData)
+						.concat(this.copyStruct(leftPointer.instructionReturn, structData.instructionReturn, 
+							node.right.dataType, node.left.dataType));
+				} else {
+					return leftPointer.concat(structData.replace_variable(leftPointer.instructionReturn, 
+						structData.instructionReturn));
+				}
+				
 			} else if (node.left.dataType && node.right.dataType) {
 				if (special.includes(node.right.dataType.name) && node.left.dataType.name === 'content_t') {
 					value = this.implicitToContent(node.right, referrer(node.right.dataType.name));
@@ -1610,7 +1634,7 @@ export class CodeGenerator extends ASTVisitor {
 				break;
 			case '-': case '~':
 				if (node.argument.type === 'NumericLiteral') {
-					return new Instruction([], -node.argument.value);
+					return new Instruction([], -node.argument.value, new Map([['disallowReplacement', true]]));
 				}
 				result = this.visitAndRead(node.argument);
 				temp = this.getTempSymbol(node.dataType);
@@ -1800,7 +1824,7 @@ export class CodeGenerator extends ASTVisitor {
 					[], `${assemblySymbol}.__pointer`, 
 					new Map([['isPointer', true], ['isPointerAccess', isAccess && accessControl], 
 						['pointerAccess', isAccess], ['relevantSymbolRead', identity], ['isNearPointer', identity.isNearPointer],
-						['isRegStruct', identity.isRegistryStruct()]]));
+						['isRegStruct', identity.isRegistryStruct()], ['disallowReplacement', true]]));
 				if (identity) {
 					
 					// This means that it IS a pointer. Pay attention to the circumstances
@@ -1817,7 +1841,7 @@ export class CodeGenerator extends ASTVisitor {
 									return new Instruction([], null, 
 										[['isPointer', true], ['isPointerAccess', true], ['pointerAccess', true],
 									['relevantSymbolRead', identity], ['isNearPointer', identity.isNearPointer],
-									['isRegStruct', identity.isRegistryStruct()]])
+									['isRegStruct', identity.isRegistryStruct()], ['disallowReplacement', true]])
 										.concat_returns(this.generateSymbolRead(identity));
 								} else {
 									return directAccess();
@@ -1834,7 +1858,7 @@ export class CodeGenerator extends ASTVisitor {
 								if (traditional) {
 									return new Instruction([], assemblySymbol, new Map([['isPointer', true],
 									['relevantSymbol', identity], ['isNearPointer', identity.isNearPointer],
-									['isRegStruct', identity.isRegistryStruct()]]));
+									['isRegStruct', identity.isRegistryStruct()], ['disallowReplacement', true]]));
 								}
 								throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable has no address. Use 'volatile', 'static' or explicit '&' for its address.)`, left);
 							}
@@ -1865,7 +1889,7 @@ export class CodeGenerator extends ASTVisitor {
 							if (traditional) {
 								return new Instruction([], identity.getAssemblySymbol(), new Map(
 									[['relevantSymbol', identity], ['isNearPointer', identity.isNearPointer],
-						['isRegStruct', identity.isRegistryStruct()]]
+						['isRegStruct', identity.isRegistryStruct()], ['disallowReplacement', true]]
 								));
 							}
 							throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable has no address. Use 'volatile', 'static' or explicit '&' for its address.)`, left);
@@ -1919,12 +1943,13 @@ export class CodeGenerator extends ASTVisitor {
 			
 			case 'UnaryExpression':
 				if (left.getAttribute('isDereference')) {
-					if (returnOnlyPointer) {
-						throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable already has memory address. Use '&' to avoid this problem.)`, left);
-					}
 					precall = this.visitAndRead(left.argument);	// Simple calculation
 					// Not regarding as pointer!
 					pointer = precall.instructionReturn;
+					if (returnOnlyPointer) {
+						return precall;
+						//throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable already has memory address. Use '&' to avoid this problem.)`, left);
+					}
 					break;
 				} else {
 					// This doesn't really make sense.
@@ -1944,7 +1969,7 @@ export class CodeGenerator extends ASTVisitor {
 				if (this.compiler.config.getAttribute('regardValuesAsAddresses')) {
 					this.addWarning(`Maybe not a LValue -- regarding the value as an address`, left.location);
 				} else {
-					return new Instruction([], "null");
+					return new Instruction([], "null", new Map([['disallowReplacement', true]]));
 				}
 				break;
 		}
@@ -1981,16 +2006,24 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	processAssignment(left, right) {
 		let result = new Instruction();
-		let lval = this.processLValGetter(left);
-		result.concat(right);
-		if (lval.getAttribute('isPointer')) {
-			result.concat_returns(lval.raw_replace('pointer_block_entry', `${right.instructionReturn}_block`)
-			.raw_replace('pointer_ptr_entry', `${right.instructionReturn}_pos`));
+		
+		if (right.getAttribute('disallowReplacement') || (left.symbol && left.symbol.accessThroughPointer)) {
+			let lval = this.processLValGetter(left);
+			result.concat(right);
+			if (lval.getAttribute('isPointer')) {
+				result.concat_returns(lval.raw_replace('pointer_block_entry', `${right.instructionReturn}_block`)
+				.raw_replace('pointer_ptr_entry', `${right.instructionReturn}_pos`));
+			} else {
+				let returns = right.instructionReturn;
+				result.concat_returns(lval.raw_replace('value_entry', returns));
+			}
+			return result;
 		} else {
-			let returns = right.instructionReturn;
-			result.concat_returns(lval.raw_replace('value_entry', returns));
+			const lval = this.processLValGetter(left, true, true);
+			result.concat(lval);
+			result.concat(right.replace_variable(lval.instructionReturn, right.instructionReturn));
+			return result;
 		}
-		return result;
 	}
 
 	/**
@@ -2150,9 +2183,9 @@ export class CodeGenerator extends ASTVisitor {
 		if (isBuiltinConstant) {
 			// If the value is a builtin constant with type...
 			if (node.dataType && special.includes(node.dataType.name)) {
-				return this.implicitContentToNumericRaw(new Instruction([], node.name));	// Make a conversion
+				return this.implicitContentToNumericRaw(new Instruction([], node.name, new Map([['disallowReplacement', true]])));	// Make a conversion
 			} else {
-				return new Instruction([], node.name);
+				return new Instruction([], node.name, new Map([['disallowReplacement', true]]));
 			}
 		}
 		return this.generateSymbolRead(this.currentScope.lookup(node.name));	// Major change: now changed to false!!!
@@ -2163,7 +2196,7 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {NumericLiteralNode} node 
 	 */
 	visitNumericLiteral(node) {
-		return new Instruction([], `${node.value}`);
+		return new Instruction([], `${node.value}`, new Map([['disallowReplacement', true]]));
 	}
 
 	/**
@@ -2171,15 +2204,15 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {StringLiteralNode} node 
 	 */
 	visitStringLiteral(node) {
-		return new Instruction([], node.raw);
+		return new Instruction([], node.raw, new Map([['disallowReplacement', true]]));
 	}
 
 	visitCharacterLiteral(node) {
-		return new Instruction([], `${node.raw.replace('"','\\"')}`);
+		return new Instruction([], `${node.raw.replace('"','\\"')}`, new Map([['disallowReplacement', true]]));
 	}
 
 	visitNullLiteral(node) {
-		return new Instruction([], 'null');
+		return new Instruction([], 'null', new Map([['disallowReplacement', true]]));
 	}
 
 	/**

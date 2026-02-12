@@ -109,7 +109,9 @@ export class Instruction extends AttributeClass {
 		if (!other) return;
 		this.instructions.push(other);
 		this.instructionReturn = other.instructionReturn;
-		for (const retAttrib of ['isSymbolic', 'isPointer', 'isRValueMem', 'isPointerAccess']) {
+		for (const retAttrib of ['isSymbolic', 'isPointer', 'isRValueMem', 'isPointerAccess', 'disallowReplacement',
+			'relevantSymbol', 'isNearPointer', 'isRegStruct'
+		]) {
 			this.setAttribute(retAttrib, other.getAttribute(retAttrib));
 		}
 		return this;
@@ -245,6 +247,24 @@ export class Instruction extends AttributeClass {
 		return this;
 	}
 
+	/**
+	 * 
+	 * @param {string} target 
+	 * @param {string} source 
+	 * @returns {Instruction}
+	 */
+	replace_variable(target, source) {
+		this.instructions.forEach(stmt => {
+			if (stmt.isInstructionGroup) {
+				stmt.replace_variable(target, source);
+			} else if (stmt.content) {
+				stmt.content = stmt.content.replace(new RegExp(source, 'g'), target);
+			}
+		});
+		if (this.instructionReturn) this.instructionReturn =  this.instructionReturn.replace(new RegExp(source, 'g'), target);
+		return this;
+	}
+
 	size() {
 		let currentSize = 0;
 		this.instructions.forEach(instruction => {
@@ -319,6 +339,16 @@ export class SingleInstruction extends Instruction {
 			return this;
 		} else {
 			return super.raw_replace(variable, value);
+		}
+	}
+
+	replace_variable(target, source) {
+		if (!this.isInstructionGroup) {
+			this.content = this.content.replace(new RegExp(source, 'g'), target);
+			if (this.instructionReturn) this.instructionReturn = this.instructionReturn.replace(new RegExp(source, 'g'), target);
+			return this;
+		} else {
+			return super.replace_variable(target, source);
 		}
 	}
 
