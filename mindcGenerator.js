@@ -226,8 +226,7 @@ export class CodeGenerator extends ASTVisitor {
 							symbol.isNearPointer = false;
 						} else {
 							symbol.memoryLocation = attempt;
-							this.memory.pus
-							hStack();
+							this.memory.pushStack();
 							//let curState = this.memory.currentState();
 							this.memory.setState(attempt.forwarding(symbol.size));
 							if (skippedPage > 0) {
@@ -281,7 +280,7 @@ export class CodeGenerator extends ASTVisitor {
 					InstructionBuilder.set(givenName, symbol.getAssemblySymbol())
 				], givenName);
 			} else {
-				return new Instruction([], symbol.getAssemblySymbol(), new Map([['disallowReplacement', true]]));
+				return new Instruction([], null, new Map([['disallowReplacement', true]])).set_returns(symbol);
 			}	
 		};
 
@@ -1538,7 +1537,7 @@ export class CodeGenerator extends ASTVisitor {
 					casting = this.implicitToNumeric(node.expression);
 				} else if (['item_t', 'liquid_t', 'unit_t', 'block_t', 'int'].includes(node.expression.dataType.name) && node.dataType.name === 'content_t') {
 					const referrer = typeName => typeName.slice(0, typeName.length - 2);
-					casting = this.implicitToContent(node.expression, referrer(node.dataType.name));
+					casting = this.implicitToContent(node.expression, referrer(node.expression.dataType.name));
 				}
 			}
 		} 
@@ -2007,7 +2006,7 @@ export class CodeGenerator extends ASTVisitor {
 	processAssignment(left, right) {
 		let result = new Instruction();
 		
-		if (right.getAttribute('disallowReplacement') || (left.symbol && left.symbol.accessThroughPointer)) {
+		if (right.getAttribute('disallowReplacement') || !(left.symbol && !left.symbol.isPointer())) {
 			let lval = this.processLValGetter(left);
 			result.concat(right);
 			if (lval.getAttribute('isPointer')) {

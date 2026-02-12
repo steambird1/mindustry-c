@@ -100,12 +100,16 @@ export class SymbolEntry {
 		return curType && curType.kind === 'basic';
 	}
 
+	isPointer() {
+		return this.accessThroughPointer || this.implementAsPointer || this.needMemoryAllocation;
+	}
+
 	/**
 	 * In current version, a structure can't be regarded as `accessThroughPointer`.
 	 * @returns {boolean}
 	 */
 	isRegistryStruct() {
-		return this.isStructOrUnion() && !this.implementAsPointer && !this.needMemoryAllocation;
+		return this.isStructOrUnion() && !this.isPointer();
 	}
 
 	getAssemblySymbol() {
