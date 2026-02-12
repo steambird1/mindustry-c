@@ -1901,12 +1901,15 @@ export class SemanticAnalyzer extends ASTVisitor {
 
             case 'Identifier':
                 const symbol = this.currentScope.lookup(node.name);
+				if (!symbol) {
+					return null;
+				}
 				if (symbol.kind === 'function') {
 					let funcType = new TypeInfo(node.name, 'function');
 					funcType.functionTo = symbol;
 					return funcType;
 				}
-                return symbol ? symbol.myType() : null;
+                return symbol.myType();
 
             case 'MemberExpression':
                 return node.dataType;
@@ -2010,7 +2013,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 */
 	isSameType(targetTypeRaw, sourceTypeRaw) {
 		const targetType = targetTypeRaw.duplicate(), sourceType = sourceTypeRaw.duplicate();
-		const ignoredQualifiers = ['auto', 'volatile', 'static'];
+		const ignoredQualifiers = ['auto', 'volatile', 'static', 'extern', 'near'];
 		sourceType.qualifiers = sourceType.qualifiers.filter(
 			item => (!ignoredQualifiers.includes(item)));	// 'const' of source does not matter
 		targetType.qualifiers = targetType.qualifiers.filter(

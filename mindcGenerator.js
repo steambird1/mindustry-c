@@ -12,7 +12,7 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	liquidList, unitList, buildingList
  } from "./mindcBase.js";
 
-import { SymbolEntry, Scope, TypeInfo, MemberInfo } from "./mindcSemantic.js";
+import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mindcSemantic.js";
 
 import { Optimizer } from "./mindcOptimizer.js";
 
@@ -42,6 +42,9 @@ export class CodeGenerator extends ASTVisitor {
 	 */
     constructor(compiler) {
         super(compiler);
+		/**
+		 * @type {SemanticAnalyzer}
+		 */
 		this.semantic = compiler.semanticAnalyzer;
 		this.functionCallGraph = compiler.optimizer.functionCallGraph;
 		this.registryId = 0;
@@ -639,11 +642,12 @@ export class CodeGenerator extends ASTVisitor {
 				throw new InternalGenerationFailure(`Cannot generate copy from ${source} to ${target}`);
 			}
 		} else if (finalSourceType.name === 'content_t' && special.includes(actualType.name)) {
-			const implicitConv = this.implicitToContentRaw(new Instruction([], source, new Map([['disallowReplacement', true]])), referrer(actualType.name));
+			const implicitConv = this.implicitToContentRaw(
+				new Instruction([], source, new Map([['disallowReplacement', true]])), referrer(actualType.name));
 			result.concat(implicitConv);
 			result.concat(InstructionBuilder.set(target, implicitConv.instructionReturn));
-		} else if (special.includes(actualType.name)) {
-			const implicitConv = this.implicitContentToNumericRaw(source);
+		} else if (special.includes(finalSourceType.name) && !this.semantic.isSameType(finalSourceType, actualType)) {
+			const implicitConv = this.implicitContentToNumericRaw(new Instruction([], source, new Map([['disallowReplacement', true]])));
 			result.concat(implicitConv);
 			result.concat(InstructionBuilder.set(target, implicitConv.instructionReturn));
 		} else {
@@ -2063,7 +2067,7 @@ export class CodeGenerator extends ASTVisitor {
 		 */
 		const tackleWithParam = (actualType, paramName, param, paramType = null) => 
 			new Instruction([
-				param,
+//				param,
 				this.copyObject(paramName, param.instructionReturn, actualType, paramType)
 			]);
 
