@@ -16,15 +16,15 @@ auto device switch3;    // Turned on - move away; Turned off - move in
 auto device vault1;
 auto device message1;   // Information display
 
-const unit_t *allowUnits = {@poly};
-const int *allowMaxBind = {5};
+const near unit_t *allowUnits = {(unit_t)@poly};
+const near int *allowMaxBind = {3};
 const int allowUnitsSize = 1;
-const item_t *deployObjects = {@thorium, @graphite};
-const int deployObjectsSize = 2;
+const near item_t *deployObjects = {(item_t)@thorium};
+const int deployObjectsSize = 1;
 
 // Must simultaneously modify them:
 const pdlist_t unitList = pdcreate(25);
-int phase[25];
+near int phase[25];
 const int maxUnitBinding = 25;
 
 const device vaultDevice = vault1; // You may replace it by sth else
@@ -35,7 +35,7 @@ const float coreRadius = 4;
 const int inf = 1000000000, maxDrop = 999;
 const float timeout = 20000.0;
 
-const int serial = (long)@thisX * 1000 + (long)@thisY;
+const int serial = (long)@thisx * 1000 + (long)@thisy;
 
 // --- End of configuration --
 
@@ -46,7 +46,7 @@ float beginning;
 int vaultX, vaultY;
 int coreX, coreY, coreFound;
 device coreDevice;
-int *phaseAccess;
+near int *phaseAccess;
 
 void output(char info) {
     print(info);
@@ -92,13 +92,13 @@ bool isApproaching(int x, int y, float r) {
 // Returning of direction: 1 - vault to core, 0 - core to vault
 void considerOperation(item_t *selection, int *direction) {
     const bool balancing = (volatile bool)sensor(switch2, @enabled);
-    item_t *it = deployObjects;
+    near item_t *it = deployObjects;
     int i;
     // Small number means that core has more
     int minImbal = inf, maxImbal = -inf;
     item_t minImbalItem, maxImbalItem;
-    for (i = 0; i < deployObjectsSize; i++) {
-        const item_t currentObj = *it;
+    for (i = 0; i < deployObjectsSize; i++, it++) {
+        const near item_t currentObj = *it;
         const int sensoredCount = (int)sensor(vaultDevice, currentObj) 
                 - (balancing ? (int)sensor(coreDevice, currentObj) : 0);
         const bool minCond = sensoredCount < minImbal, maxCond = sensoredCount > maxImbal;
@@ -107,7 +107,10 @@ void considerOperation(item_t *selection, int *direction) {
         minImbalItem = minCond ? currentObj : minImbalItem;
         maxImbal = maxCond ? sensoredCount : maxImbal;
         maxImbalItem = maxCond ? currentObj : maxImbalItem;
-        it++;
+        // debug
+        //print("Sensoring: ",(content_t)currentObj,", got ",sensoredCount);
+        //printflush(message1);
+        //wait(0.25);
     }
     if (balancing) {
         const bool maxImbalGreater = maxImbal > 0;
@@ -120,22 +123,11 @@ void considerOperation(item_t *selection, int *direction) {
     }
 }
 
-// Execution of unit
-// TODO: Re-design the state machine!!!!!!!
-// (The binding system is just working fine)
-void execute(int id) {
-    autoStop();
-    if (!controllable((device)@unit)) return;
-    preFetch();
-
-    // Determine current operation mode
-    // (This is just an example. For actual execution, it is recommended to
-    // do it before all binding.)
-    item_t currentSelection;
-    int currentDirection;
-    considerOperation(&currentSelection, &currentDirection);
-
-    int currentPhase = *phaseAccess;
+int runPhase(int currentPhase, item_t currentSelection, int currentDirection) {
+    const bool apprCore = isApproaching(coreX, coreY, coreRadius);
+    const bool apprVault = isApproaching(vaultX, vaultY, coreRadius);
+    //print("Execution begun, phase: ",currentPhase, "approachState: ",apprCore,";",apprVault);
+    //printflush(message1);
 
     // State machine
     /*
@@ -156,16 +148,13 @@ void execute(int id) {
         }
     }
 
-    const bool apprCore = isApproaching(coreX, coreY, coreRadius);
-    const bool apprVault = isApproaching(vaultX, vaultY, coreRadius);
-    const int startPhase = currentPhase;
-    print("Execution begun, phase: ",currentPhase, "approachState: ",apprCore,";",apprVault);
-    printflush(message1);
     if (currentPhase == 1) {
         // Core unload
         if (apprCore) {
             ucontrol("itemDrop", coreDevice, maxDrop);
             currentPhase = 0;
+        } else {
+            ucontrol("move", coreX, coreY);
         }
     }
 
@@ -176,6 +165,8 @@ void execute(int id) {
             wait(0.25);
             ucontrol("move", vaultX, vaultY);
             currentPhase = 3;
+        } else {
+            ucontrol("move", coreX, coreY);
         }
     }
 
@@ -184,6 +175,8 @@ void execute(int id) {
         if (apprVault) {
             ucontrol("itemDrop", vaultDevice, maxDrop);
             currentPhase = 0;
+        } else {
+            ucontrol("move", vaultX, vaultY);
         }
     }
 
@@ -194,6 +187,8 @@ void execute(int id) {
             wait(0.25);
             ucontrol("move", coreX, coreY);
             currentPhase = 1;
+        } else {
+            ucontrol("move", vaultX, vaultY);
         }
     }
 
@@ -208,11 +203,36 @@ void execute(int id) {
             currentPhase = 2;
         }
     }
+    return currentPhase;
+}
 
+// Execution of unit
+// TODO: Re-design the state machine!!!!!!!
+// (The binding system is just working fine)
+void execute(int id) {
+    autoStop();
+    if (!controllable((device)@unit)) return;
+    preFetch();
+
+    // Determine current operation mode
+    // (This is just an example. For actual execution, it is recommended to
+    // do it before all binding.)
+    item_t currentSelection;
+    int currentDirection;
+    considerOperation(&currentSelection, &currentDirection);
+    // debug
+    //print("Decision: ",(content_t)currentSelection,", direction: ",currentDirection);
+    //wait(0.25);
+
+    int currentPhase = *phaseAccess;
+    const int startPhase = currentPhase;
+
+    currentPhase = runPhase(currentPhase, currentSelection, currentDirection);
+    wait(0.2);
+    currentPhase = runPhase(currentPhase, currentSelection, currentDirection);
     print("#",id,": Execution completed, phase: ",startPhase," -> ",currentPhase);
     printflush(message1);
     (*phaseAccess) = currentPhase;
-    wait(1);    // For debug!
 }
 
 void main() {
@@ -256,15 +276,15 @@ void main() {
                 ucontrol("flag", serial);
                 pdwrite(unitList, i, @unit);
                 currentDevice = (device)@unit;
+                if (!controllable(currentDevice)) {
+                    (*phaseAccess) = -1;
+                    output("Binding unsuccessful!");
+                    continue;
+                }
             } else {
                 print("Reconnecting...");
                 printflush(message1);
                 ubind(currentDevice);
-            }
-            if (!controllable(currentDevice)) {
-                (*phaseAccess) = -1;
-                output("Binding unsuccessful!");
-                continue;
             }
             print("Bound ", currentUnitType, ", executing...");
             printflush(message1);
