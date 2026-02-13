@@ -763,7 +763,7 @@ export class ConstantManager {
  * 
  * @param {string} s 
  */
-export const __convert = s => s.split(',').map(t => t.trim());
+export const __convert = s => s.split(',').map(t => t.replace(/\-/g, '_').trim());
 export const objectList = __convert(
 	'@copper, @lead, @coal, @graphite, @scrap, @sand, @pyratite, @silicon, @spore-pod, @blast-compound, @titanium, @plastanium, @thorium, @phase-fabric, @surge-alloy, @beryllium, @tungsten, @oxide, @carbide'
 );

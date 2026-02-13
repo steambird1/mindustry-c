@@ -233,6 +233,26 @@ export class Scope {
         }
         return path.join('.');
     }
+
+	// Shallow duplicate
+	duplicate() {
+		const scope = new Scope(this.parent, this.type, this.astNode, this.name);
+		scope.children = [...this.children];
+		scope.symbols = new Map([...this.symbols]);
+		scope.duplicateIdent = (this.duplicateIdent ?? 0) + 1;
+		return scope;
+	}
+
+	duplicateAll() {
+		const scope = new Scope(this.parent, this.type, this.astNode, this.name);
+		scope.children = this.children.map(child => child.duplicateAll());
+		scope.children.forEach(child => {
+			child.parent = scope;
+		});
+		scope.symbols = new Map([...this.symbols].map(([key, symb]) => [key, symb.duplicate()]));
+		scope.fullDuplicateIdent = (this.fullDuplicateIdent ?? 0) + 1;
+		return scope;
+	}
 }
 
 // 首先，添加一些辅助类

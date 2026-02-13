@@ -1105,6 +1105,9 @@ export class Parser {
             varDeclarator.pointerQualifiers = declarator.pointerQualifiers;
             varDeclarator.arrayDimensions = declarator.arrayDimensions;
 			varDeclarator.initializer = declarator.initializer;
+            if (varDeclarator.initializer) {
+                varDeclarator.initializer.parent = varDeclarator;
+            }
 			
 			if (type.pointerDepth > 0) {
 				// Only for the first
@@ -1511,7 +1514,10 @@ export class Parser {
 
     parseExpressionStatement(expectSemicolon = true, expectSingle = false) {
         const expression = this.parseExpression();
-        if (!expression) return null;
+        if (!expression) {
+            if (expectSemicolon) this.expectToken(TokenType.SEMICOLON);
+            return null;
+        }
 
 		let sequence = [expression];
 		while (this.getCurrentToken().type == TokenType.COMMA) {
@@ -1636,13 +1642,83 @@ export class Parser {
         return left;
     }
 
-    parseLogicalAndExpression() {
+    parseBitwiseAndExpression() {
         let left = this.parseEqualityExpression();
+        if (!left) return null;
+
+        while (this.matchToken(TokenType.BITWISE_AND)) {
+            const operatorToken = this.consumeToken();
+            const right = this.parseEqualityExpression();
+            
+            if (!right) {
+                this.addError('Expected expression after bitwise AND operator');
+                break;
+            }
+
+            const logicalExpr = ASTBuilder.binaryExpression(operatorToken.value, left, right);
+			left.parent = logicalExpr;
+			right.parent = logicalExpr;
+            logicalExpr.location = left.location;
+            left = logicalExpr;
+        }
+
+        return left;
+    }
+
+    parseBitwiseOrExpression() {
+        let left = this.parseBitwiseAndExpression();
+        if (!left) return null;
+
+        while (this.matchToken(TokenType.BITWISE_OR)) {
+            const operatorToken = this.consumeToken();
+            const right = this.parseBitwiseAndExpression();
+            
+            if (!right) {
+                this.addError('Expected expression after bitwise OR operator');
+                break;
+            }
+
+            const logicalExpr = ASTBuilder.binaryExpression(operatorToken.value, left, right);
+			left.parent = logicalExpr;
+			right.parent = logicalExpr;
+            logicalExpr.location = left.location;
+            left = logicalExpr;
+        }
+
+        return left;
+    }
+
+    parseBitwiseXorExpression() {
+        let left = this.parseBitwiseOrExpression();
+        if (!left) return null;
+
+        while (this.matchToken(TokenType.BITWISE_XOR)) {
+            const operatorToken = this.consumeToken();
+            const right = this.parseBitwiseOrExpression();
+            
+            if (!right) {
+                this.addError('Expected expression after bitwise XOR operator');
+                break;
+            }
+
+            const logicalExpr = ASTBuilder.binaryExpression(operatorToken.value, left, right);
+			left.parent = logicalExpr;
+			right.parent = logicalExpr;
+            logicalExpr.location = left.location;
+            left = logicalExpr;
+        }
+
+        return left;
+    }
+
+    // Should be bitwise operations first !!!
+    parseLogicalAndExpression() {
+        let left = this.parseBitwiseXorExpression();
         if (!left) return null;
 
         while (this.matchToken(TokenType.AND)) {
             const operatorToken = this.consumeToken();
-            const right = this.parseEqualityExpression();
+            const right = this.parseBitwiseXorExpression();
             
             if (!right) {
                 this.addError('Expected expression after logical AND operator');

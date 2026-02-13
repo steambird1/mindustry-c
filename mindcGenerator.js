@@ -217,6 +217,7 @@ export class CodeGenerator extends ASTVisitor {
 			if (symbol.accessThroughPointer || symbol.needMemoryAllocation) {
 				symbol.needMemoryAllocation = true;
 				if (!staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol) {
+					let allocated = false;
 					if (symbol.isNearPointer) {
 						// Already specified as near, try to assign continuous space
 						let attempt = this.memory.currentState().duplicate(), skippedPage = 0;
@@ -235,9 +236,12 @@ export class CodeGenerator extends ASTVisitor {
 							if (skippedPage > 0) {
 								this.addWarning(`Skipping ${skippedPage} page(s) for near pointer assignment. This may cause memory insufficiency`);
 							}
+							allocated = true;
 						}
 					}
-					symbol.memoryLocation = this.memory.assign(symbol.getAssemblySymbol(), symbol.size);
+					if (!allocated) {
+						symbol.memoryLocation = this.memory.assign(symbol.getAssemblySymbol(), symbol.size);
+					}
 					if ((symbol.kind !== 'pointer')
 						&& symbol.memoryLocation.duplicate().forwarding(symbol.size).block === symbol.memoryLocation.block) {
 							symbol.isNearPointer = true;
@@ -2186,9 +2190,9 @@ export class CodeGenerator extends ASTVisitor {
 		if (isBuiltinConstant) {
 			// If the value is a builtin constant with type...
 			if (node.dataType && special.includes(node.dataType.name)) {
-				return this.implicitContentToNumericRaw(new Instruction([], node.name, new Map([['disallowReplacement', true]])));	// Make a conversion
+				return this.implicitContentToNumericRaw(new Instruction([], node.name.replace(/\_/g, '-'), new Map([['disallowReplacement', true]])));	// Make a conversion
 			} else {
-				return new Instruction([], node.name, new Map([['disallowReplacement', true]]));
+				return new Instruction([], node.name.replace(/\_/g, '-'), new Map([['disallowReplacement', true]]));
 			}
 		}
 		return this.generateSymbolRead(this.currentScope.lookup(node.name));	// Major change: now changed to false!!!
@@ -2453,8 +2457,9 @@ export class CodeGenerator extends ASTVisitor {
 			draw: ast => {
 
 				const draw_lengths = new Map([
-					['clear', 4], ['color', 4], ['stroke', 2], ['line', 5], ['rect', 5],
-					['lineRect', 5], ['poly', 6], ['linePoly', 6], ['triangle', 7], ['image', 6]
+					['clear', 4], ['color', 5], ['stroke', 2], ['line', 5], ['rect', 5],
+					['lineRect', 5], ['poly', 6], ['linePoly', 6], ['triangle', 7], ['image', 6],
+					['print', 4], ['translate', 3], ['scale', 3], ['rotate', 2], ['reset', 1]
 				]);
 
 				if (ast.arguments[0].type === 'StringLiteral') {

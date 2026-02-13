@@ -86,7 +86,7 @@ export class Optimizer extends ASTVisitor {
         // 1. 收集全局信息（函数调用图等）
 		this.functionInfo.clear();
 		//this.localConstants.clear();
-		this.localConstants.forEach(cs => cs.clear());
+		this.localConstants.forEach(cs => cs ? cs.clear() : void(0));
         this.collectGlobalInfo();
         
         // 3. 按作用域递归分析
@@ -207,6 +207,9 @@ export class Optimizer extends ASTVisitor {
 	 */
     analyzeNode(node, info = null) {
         if (!node) return;
+
+		const inheritances = ['hasBreak', 'hasContinue'];	// Use OR-merge
+		const copies = ['isLoop', 'isUnsure', 'firstLoopRun'];
         
 		if (info && info.disposeReturn) {
 			node.setAttribute('disposeReturn', true);
@@ -215,6 +218,15 @@ export class Optimizer extends ASTVisitor {
 			copiedInfo.parentInfo = info;
 			info = copiedInfo;
 		}
+		if (info && info.parentInfo) {
+			for (const att of copies) {
+				info[att] = info[att] ?? info.parentInfo[att];
+			}
+			for (const att of inheritances) {
+				info[att] = info[att] ?? info.parentInfo[att];
+			}
+		}
+		
 
         switch (node.type) {
 			case 'Program':
@@ -317,6 +329,11 @@ export class Optimizer extends ASTVisitor {
 					&& child != node.children[node.children.length - 1]
 				)
 			}));
+		}
+		if (info && info.parentInfo) {
+			for (const att of inheritances) {
+				info.parentInfo[att] = info.parentInfo[att] || info[att];
+			}
 		}
     }
 
@@ -588,14 +605,14 @@ export class Optimizer extends ASTVisitor {
 	}
 
     analyzeFunctionCall(node, info = null) {
-		const valid = this.shouldRunEvaluation(node, info);
+		const valid = this.shouldRunEvaluation(node, info) || (info && (info.firstLoopRun || info.isUnsure));
         if (node.callee.type === 'Identifier') {
             const funcName = node.callee.name;
             
             // 更新函数调用计数
-            const info = this.functionInfo.get(funcName);
-            if (info) {
-                if (valid) info.calls++;
+            const funinfo = this.functionInfo.get(funcName);
+            if (funinfo) {
+                if (valid) funinfo.calls++;
                 
                 // 记录调用关系
                 if (this.currentScope && this.currentScope.astNode) {
@@ -675,6 +692,7 @@ export class Optimizer extends ASTVisitor {
 	analyzeWhileStatement(node, info = null) {
 		const loopInfo = {
 				isLoop: true,
+				firstLoopRun: true,
 				parentLoop: node,
 				hasBreak: false,
 				hasContinue: false,
@@ -913,6 +931,7 @@ export class Optimizer extends ASTVisitor {
 		node.setAttribute('hasSideEffects', false);
 		const loopInfo = {
 			isLoop: true,
+			firstLoopRun: true,
 			parentLoop: node,
 			hasBreak: false,
 			hasContinue: false,
@@ -1006,7 +1025,7 @@ export class Optimizer extends ASTVisitor {
 		}
 		
 		if (node.getAttribute('infiniteLoop')) {
-			this.warnings.push(`Infinite loop detected (for with constant true condition)`, node.test.location);
+			this.warnings.push(`Infinite loop detected (for with constant true condition)`, node.location);
 		}
 	}
 	
@@ -1506,7 +1525,9 @@ export class Optimizer extends ASTVisitor {
 		// 标记这些变量为不可优化
 		modifiedVars.forEach(varInfo => {
 			const varName = varInfo.varName;
-			const scopePath = (varInfo.scope ?? this.currentScope).lookupScopeOf(varName).getPath();
+			const scopePath = ((
+				varInfo ? varInfo.scope.lookupScopeOf(varName) : null
+			) ?? this.currentScope.lookupScopeOf(varName)).getPath();			// This is because variable collector will not seriously consider scope information
 			const variableUses = this.variableUses.get(scopePath);
 			const constantList = this.localConstants.get(scopePath);
 			const usage = variableUses.get(varName);
@@ -2403,6 +2424,7 @@ export class Optimizer extends ASTVisitor {
 				break;
 			
 			case 'VariableDeclarator':
+			case 'Declarator':
 				// Some problems are here
 				if (constants.has(node.name) && this.variableCanBeRemoved(node.name)) {
 					this.replaceNode(node, null);
@@ -3131,6 +3153,7 @@ export class Optimizer extends ASTVisitor {
 				break;
 			
 			case 'VariableDeclarator':
+			case 'Declarator':
 				if (oldNode === parent.initializer) {
 					parent.initializer = newNode;
 					newNode.parent = parent;
@@ -3442,8 +3465,9 @@ export class Optimizer extends ASTVisitor {
 	 * Migrating all information (including VARIABLE USES and LOCAL CONSTANTS)
 	 * @param {Scope} scope 
 	 * @param {Scope} target 
+	 * @param {boolean} [deleteOld=false] 
 	 */
-	reRootScope(scope, target) {
+	reRootScope(scope, target, deleteOld = false) {
 		/**
 		 * @type {{scope: Scope, path: string}[]}
 		 */
@@ -3475,9 +3499,9 @@ export class Optimizer extends ASTVisitor {
 			const originalPath = o.path;
 			const newPath = o.scope.getPath();
 			this.variableUses.set(newPath, this.variableUses.get(originalPath));
-			this.variableUses.delete(originalPath);
+			if (deleteOld) this.variableUses.delete(originalPath);
 			this.localConstants.set(newPath, this.localConstants.get(originalPath));
-			this.localConstants.delete(originalPath);
+			if (deleteOld) this.localConstants.delete(originalPath);
 		});
 		
 	}
@@ -3516,6 +3540,9 @@ export class Optimizer extends ASTVisitor {
 		const changeParameter = () => {
 			// Insert parameters after determining where the parent is!
 			// 创建参数映射
+			/**
+			 * @type {Map<string, string>}
+			 */
 			const paramMap = new Map();
 			/**
 			 * @type {AssignmentExpressionNode[]}
@@ -3549,19 +3576,24 @@ export class Optimizer extends ASTVisitor {
 			// 替换参数
 			this.replaceParametersInAST(clonedBody, paramMap, funcNode);
 			clonedBody.statements.unshift(...unshifts);
+			return paramMap;
 		};
 
 		// TODO: ! See whether the return value is got somewhere !
 		const doInsertInto = (targetNode, lvalOfReturn, doDeletion) => {
-			changeParameter();
+			const params = changeParameter();
 
 			const index = targetNode.statements.indexOf(parentNode);
 			if (index !== -1) {
 				// 删除原表达式语句，插入函数体内容
-				//if (doDeletion) targetNode.statements.splice(index, 1);
+				if (lvalOfReturn) {
+					// To prepare for returning, the corresponding content must be put elsewhere
+					targetNode.statements.splice(index, 1);
+				}
+				
 				let spliceFix = 0;
 				let newCompound = ASTBuilder.compoundStatement();
-				newCompound.scope = funcNode.scope;					// Apply similar structure...
+				//newCompound.scope = funcNode.scope;					// Apply similar structure...
 				clonedBody.statements.forEach((stmt, i) => {
 					let actualStmt = stmt;
 					if (stmt.type === 'ReturnStatement') {
@@ -3587,6 +3619,10 @@ export class Optimizer extends ASTVisitor {
 							}
 							//actualStmt = lvalOfReturn;	// There's no need to insert
 							compStmt.parent = lvalOfReturn;
+							
+							// Not that easy. In fact, you have to migrate the whole 'parentNode'...
+							//actualStmt = lvalOfReturn;	// Regard it as a part of new function
+							// (or the returning will be unable to use anything in the original scope)
 						} else if (!actualStmt) {
 							actualStmt = stmt.argument;
 							// Might have side effects
@@ -3600,15 +3636,32 @@ export class Optimizer extends ASTVisitor {
 					}
 					
 				});
+				// Relocate the parentNode to new compound statement
+				if (lvalOfReturn) {
+					newCompound.statements.push(parentNode);
+					parentNode.parent = newCompound;
+				}
+				
+
 				targetNode.statements.splice(index, 0, newCompound);
 				newCompound.parent = targetNode;
 
 				// Deliver the scope:
-				if (targetNode.scope && funcNode.scope) {
-					this.reRootScope(funcNode.scope, targetNode.scope);
-					funcNode.scope.symbols = new Map(
-						[...funcNode.scope.symbols].filter(([key, symb]) => symb.kind !== 'parameter')
+				const deliveringScope = funcNode.body.scope ?? funcNode.scope;
+				if (targetNode.scope && deliveringScope) {
+					const newScope = deliveringScope.duplicateAll();
+					this.reRootScope(newScope, targetNode.scope, true);
+					newScope.symbols = new Map(
+						[...newScope.symbols].filter(([key, symb]) => symb.kind !== 'parameter')
 					);	// Remove all parameters!
+					newCompound.scope = newScope;
+					// Correspondingly:
+					if (lvalOfReturn) {
+						// Migrate aliases
+						params.forEach((value, key) => this.duplicateVariable(parentNode.scope, value, newScope, value));
+						parentNode.scope = newScope;
+					}
+					
 				}
 
 				return true;
@@ -3631,7 +3684,7 @@ export class Optimizer extends ASTVisitor {
 		 */
 		let totalCalls = 0;
 		const countTotalCalls = node => {
-			if (node.name === callNode.name) totalCalls++;
+			if (node.type === 'FunctionCall' && node.name === callNode.name) totalCalls++;
 			this.further(node, countTotalCalls, () => (totalCalls > 1));
 		};
 		countTotalCalls(parentNode);
@@ -3655,7 +3708,9 @@ export class Optimizer extends ASTVisitor {
 			// Then delete the function call in the expression statement
 			const index = directParent.children.indexOf(callNode);
 			if (index !== -1) directParent.children.splice(index, 1);
-		} else if (directParent.type === 'AssignmentExpression' || directParent.type === 'BinaryExpression' || directParent.type === 'UnaryExpression' || directParent.type === 'VariableDeclarator') {
+		} else if (directParent.type === 'AssignmentExpression' || directParent.type === 'BinaryExpression'
+			 || directParent.type === 'UnaryExpression' || directParent.type === 'VariableDeclarator'
+			|| directParent.type === 'Declarator') {
 			// Also need this:
 			if (clonedBody.type === 'CompoundStatement') {
 				// 将复合语句的内容插入到父节点中
@@ -4050,6 +4105,7 @@ export class Optimizer extends ASTVisitor {
 				break;
 				
 			case 'VariableDeclarator':
+			case 'Declarator':
 				clone.name = node.name;
 				if (node.initializer) clone.initializer = this.cloneAST(node.initializer);
 				break;
