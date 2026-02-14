@@ -341,6 +341,7 @@ export class Optimizer extends ASTVisitor {
                 break;
                 
             case 'IfStatement':
+			case 'ConditionalExpression':
                 this.analyzeIfStatement(node, info);
                 break;
                 
@@ -593,7 +594,7 @@ export class Optimizer extends ASTVisitor {
             // 检查常量初始化
             if (declarator.initializer) {
                 this.analyzeNode(declarator.initializer, info);
-                if (canOptimizeThis) {
+                if (canOptimizeThis && this.shouldRunEvaluation(node, info)) {
 					const constValue = this.evaluateConstantExpression(declarator.initializer);
 					if (constValue !== undefined) {
 						localConstants.set(declarator.name, constValue);
@@ -750,7 +751,7 @@ export class Optimizer extends ASTVisitor {
 			conditionValue = this.evaluateConstantExpression(node.test);
 			
 			// 记录条件信息用于优化
-			if (!info || (!info.isLoop && !info.optimizingLoop)) {
+			if (this.shouldRunEvaluation(node, info)) {
 				if (conditionValue !== undefined) {
 					node.setAttribute('constantCondition', conditionValue);
 					
@@ -770,7 +771,7 @@ export class Optimizer extends ASTVisitor {
 				node.setAttribute('conditionHasSideEffects', true);
 			}
 		}
-		if (conditionValue !== undefined && info && info.optimizingLoop) {
+		if (conditionValue !== undefined && this.shouldRunEvaluation(node, info)) {
 			if (conditionValue == 0) {
 				if (node.alternate) this.analyzeNode(node.alternate, info);
 			} else {
@@ -2381,9 +2382,9 @@ export class Optimizer extends ASTVisitor {
 		// TODO: Consider removal only if the
 		// assigned value is NOT a constant or
 		// inside a conditional statement !!
-		if (noSideEffectValue == null) {
+		if (noSideEffectValue == null || !doUpdate) {
 			localConstants.delete(varName);
-		} else if (doUpdate) {
+		} else {
 			localConstants.set(varName, noSideEffectValue);
 		}
 	}
@@ -2427,7 +2428,7 @@ export class Optimizer extends ASTVisitor {
 		if (typeof varName === 'string') {
 			symbol = this.currentScope.lookup(varName);
 		}
-		return (!symbol.isVolatile) && (!symbol.isStatic) && (!symbol.isAddressed);
+		return (!symbol.isVolatile) && (!symbol.isExtern) && (!symbol.isStatic) && (!symbol.isAddressed);
 	}
 
 	/**
@@ -2441,15 +2442,14 @@ export class Optimizer extends ASTVisitor {
         
         symbols.forEach(symbol => {
             if (symbol.kind !== 'variable') return;
-			if (symbol.accessThroughPointer) return;
-			if (symbol.type && symbol.type.type && symbol.type.type.kind !== 'basic') return;
+			if (symbol.isPointer()) return;
 			if (!this.variableCanBeRemoved(symbol)) return;
             
             const usage = variableUses.get(symbol.name);
             if (!usage) return;
             
             // 检查变量是否被使用
-            const isUsed = usage.reads > 0 || usage.writes > 0;
+            const isUsed = usage.reads > 0 || usage.writes > 1;	// Initialization is not considered!!!
             const hasSideEffects = this.hasSideEffects(usage.node);
             
             if (!isUsed && !hasSideEffects) {
@@ -3021,7 +3021,7 @@ export class Optimizer extends ASTVisitor {
 				// Not considering struct members
 				return true;
 			case 'Identifier':
-				if (node.name.length > 0 && node.name[0] === '@') return true;
+				if (node.name.length > 0 && node.name[0] === '@') return ConstantManager.categorize(node.name) === 'unknown';
 				const scopeInfo = selectedScope.lookupScopeOf(node.name);
 				if (!scopeInfo) {
 					return true;	// Cannot get information
@@ -3174,6 +3174,36 @@ export class Optimizer extends ASTVisitor {
 				}
 				break;
 				
+			case 'ConditionalExpression':
+				if (newNode) {
+					newNode.parent = parent;
+				}
+				if (oldNode === parent.test) {
+					if (parent) {
+						newNode.parent = parent;
+						parent.test = newNode;
+					} else {
+						parent.test = null;
+					}
+				}
+				if (oldNode === parent.consequent) {
+					if (parent) {
+						newNode.parent = parent;
+						parent.consequent = newNode;
+					} else {
+						parent.consequent = null;
+					}
+				}
+				if (oldNode === parent.alternate) {
+					if (parent) {
+						newNode.parent = parent;
+						parent.alternate = newNode;
+					} else {
+						parent.alternate = null;
+					}
+				}
+				break;
+
 			case 'ExpressionStatement':
 				if (oldNode === parent.expression) {
 					if (newNode) {
@@ -3181,7 +3211,8 @@ export class Optimizer extends ASTVisitor {
 						parent.expression = newNode;
 					} else {
 						// 删除整个表达式语句
-						this.removeNodeFromParent(parent);
+						parent.expression = null;
+						//this.removeNodeFromParent(parent);
 					}
 					return;
 				}
@@ -3374,26 +3405,28 @@ export class Optimizer extends ASTVisitor {
 				
 			default:
 				// 处理通用子节点
-				const foundDeletionIn = seq => {
-					const childIndex = seq.indexOf(oldNode);
-					if (childIndex !== -1) {
-						if (newNode) {
-							newNode.parent = parent;
-							seq[childIndex] = newNode;
-						} else {
-							seq.splice(childIndex, 1);
-						}
-						return true;
-					}
-					return false;
-				};
-				if (parent.children) {
-					foundDeletionIn(parent.children);
-				}
-				if (parent.declarators) {
-					foundDeletionIn(parent.declarators);
-				}
+				
 				break;
+		}
+
+		const foundDeletionIn = seq => {
+			const childIndex = seq.indexOf(oldNode);
+			if (childIndex !== -1) {
+				if (newNode) {
+					newNode.parent = parent;
+					seq[childIndex] = newNode;
+				} else {
+					seq.splice(childIndex, 1);
+				}
+				return true;
+			}
+			return false;
+		};
+		if (parent.children) {
+			foundDeletionIn(parent.children);
+		}
+		if (parent.declarators) {
+			foundDeletionIn(parent.declarators);
 		}
 		
 		// 如果找不到父节点引用，可能需要遍历查找

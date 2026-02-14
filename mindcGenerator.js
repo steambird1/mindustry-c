@@ -2028,7 +2028,7 @@ export class CodeGenerator extends ASTVisitor {
 			return result;
 		} else {
 			const lval = this.processLValGetter(left, true, true);
-			result.concat(lval);
+			result.concat_returns(lval);
 			result.concat(right.replace_variable(lval.instructionReturn, right.instructionReturn));
 			return result;
 		}
