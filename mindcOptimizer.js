@@ -1,7 +1,9 @@
 import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	ProgramNode, FunctionDeclarationNode, FunctionCallNode, AssignmentExpressionNode, 
     WhileStatementNode, ASTBuilder, ASTVisitor, __convert, objectList,
-	liquidList, unitList, buildingList
+	liquidList, unitList, buildingList, ConstantManager,
+	CastExpression,
+	ForStatementNode
  } from "./mindcBase.js";
 
 import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mindcSemantic.js";
@@ -30,16 +32,46 @@ export class Optimizer extends ASTVisitor {
         
         // 优化状态
         this.functionCallGraph = new Map();
+		/**
+		 * @typedef {{
+		 * 	calls: integer,
+		 *  hasSideEffects: boolean,
+		 *  isAddressed: boolean?,
+		 *  isDefinition: boolean,
+		 *  isInline: boolean?,
+		 *  canInline: boolean,
+		 *  node: FunctionDeclarationNode?,
+		 *  scope: Scope?,
+		 *  size: number?,
+		 *  writtenVars: SymbolEntry[]
+		 * }} functionInfoEntry
+		 */
+		/**
+		 * @type {Map<string, functionInfoEntry>}
+		 */
         this.functionInfo = new Map();
         this.constants = new Map(); // 全局常量表
-        this.localConstants = new Map(); // 局部常量表 
+		/**
+		 * @type {Map<string, *>}
+		 */
+        this.localConstants = new Map(); // 局部常量表
+		/**
+		 * @type {Map<string, Map<string, {reads: number, writes: number, canOptimize: boolean?}>>}
+		 */ 
         this.variableUses = new Map(); // 变量使用统计 {scopePath: Map<varName, {reads, writes}>}
 		//this.visitedSideEffects = false;
         
         // 作用域分析
         this.currentScope = null;
 		this.currentFunction = null;
+		/**
+		 * @type {(Scope | null)[]}
+		 */
         this.scopeStack = [];
+		/**
+		 * @type {(string | null)[]}
+		 */
+		this.callStack = [];
         this.analyzedScopes = new Set();
     }
 
@@ -47,6 +79,9 @@ export class Optimizer extends ASTVisitor {
         const { globalScope, symbolTable, typeTable, structTable, typedefTable } = analysisResult;
         
         this.ast = ast;
+		/**
+		 * @type {Scope}
+		 */
         this.globalScope = globalScope;
         this.symbolTable = symbolTable;
         this.typeTable = typeTable;
@@ -64,8 +99,10 @@ export class Optimizer extends ASTVisitor {
         
         do {
             this.modified = false;
+			console.log(`=== Begin optimization round ${iteration} ===`);
             this.optimizationPass();
 			this.analyzedScopes.clear();
+			console.log(`=== End optimization round ${iteration} ===`)
             iteration++;
 			// debug:
 			//console.log(iteration + ' -th optimize:');
@@ -86,9 +123,18 @@ export class Optimizer extends ASTVisitor {
         // 1. 收集全局信息（函数调用图等）
 		this.functionInfo.clear();
 		//this.localConstants.clear();
-		this.localConstants.forEach(cs => cs ? cs.clear() : void(0));
+		/**
+		 * 
+		 * @param {Scope} scope 
+		 */
+		const initializeScopes = scope => {
+			scope.children.forEach(child => initializeScopes(child));
+			this.localConstants.set(scope.getPath(), new Map());
+			this.variableUses.set(scope.getPath(), new Map());
+		};
+		initializeScopes(this.globalScope);
         this.collectGlobalInfo();
-        
+
         // 3. 按作用域递归分析
         this.analyzeScope(this.globalScope);
 
@@ -157,6 +203,19 @@ export class Optimizer extends ASTVisitor {
         this.currentScope = this.scopeStack.pop();
     }
 
+	/**
+	 * 
+	 * @param {string} name 
+	 */
+	enterFunction(name) {
+		this.callStack.push(this.currentFunction);
+		this.currentFunction = name;
+	}
+
+	exitFunction() {
+		this.currentFunction = this.callStack.pop();
+	}
+
     getCurrentScopePath() {
         return this.currentScope ? this.currentScope.getPath() : 'g';
     }
@@ -208,8 +267,9 @@ export class Optimizer extends ASTVisitor {
     analyzeNode(node, info = null) {
         if (!node) return;
 
-		const inheritances = ['hasBreak', 'hasContinue'];	// Use OR-merge
-		const copies = ['isLoop', 'isUnsure', 'firstLoopRun'];
+		const inheritances = ['hasBreak', 'hasContinue', 'returnCount'];	// Use OR-merge
+		const copies = ['isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop'];
+		const clarifications = ['hasBreak', 'hasContinue', 'isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop'];
         
 		if (info && info.disposeReturn) {
 			node.setAttribute('disposeReturn', true);
@@ -220,18 +280,31 @@ export class Optimizer extends ASTVisitor {
 		}
 		if (info && info.parentInfo) {
 			for (const att of copies) {
-				info[att] = info[att] ?? info.parentInfo[att];
+				info[att] = info[att] ?? info.parentInfo[att];	// The behavior differs!
 			}
 			for (const att of inheritances) {
 				info[att] = info[att] ?? info.parentInfo[att];
+			}
+			for (const att of clarifications) {
+				info[att] = Boolean(info[att]);
 			}
 		}
 		
 
         switch (node.type) {
 			case 'Program':
+				if (node.globalDeclarations) {
+					node.globalDeclarations.forEach(decl => this.analyzeNode(decl, info));
+				}
 				if (node.functions) {
-					node.functions.forEach(func => this.analyzeNode(func, info));
+					node.functions.forEach(func => {
+						if (func.name === 'main') {
+							this.analyzeNode(func, {
+								actualCalling: true,
+								parentInfo: info
+							});
+						}
+					});	// Starting just from main function to prevent all those strange problems!
 				}
 				break;
 			
@@ -293,6 +366,10 @@ export class Optimizer extends ASTVisitor {
 				
 			case 'ContinueStatement':
 				this.analyzeContinueStatement(node, info);
+				break;
+
+			case 'CastExpression':
+				this.analyzeCastExpression(node, info);
 				break;
 			
 			case 'BuiltinCall':
@@ -371,6 +448,19 @@ export class Optimizer extends ASTVisitor {
 		}
 	}
 	
+	/**
+	 * 
+	 * @param {CastExpression} node 
+	 * @param {*} info 
+	 */
+	analyzeCastExpression(node, info = null) {
+		this.analyzeNode(node.expression, info);
+
+		if (node.dataType && (node.dataType.isVolatile() || node.dataType.isPointerImpl())) {
+			this.markNodeAsWithSideEffects(node);
+		}
+	}
+
 	// TODO: Value assignment might be a kind of writing !!!
 	analyzeBinaryExpression(node, info = null) {
 		//const scopePath = this.getCurrentScopePath();
@@ -393,7 +483,7 @@ export class Optimizer extends ASTVisitor {
 	// This is a manually-added function
 	shouldRunEvaluation(node, info = null) {
 		if (info) {
-			if (info.isLoop || info.isUnsure) return false;
+			if (info.isLoop || info.isUnsure || (info.inFunction && !info.actualCalling)) return false;
 		}
 		return true;
 	}
@@ -425,7 +515,8 @@ export class Optimizer extends ASTVisitor {
 	// The condition for inlining has been adjusted.
     analyzeFunction(funcNode, info = null) {
         const funcName = funcNode.name;
-        this.currentFunction = funcName;
+        //this.currentFunction = funcName;
+		this.enterFunction(funcName);
         // 记录函数信息
         if (!this.functionInfo.has(funcName)) {
             this.functionInfo.set(funcName, {
@@ -436,9 +527,12 @@ export class Optimizer extends ASTVisitor {
                 isInline: funcNode.isInline || false,
 				canInline: true,
                 node: funcNode,
-                scope: funcNode.scope
+                scope: funcNode.scope,
+				writtenVars: []
             });
-        }
+        } else {
+			this.functionInfo.get(funcName).isDefinition = true;
+		}
         
 		let enteredScope = false;
 		if (funcNode.scope && funcNode.scope.name !== this.currentScope.name) {
@@ -471,7 +565,7 @@ export class Optimizer extends ASTVisitor {
 			}
 		}
 		
-		this.currentFunction = null;	// Given that functions won't be embedded
+		this.exitFunction();
     }
 
     analyzeVariableDeclaration(node, info = null) {
@@ -605,21 +699,41 @@ export class Optimizer extends ASTVisitor {
 	}
 
     analyzeFunctionCall(node, info = null) {
-		const valid = this.shouldRunEvaluation(node, info) || (info && (info.firstLoopRun || info.isUnsure));
+		const shouldRun = this.shouldRunEvaluation(node, info);
+		const valid = shouldRun || (info && (info.firstLoopRun || info.isUnsure || info.inFunction));
         if (node.callee.type === 'Identifier') {
             const funcName = node.callee.name;
             
             // 更新函数调用计数
-            const funinfo = this.functionInfo.get(funcName);
-            if (funinfo) {
-                if (valid) funinfo.calls++;
-                
-                // 记录调用关系
-                if (this.currentScope && this.currentScope.astNode) {
-                    const callerName = this.currentFunction || 'anonymous';
-                    this.recordFunctionCall(callerName, funcName);
-                }
-            }
+			if (this.functionInfo.has(funcName)) {
+				const funinfo = this.functionInfo.get(funcName);
+				if (funinfo) {
+					if (valid) {
+						funinfo.calls++;	// The number of call sites
+					}
+					//if (shouldRun) {
+					this.analyzeNode(funinfo.node, {
+						actualCalling: Boolean(info.actualCalling && (shouldRun || info.optimizingLoop)),
+						fromCallNodeAnalysis: true,
+						parentInfo: info
+					});
+					//}
+				}
+			} else {
+				this.functionInfo.set(funcName, {
+					calls: valid ? 1 : 0,
+					hasSideEffects: false,
+					isAddressed: false,
+					isDefinition: false,
+					canInline: true,
+					writtenVars: []
+				});	// Other information given as undefined
+			}
+            // 记录调用关系
+			if (this.currentScope && this.currentScope.astNode) {
+				const callerName = this.currentFunction || 'anonymous';
+				this.recordFunctionCall(callerName, funcName);
+			}
         }
         
         // 分析参数
@@ -726,18 +840,19 @@ export class Optimizer extends ASTVisitor {
 		// 分析循环体
 		if (node.body) {
 			// 进入循环体作用域
+			node.setAttribute('bodyHasSideEffects', node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
 			
-			
-			// 分析循环体
-			this.analyzeNode(node.body, loopInfo);
-			
-			// 如果循环永远不会执行，不需要分析循环体
+			// 如果循环永远不会执行，不需要分析循环体 (But what if the side effect is necessary?)
 			if (node.getAttribute('neverExecuted')) {
 				return;
 			}
+
+			// 分析循环体
+			this.analyzeNode(node.body, loopInfo);
+			
+			
 			
 			// 检查循环体是否有副作用
-			node.setAttribute('bodyHasSideEffects', node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
 			
 			
 			// 记录是否有break/continue
@@ -995,11 +1110,12 @@ export class Optimizer extends ASTVisitor {
 		
 		// 分析循环体
 		if (node.body) {
+			// 检查循环体是否有副作用
+			node.setAttribute('bodyHasSideEffects', node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
+			
 			// 分析循环体
 			this.analyzeNode(node.body, loopInfo);// Don't do changes
 			
-			// 检查循环体是否有副作用
-			node.setAttribute('bodyHasSideEffects', node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
 			
 			// 记录是否有break/continue
 			if (loopInfo.hasBreak) {
@@ -1405,7 +1521,8 @@ export class Optimizer extends ASTVisitor {
 			currentRound: 0,
 			currentLoopVar: null,
 			currentLoopVarName: loopVarName,
-			grossIterationCount: iterationCount
+			grossIterationCount: iterationCount,
+			parentInfo: envInfo
 		};
 		
 		if (envInfo && envInfo.grossIterationCount) {
@@ -1514,11 +1631,10 @@ export class Optimizer extends ASTVisitor {
 	}
 
 	/**
-	 * 标记循环可能有副作用
-	 * @param {ASTNode} loopNode - 循环节点
+	 * 
+	 * @param {ASTNode} loopNode 
 	 */
-	markLoopAsPotentiallyWithSideEffects(loopNode) {
-
+	markNodeAsWithSideEffects(loopNode) {
 		// 收集循环中可能被修改的变量
 		const modifiedVars = this.collectModifiedVariablesInLoop(loopNode);
 		
@@ -1539,8 +1655,28 @@ export class Optimizer extends ASTVisitor {
 			}
 		});
 		
+		if (loopNode.getAttribute('hasUnknownSideEffects')) {
+			console.log("Has undetermined side effects, clearing all variables!:", loopNode);
+			// In particular, clearing out anything that could have been written in all functions
+			[...(new Set([...this.functionInfo].flatMap(([name, data]) => data.writtenVars)))]
+				.forEach(symb => {
+					//const scopePath = symb.scope.getPath();
+					//const localConstants = this.localConstants.get(scopePath);
+					//const variableUses = this.variableUses.get(scopePath);
+					this.addWrittenSymbol(symb);
+			});
+		}
+		
 		// 标记循环有副作用
 		loopNode.setAttribute('hasSideEffects', true);
+	}
+
+	/**
+	 * 标记循环可能有副作用
+	 * @param {WhileStatementNode | ForStatementNode} loopNode - 循环节点
+	 */
+	markLoopAsPotentiallyWithSideEffects(loopNode) {
+		this.markNodeAsWithSideEffects(loopNode);		
 	}
 
 	/**
@@ -1551,6 +1687,7 @@ export class Optimizer extends ASTVisitor {
 	 */
 	collectModifiedVariablesInLoop(loopNode) {
 		const modifiedVars = new Set();
+		let callee;
 
 		// 递归收集赋值表达式中的变量
 		// There's no need to make this closure :(
@@ -1584,25 +1721,50 @@ export class Optimizer extends ASTVisitor {
 					}
 					break;
 				case 'UnaryExpression':
-					if ((node.operator === '++' || node.operator === '--')) {
+					if ((node.operator === '++' || node.operator === '--' || node.operator == '*' || node.operator == '&')) {
 						if (node.argument.type === 'Identifier') {
 							modifiedVars.add({
 								varName: node.argument.name,
 								scope: node.scope
 							});
 						} else {
-							console.log('Internal Error: Unrecognized variable in loop optimizer',node.left);
+							//console.log('Internal Error: Unrecognized variable in loop optimizer',node.left);
+							collectFromNode(node.argument);
 						}
 					}
 					break;
-					
+				case 'CastExpression':
+					if (node.dataType && (node.dataType.isVolatile() || node.dataType.isPointerImpl())) {
+						if (node.expression.type === 'Identifier') {
+							modifiedVars.add({
+								varName: node.expression.name,
+								scope: node.scope
+							});
+						} else {
+							collectFromNode(node.expression);
+						}
+					}
+					break;
 				case 'FunctionCall':
+					if (node.callee && node.callee.type === 'Identifier') {
+						callee = node.callee.name;
+					}
+					// Deliberately pass down
 				case 'BuiltinCall':
+					if (node.functionName) {
+						callee = node.functionName;
+					}
 					// 函数调用可能修改全局变量
-					// 这里简化处理：如果调用非纯函数，认为所有变量都可能被修改
-					// Replaced manually !!!
+					// Replaced manually !!
+					const calleeInfo = this.functionInfo.get(callee);
 					if (this.hasSideEffects(node)) {
 						// 标记循环有副作用
+						if (calleeInfo) {
+							[...new Set(calleeInfo.writtenVars ?? [])]
+								.forEach(symb => this.addWrittenSymbol(symb));
+						} else {
+							loopNode.setAttribute('hasUnknownSideEffects', true);
+						}
 						loopNode.setAttribute('hasFunctionCall', true);
 					}
 					break;
@@ -2178,8 +2340,24 @@ export class Optimizer extends ASTVisitor {
 	}
 
 	// ! Manually adjusted !
-	addWriteForCurrentScope(varName, noSideEffectValue = null, doUpdate = true) {
-		const scopePath = this.currentScope.lookupScopeOf(varName).getPath();
+	/**
+	 * 
+	 * @param {SymbolEntry} varSymbol 
+	 * @param {*} value
+	 * @param {boolean} doUpdate 
+	 */
+	addWrittenSymbol(varSymbol, value = null, doUpdate = true) {
+		const currentFuncScope = this.currentFunction ? (this.functionInfo.get(this.currentFunction).node.scope) : this.globalScope;
+		//doUpdate = doUpdate;	// By default suppress cross-function optimization
+		let noSideEffectValue = value;
+		/*
+		if (!varSymbol.belongingTo(currentFuncScope)) {
+			doUpdate = false;
+			noSideEffectValue = null;
+		}
+		*/
+		const varName = varSymbol.name;
+		const scopePath = varSymbol.scope.getPath();
 		const variableUses = this.variableUses.get(scopePath);
 		const localConstants = this.localConstants.get(scopePath);
 		
@@ -2192,7 +2370,13 @@ export class Optimizer extends ASTVisitor {
 				usage.canOptimize = false;
 			}
 		}
-		
+	
+		// Record variable access in it
+		if (this.currentFunction && this.functionInfo.has(this.currentFunction)) {
+			let target = this.functionInfo.get(this.currentFunction);
+			target.writtenVars.push(varSymbol);
+		}
+
 		// 赋值会改变变量值，从常量表中移除
 		// TODO: Consider removal only if the
 		// assigned value is NOT a constant or
@@ -2202,6 +2386,11 @@ export class Optimizer extends ASTVisitor {
 		} else if (doUpdate) {
 			localConstants.set(varName, noSideEffectValue);
 		}
+	}
+
+	addWriteForCurrentScope(varName, noSideEffectValue = null, doUpdate = true) {
+		const varSymbol = this.currentScope.lookup(varName);
+		this.addWrittenSymbol(varSymbol, noSideEffectValue, doUpdate);
 	}
 
     // =============== 作用域优化 ===============
@@ -2331,6 +2520,7 @@ export class Optimizer extends ASTVisitor {
                 const constValue = constants.get(node.name);
                 if (constValue !== undefined) {
                     // 替换为常量值
+					console.log(`Replaced identifier as:`,constValue,`at:`,node);
                     const replacement = this.getLiteral(constValue);
                     replacement.location = node.location;
 					replacement.dataType = node.dataType;
@@ -2347,6 +2537,7 @@ export class Optimizer extends ASTVisitor {
                 
 				if (isAssignment) {
 					if (node.left.type === 'Identifier' && this.variableCanBeRemoved(node.left.name) && leftValue !== undefined) {
+						console.log(`Removing assignment instruction:`,node);
 						this.replaceNode(node, null);
 						break;
 					}
@@ -2506,7 +2697,8 @@ export class Optimizer extends ASTVisitor {
 					canInline: funcNode.body !== null,
                     node: funcNode,
                     scope: symbol.scope,
-                    size: this.estimateFunctionSize(funcNode)
+                    size: this.estimateFunctionSize(funcNode),
+					writtenVars: []
                 });
             }
         });
@@ -2655,7 +2847,10 @@ export class Optimizer extends ASTVisitor {
 					funcInfo.canInline = false;
 					const callerName = this.currentFunction || 'anonymous';
                     this.recordFunctionCall(callerName, funcInfo.name);
+				} else {
+					return undefined;
 				}
+				break;
             case 'BinaryExpression':
 			case 'AssignmentExpression':	// Manually added
                 const left = this.evaluateConstantExpression(node.left);
@@ -2745,7 +2940,7 @@ export class Optimizer extends ASTVisitor {
         switch (node.type) {
 			case 'VariableDeclarator':
 			case 'Declarator':
-				if (node.dataType && (
+				if (node.dataType && (node.dataType.isPointerImpl() ||
 					node.dataType.qualifiers.includes('volatile') 
 					|| node.dataType.qualifiers.includes('static')
 					|| node.dataType.qualifiers.includes('extern'))) {	// 'extern' means that the variable might be modified from the outside
@@ -2756,7 +2951,7 @@ export class Optimizer extends ASTVisitor {
 				}
 				break;
             case 'AssignmentExpression':
-				if (node.left.dataType && (
+				if (node.left.dataType && (node.left.dataType.isPointerImpl() ||
 					node.left.dataType.qualifiers.includes('volatile') 
 					|| node.left.dataType.qualifiers.includes('static')
 					|| node.left.dataType.qualifiers.includes('extern'))) {
@@ -2767,9 +2962,7 @@ export class Optimizer extends ASTVisitor {
 				// TODO: Double-check logic here
 				break;
 			//case 'InitializerList':	// Depending on its children
-			case 'FunctionCall':
-				//return !inFunction;
-				//break;
+			case 'FunctionCall':		// Consider all function calls to be with side effects...
 			case 'AsmStatement':
 				// There won't be cross-function optimizing
 				return true;
@@ -2795,7 +2988,10 @@ export class Optimizer extends ASTVisitor {
 				}
 				break;
 				*/
-				
+			case 'CastExpression':
+				// Any 'volatile' cast should cause side effects
+				if (node.dataType && node.dataType.isVolatile()) return true;
+				// Deliberately pass down.		
 			case 'ReturnStatement':
 				// return可能有副作用（返回值表达式）
 				// Abortion of control is dealt with elsewhere

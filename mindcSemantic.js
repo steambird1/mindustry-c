@@ -155,6 +155,20 @@ export class SymbolEntry {
 		return `${this.name}: ${
 			(typeof this.type === 'object') ? this.extractType().toString() : `#${this.type}`} @ ${this.scope ? this.scope.getPath() : 'g'}`;
 	}
+
+	/**
+	 * 
+	 * @param {Scope} scope 
+	 */
+	belongingTo(scope) {
+		/**
+		 * 
+		 * @param {Scope} s
+		 * @returns {boolean}
+		 */
+		let checkScope = s => (s ? (s == scope || checkScope(s.parent)) : false);
+		return checkScope(this.scope);
+	}
 }
 
 // 作用域类
@@ -996,7 +1010,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         // 进入函数作用域
 		let functionScope = node.scope;
 		if (!functionScope) {
-			functionScope = new Scope(this.currentScope, 'f');
+			node.scope = functionScope = new Scope(this.currentScope, 'f');
 			this.currentScope.children.push(functionScope);
 		}
 		this.currentScope = functionScope;
@@ -1863,7 +1877,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         // 进入新的块作用域
         let blockScope = node.scope;
 		if (!blockScope) {
-			blockScope = new Scope(this.currentScope, 'b');
+			node.scope = blockScope = new Scope(this.currentScope, 'b');
 			this.currentScope.children.push(blockScope);
 		}
         this.currentScope = blockScope;

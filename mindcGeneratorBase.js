@@ -988,11 +988,11 @@ export class MemoryBlockInfo {
 		while (!this.full && currentSize > 0) {
 			do {
 				this.position++;
-				currentSize--;
 				if (this.currentRemain() <= 0) {
 					this.skipToNextPage();	
 				}
 			} while (!this.full && !this.isAvailable());
+			currentSize--;
 		}
 		if (currentSize > 0) {
 			throw new MemoryAllocationException();

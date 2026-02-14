@@ -229,7 +229,7 @@ export class CodeGenerator extends ASTVisitor {
 							this.addWarning(`Cannot assign a complete block for ${symbol.name}`);
 							symbol.isNearPointer = false;
 						} else {
-							symbol.memoryLocation = attempt;
+							symbol.memoryLocation = attempt.duplicate();
 							this.memory.pushStack();
 							//let curState = this.memory.currentState();
 							this.memory.setState(attempt.forwarding(symbol.size));
@@ -242,8 +242,9 @@ export class CodeGenerator extends ASTVisitor {
 					if (!allocated) {
 						symbol.memoryLocation = this.memory.assign(symbol.getAssemblySymbol(), symbol.size);
 					}
+					const dupSymb = symbol.memoryLocation.duplicate();
 					if ((symbol.kind !== 'pointer')
-						&& symbol.memoryLocation.duplicate().forwarding(symbol.size).block === symbol.memoryLocation.block) {
+						&& dupSymb.forwarding(symbol.size).block === symbol.memoryLocation.block) {
 							symbol.isNearPointer = true;
 					}
 				}
