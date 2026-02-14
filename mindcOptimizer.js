@@ -2925,6 +2925,14 @@ export class Optimizer extends ASTVisitor {
 	// ! Manually modified !
 	// Special compatibility for '+=' and '='
     evaluateBinaryOperation(operator, left, right) {
+
+		let isEqual = (l, r) => {
+			if (typeof l === 'object' && typeof r === 'object' && l.isBuiltinConstant && r.isBuiltinConstant) {
+				return l.name === r.name;
+			}
+			return l === r;
+		};
+
         switch (operator) {
 			case '=': return right;
             case '+': case '+=': return left + right;
@@ -2949,8 +2957,8 @@ export class Optimizer extends ASTVisitor {
 			case '&&': return left && right;
             case '<<': case '<<=': return left << right;
             case '>>': case '>>=': return left >> right;
-            case '==': return left == right;
-            case '!=': return left != right;
+            case '==': return isEqual(left, right);
+            case '!=': return !isEqual(left, right);
             case '<': return left < right;
             case '>': return left > right;
             case '<=': return left <= right;

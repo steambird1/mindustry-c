@@ -2158,6 +2158,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         const arithmeticOps = ['+', '-', '*', '/', '%'];
 		const pointerOps = ['+', '-'];
         const comparisonOps = ['==', '!=', '<', '<=', '>', '>='];
+		const specialComparisonOps = ['==', '!='];
         const logicalOps = ['&&', '||'];
         const bitwiseOps = ['&', '|', '^', '<<', '>>'];
 		const pointerCompatible = ['pointer', 'array'];
@@ -2192,7 +2193,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 			if (pointerCompatible.includes(leftType.kind) && pointerCompatible.includes(rightType.kind)) {
 				return this.isTypeCompatible(leftType.pointerTo, rightType.pointerTo);
 			}
-            return this.isTypeCompatible(leftType, rightType);
+			if (specialComparisonOps.includes(operator)) {
+				return this.isTypeCompatible(leftType, rightType);
+			} else {
+				return (this.isNumericType(leftType.name) || leftType.name === 'char') 
+				&& (this.isNumericType(rightType.name) || leftType.name === 'char');
+			}
+			
         }
 
         // 逻辑运算符要求布尔上下文（这里简化为int类型）
@@ -2319,12 +2326,12 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
     isNumericType(type) {
-        const numericTypes = ['int', 'char', 'short', 'long', 'float', 'double', 'signed', 'unsigned'];
+        const numericTypes = ['int', 'short', 'long', 'float', 'double', 'signed', 'unsigned'];
         return numericTypes.includes(type);
     }
 
     isIntegerType(type) {
-        const integerTypes = ['int', 'char', 'short', 'long', 'signed', 'unsigned'];
+        const integerTypes = ['int', 'short', 'long', 'signed', 'unsigned'];
         return integerTypes.includes(type);
     }
 
