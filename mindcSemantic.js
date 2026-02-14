@@ -1553,7 +1553,7 @@ export class SemanticAnalyzer extends ASTVisitor {
             this.addError(`Assignment requires lvalue`, node.location);
         }
 
-        node.dataType = this.getTypeInfo('void');
+        node.dataType = resultType;
     }
 	
 	// 添加成员访问支持

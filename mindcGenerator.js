@@ -2017,13 +2017,13 @@ export class CodeGenerator extends ASTVisitor {
 		
 		if (right.getAttribute('disallowReplacement') || !(left.symbol && !left.symbol.isPointer())) {
 			let lval = this.processLValGetter(left);
-			result.concat(right);
+			result.concat_returns(right);
 			if (lval.getAttribute('isPointer')) {
-				result.concat_returns(lval.raw_replace('pointer_block_entry', `${right.instructionReturn}_block`)
+				result.concat(lval.raw_replace('pointer_block_entry', `${right.instructionReturn}_block`)
 				.raw_replace('pointer_ptr_entry', `${right.instructionReturn}_pos`));
 			} else {
 				let returns = right.instructionReturn;
-				result.concat_returns(lval.raw_replace('value_entry', returns));
+				result.concat(lval.raw_replace('value_entry', returns));
 			}
 			return result;
 		} else {
