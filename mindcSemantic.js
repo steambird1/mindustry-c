@@ -443,10 +443,9 @@ export class SemanticAnalyzer extends ASTVisitor {
                 // 程序节点关联全局作用域
                 node.scope = this.globalScope;
                 this.globalScope.astNode = node;
-				// This is the actual thing...
-				if (node.functions) {
-					node.functions.forEach(child => this.linkScopesToAST(child));
-				}
+				// if (node.functions) {
+					// node.functions.forEach(child => this.linkScopesToAST(child));
+				// }
                 break;
                 
             case 'FunctionDeclaration':
@@ -468,9 +467,9 @@ export class SemanticAnalyzer extends ASTVisitor {
                     // 函数体的第一个复合语句不创建新作用域
                     node.scope = this.currentScope;
                 }
-				if (node.statements) {
-					node.statements.forEach(child => this.linkScopesToAST(child));
-				}
+				// if (node.statements) {
+					// node.statements.forEach(child => this.linkScopesToAST(child));
+				// }
                 break;
         }
         
@@ -1554,7 +1553,7 @@ export class SemanticAnalyzer extends ASTVisitor {
             this.addError(`Assignment requires lvalue`, node.location);
         }
 
-        node.dataType = resultType;
+        node.dataType = this.getTypeInfo('void');
     }
 	
 	// 添加成员访问支持
