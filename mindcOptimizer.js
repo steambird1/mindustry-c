@@ -3,7 +3,8 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
     WhileStatementNode, ASTBuilder, ASTVisitor, __convert, objectList,
 	liquidList, unitList, buildingList, ConstantManager,
 	CastExpression,
-	ForStatementNode
+	ForStatementNode,
+	VariableDeclarationNode
  } from "./mindcBase.js";
 
 import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mindcSemantic.js";
@@ -26,6 +27,10 @@ class ContinueException {
 export class Optimizer extends ASTVisitor {
     constructor(compiler = null) {
 		super(compiler);
+		/**
+		 * @type {SemanticAnalyzer}
+		 */
+		this.semantic = compiler.semanticAnalyzer;
         this.modified = false;
         this.errors = [];
         this.warnings = [];
@@ -62,6 +67,9 @@ export class Optimizer extends ASTVisitor {
 		//this.visitedSideEffects = false;
         
         // 作用域分析
+		/**
+		 * @type {Scope}
+		 */
         this.currentScope = null;
 		this.currentFunction = null;
 		/**
@@ -121,7 +129,7 @@ export class Optimizer extends ASTVisitor {
 
     optimizationPass() {
         // 1. 收集全局信息（函数调用图等）
-		this.functionInfo.clear();
+		this.visitedFunction = new Set();
 		//this.localConstants.clear();
 		/**
 		 * 
@@ -133,18 +141,21 @@ export class Optimizer extends ASTVisitor {
 			this.variableUses.set(scope.getPath(), new Map());
 		};
 		initializeScopes(this.globalScope);
+
         this.collectGlobalInfo();
 
         // 3. 按作用域递归分析
         this.analyzeScope(this.globalScope);
 
-		// Do scope optimizing:
+		// Scope optimizing done in global analyses
+		/*
 		const optimizingScope = scope => {
 			// First optimize children scopes!
 			scope.children.forEach(child => optimizingScope(child));
 			this.optimizeScope(scope);
 		};
 		optimizingScope(this.globalScope);
+		*/
 		
 		// 2. 删除无用函数
         this.removeUnusedFunctions();
@@ -159,6 +170,7 @@ export class Optimizer extends ASTVisitor {
     // =============== 作用域分析 ===============
 
 	// ! Manually adjusted !
+	// This actually direct finds program entry
     analyzeScope(scope) {
         if (this.analyzedScopes.has(scope)) {
             return;
@@ -180,7 +192,7 @@ export class Optimizer extends ASTVisitor {
         }
         
         // 进行作用域特定的优化
-        //this.optimizeScope(scope);
+        this.optimizeScope(scope);
         
         // 退出作用域
         this.exitScope();
@@ -191,15 +203,12 @@ export class Optimizer extends ASTVisitor {
         this.currentScope = scope;
 		// 初始化当前作用域的常量表和变量使用统计
         const scopePath = scope.getPath();
-        this.localConstants.set(scopePath, new Map());
-        this.variableUses.set(scopePath, new Map());
+        // this.localConstants.set(scopePath, new Map());	// Can be removed
+        // this.variableUses.set(scopePath, new Map());
     }
 
     exitScope() {
 		const scopePath = this.currentScope.getPath();
-		// Cleanup information, which is not necessary at all
-		//this.localConstants.delete(scopePath);
-		//this.variableUses.delete(scopePath);
         this.currentScope = this.scopeStack.pop();
     }
 
@@ -268,12 +277,12 @@ export class Optimizer extends ASTVisitor {
         if (!node) return;
 
 		const inheritances = ['hasBreak', 'hasContinue', 'returnCount'];	// Use OR-merge
-		const copies = ['isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop'];
-		const clarifications = ['hasBreak', 'hasContinue', 'isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop'];
+		const copies = ['isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop', 'cannotCascade'];
+		const clarifications = ['hasBreak', 'hasContinue', 'isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop', 'cannotCascade'];
         
 		if (info && info.parentInfo) {
 			for (const att of copies) {
-				info[att] = info[att] ?? info.parentInfo[att];	// The behavior differs!
+				info[att] = info[att] ?? info.parentInfo[att];
 			}
 			for (const att of inheritances) {
 				info[att] = info[att] ?? info.parentInfo[att];
@@ -290,9 +299,14 @@ export class Optimizer extends ASTVisitor {
 			info = copiedInfo;
 		}
 		
+		// Make replacements before analysis
+		if (this.shouldRunEvaluation(node, info) && !(info && info.optimizingLoop)) {
+			this.replaceConstantAtPresent(node);
+		}
 
         switch (node.type) {
 			case 'Program':
+				// this.functionInfo.clear();	// Reserved for further use
 				if (node.globalDeclarations) {
 					node.globalDeclarations.forEach(decl => this.analyzeNode(decl, info));
 				}
@@ -305,6 +319,15 @@ export class Optimizer extends ASTVisitor {
 							});
 						}
 					});	// Starting just from main function to prevent all those strange problems!
+					node.functions.forEach(func => {
+						const relevantSymbol = this.globalScope.lookup(func.name);
+						if (relevantSymbol.isAddressed) {
+							this.analyzeNode(func, {
+								actualCalling: false,
+								parentInfo: info
+							});
+						}
+					});
 				}
 				break;
 			
@@ -484,9 +507,21 @@ export class Optimizer extends ASTVisitor {
 	
 	// Return whether value should be updated right away (the exception is in the pre-analysis of loop)
 	// This is a manually-added function
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 * @param {*} info 
+	 * @returns {boolean?} `null` means 'do not make changes on variable states'.
+	 */
 	shouldRunEvaluation(node, info = null) {
 		if (info) {
-			if (info.isLoop || info.isUnsure || (info.inFunction && !info.actualCalling)) return false;
+			if (info.isUnsure) return false;
+			if (info.inFunction && !info.actualCalling) return false;	// i.e. uncertain calls
+			if (info.optimizingLoop) return true;	// High proiority!
+			if (info.isLoop) {
+				if (info.firstLoopRun) return null;	// Priority relevantly lower
+				return false;
+			}
 		}
 		return true;
 	}
@@ -520,6 +555,9 @@ export class Optimizer extends ASTVisitor {
 	// The condition for inlining has been adjusted.
     analyzeFunction(funcNode, info = null) {
         const funcName = funcNode.name;
+		if (!(info && !info.actualCalling)) {
+			this.visitedFunction.add(funcName);
+		}
         //this.currentFunction = funcName;
 		this.enterFunction(funcName);
         // 记录函数信息
@@ -536,7 +574,11 @@ export class Optimizer extends ASTVisitor {
 				writtenVars: []
             });
         } else {
-			this.functionInfo.get(funcName).isDefinition = true;
+			const myFunc = this.functionInfo.get(funcName);
+			myFunc.isDefinition = true;
+			myFunc.node = funcNode;
+			myFunc.scope = funcNode.scope;
+			myFunc.writtenVars = [];
 		}
         
 		let enteredScope = false;
@@ -573,17 +615,30 @@ export class Optimizer extends ASTVisitor {
 		this.exitFunction();
     }
 
+	/**
+	 * 
+	 * @param {VariableDeclarationNode} node 
+	 * @param {*} info 
+	 */
     analyzeVariableDeclaration(node, info = null) {
-        const scopePath = this.getCurrentScopePath();
-        const localConstants = this.localConstants.get(scopePath);
-        const variableUses = this.variableUses.get(scopePath);
         // Must be in current scope, so it's correct
+		if (this.shouldRunEvaluation(node, info)) {
+			// Copy to prevent deletion
+			[...node.declarators].forEach(declarator => {
+				this.replaceConstantAtPresent(declarator);
+			});
+			// This will delete useless declarators
+		}
         node.declarators.forEach(declarator => {
             if (!declarator.name) return;
 			/**
 			 * @type {SymbolEntry}
 			 */
 			const symbol = this.currentScope.lookup(declarator.name);
+			const scopePath = symbol ? symbol.scope.getPath() : this.getCurrentScopePath();
+			const localConstants = this.localConstants.get(scopePath);
+			const variableUses = this.variableUses.get(scopePath);
+			
 			const canOptimizeThis = !(symbol.isVolatile || symbol.isStatic || symbol.isExtern);
             
             // 初始化使用统计
@@ -602,9 +657,10 @@ export class Optimizer extends ASTVisitor {
 					const constValue = this.evaluateConstantExpression(declarator.initializer);
 					if (constValue !== undefined) {
 						localConstants.set(declarator.name, constValue);
-						
+						const shouldEval = this.shouldRunEvaluation(node, info);
+						this.addWrittenSymbol(symbol, constValue, shouldEval);
 						// 标记符号为常量
-						if (symbol && this.shouldRunEvaluation(node, info)) {
+						if (shouldEval) {
 							symbol.markAsConstant(constValue);
 						}
 					}
@@ -656,7 +712,6 @@ export class Optimizer extends ASTVisitor {
     analyzeAssignmentExpression(node, info = null) {
         
         // 分析右值
-        this.analyzeNode(node.left, info);
         this.analyzeNode(node.right, info);
 		
 		// 分析左值
@@ -692,6 +747,8 @@ export class Optimizer extends ASTVisitor {
 				}
 				
 			}
+		} else {
+			this.analyzeNode(node.left, info);
 		}
 		if (node.right.type === 'Identifier' && node.right.symbol && node.right.symbol.kind === 'function') {
 			this.recordFunctionCall(this.currentFunction, node.right.name);
@@ -712,18 +769,15 @@ export class Optimizer extends ASTVisitor {
             const funcName = node.callee.name;
             
             // 更新函数调用计数
+			let funinfo;
 			if (this.functionInfo.has(funcName)) {
-				const funinfo = this.functionInfo.get(funcName);
+				funinfo = this.functionInfo.get(funcName);
 				if (funinfo) {
 					if (valid) {
 						funinfo.calls++;	// The number of call sites
 					}
 					//if (shouldRun) {
-					this.analyzeNode(funinfo.node, {
-						actualCalling: Boolean(info.actualCalling && (shouldRun || info.optimizingLoop)),
-						fromCallNodeAnalysis: true,
-						parentInfo: info
-					});
+					
 					//}
 				}
 			} else {
@@ -735,7 +789,13 @@ export class Optimizer extends ASTVisitor {
 					canInline: true,
 					writtenVars: []
 				});	// Other information given as undefined
+				funinfo = this.functionInfo.get(funcName);
 			}
+			this.analyzeNode(funinfo.node, {
+				actualCalling: Boolean(info.actualCalling && (shouldRun || info.optimizingLoop)),
+				fromCallNodeAnalysis: true,
+				parentInfo: info
+			});
             // 记录调用关系
 			if (this.currentScope && this.currentScope.astNode) {
 				const callerName = this.currentFunction || 'anonymous';
@@ -760,14 +820,16 @@ export class Optimizer extends ASTVisitor {
 			if (this.shouldRunEvaluation(node, info)) {
 				if (conditionValue !== undefined) {
 					node.setAttribute('constantCondition', conditionValue);
+					if (!(info && info.optimizingLoop)) {
+						if (conditionValue) {
+							// 条件总是为真，可以标记then分支总是执行
+							this.warnings.push(`Condition always true in if statement`, node.test.location);
+						} else {
+							// 条件总是为假，可以标记else分支总是执行（如果有）
+							this.warnings.push(`Condition always false in if statement`, node.test.location);
+						}
+					}			
 					
-					if (conditionValue) {
-						// 条件总是为真，可以标记then分支总是执行
-						this.warnings.push(`Condition always true in if statement`, node.test.location);
-					} else {
-						// 条件总是为假，可以标记else分支总是执行（如果有）
-						this.warnings.push(`Condition always false in if statement`, node.test.location);
-					}
 				}
 			}
 			
@@ -777,8 +839,8 @@ export class Optimizer extends ASTVisitor {
 				node.setAttribute('conditionHasSideEffects', true);
 			}
 		}
-		if (conditionValue !== undefined && this.shouldRunEvaluation(node, info)) {
-			if (conditionValue == 0) {
+		if (conditionValue != undefined && conditionValue != null && this.shouldRunEvaluation(node, info)) {
+			if (!conditionValue) {
 				if (node.alternate) this.analyzeNode(node.alternate, info);
 			} else {
 				if (node.consequent) this.analyzeNode(node.consequent, info);
@@ -812,17 +874,24 @@ export class Optimizer extends ASTVisitor {
 	
 	analyzeWhileStatement(node, info = null) {
 		const loopInfo = {
-				isLoop: true,
-				firstLoopRun: true,
-				parentLoop: node,
-				hasBreak: false,
-				hasContinue: false,
-				parentInfo: info
-			};
+			isLoop: true,
+			firstLoopRun: true,
+			parentLoop: node,
+			hasBreak: false,
+			hasContinue: false,
+			parentInfo: info
+		};
+		const testInfo = {
+			isLoop: true,
+			firstLoopRun: true,
+			parentLoop: node,
+			cannotCascade: true,
+			parentInfo: info
+		};
 		node.setAttribute('hasSideEffects', false);
 		// 分析条件表达式
 		if (node.test) {
-			this.analyzeNode(node.test, info);
+			this.analyzeNode(node.test, testInfo);
 			
 			// 检查条件是否为常量
 			const conditionValue = this.evaluateConstantExpression(node.test);
@@ -843,54 +912,66 @@ export class Optimizer extends ASTVisitor {
 				node.setAttribute('conditionHasSideEffects', true);
 			}
 		}
-		
-		// 分析循环体
-		if (node.body) {
-			// 进入循环体作用域
-			node.setAttribute('bodyHasSideEffects', node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
-			
-			// 如果循环永远不会执行，不需要分析循环体 (But what if the side effect is necessary?)
-			if (node.getAttribute('neverExecuted')) {
-				return;
-			}
-
-			// 分析循环体
-			this.analyzeNode(node.body, loopInfo);
-			
-			
-			
-			// 检查循环体是否有副作用
-			
-			
-			// 记录是否有break/continue
-			if (loopInfo.hasBreak) {
-				node.setAttribute('hasBreak', true);
-				node.setAttribute('infiniteLoop', false);
-			}
-			if (loopInfo.hasContinue) {
-				node.setAttribute('hasContinue', true);
-			}
-		}
 
 		// 尝试分析while循环是否可以优化
-		let optimized = false;
-		if ((!node.getAttribute('bodyHasSideEffects')) && (!node.getAttribute('conditionHasSideEffects'))
-			&& (!node.getAttribute('infiniteLoop'))) {
-			if (!info || !info.isLoop) {
-				if (this.analyzeWhileLoopForOptimization(node, info)) {
-					if ((!info || !info.optimizingLoop) && this.optimizeDeterministicWhileLoop(node)) {
-						this.modified = true;
-						optimized = true;
+		if (!(info && info.optimizingLoop)) {
+			// 分析循环体
+			if (node.body) {
+				// 进入循环体作用域
+				node.setAttribute('bodyHasSideEffects', node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
+				
+				// 如果循环永远不会执行，不需要分析循环体 (But what if the side effect is necessary?)
+				if (node.getAttribute('neverExecuted')) {
+					return;
+				}
+
+				// 分析循环体
+				this.analyzeNode(node.body, loopInfo);
+				// 检查循环体是否有副作用
+				
+				
+				// 记录是否有break/continue
+				if (loopInfo.hasBreak) {
+					node.setAttribute('hasBreak', true);
+					node.setAttribute('infiniteLoop', false);
+				}
+				if (loopInfo.hasContinue) {
+					node.setAttribute('hasContinue', true);
+				}
+			}
+
+			let optimized = false;
+			if ((!node.getAttribute('bodyHasSideEffects')) && (!node.getAttribute('conditionHasSideEffects'))
+				&& (!node.getAttribute('infiniteLoop'))) {
+				if (!info || !info.isLoop) {
+					if (this.analyzeWhileLoopForOptimization(node, info)) {
+						if ((!info || !info.optimizingLoop) && this.optimizeDeterministicWhileLoop(node)) {
+							this.modified = true;
+							optimized = true;
+						}
 					}
 				}
 			}
-		}
-		if (!optimized) {	// If not fully optimized, then there's something that we don't know
-			this.markLoopAsPotentiallyWithSideEffects(node);
-		}
-		
-		if (node.getAttribute('infiniteLoop')) {
-			this.warnings.push(`Infinite loop detected (while(true))`, node.test.location);
+			if (!optimized && !(info && info.isLoop)) {	// If not fully optimized, then there's something that we don't know
+				this.markLoopAsPotentiallyWithSideEffects(node);
+			}
+			
+			if (node.getAttribute('infiniteLoop')) {
+				this.warnings.push(`Infinite loop detected (while(true))`, node.test.location);
+			}
+		} else {
+			if (!node.getAttribute('iteration')) {
+				this.analyzeWhileLoopForOptimization(node, {
+					...info,
+					noRunning: true
+				});
+			}
+			const prefetch = node.getAttribute('iteration');
+			if (prefetch) {
+				this.simulateLoop(node, prefetch.varName, prefetch.varInit, prefetch.condition, prefetch.update, Infinity, info);
+			} else {
+				this.markLoopAsPotentiallyWithSideEffects(node);
+			}
 		}
 	}
 	
@@ -955,7 +1036,18 @@ export class Optimizer extends ASTVisitor {
 								return true;
 							} else if (iterationCount <= 100) {
 								// 可以优化
+								whileNode.setAttribute('iteration', {
+									node: whileNode,
+									type: 'while',
+									varName: loopVarName,
+									varInit: initValue,
+									condition: conditionInfo,
+									update: updateInfo,
+									count: iterationCount,
+									info: info
+								});
 								whileNode.setAttribute('canOptimize', true);
+								if (info && info.noRunning) return true;
 								if (!this.simulateLoop(whileNode, loopVarName, initValue, conditionInfo, updateInfo, iterationCount, info)) {
 									whileNode.setAttribute('optimized', false);
 									return false;
@@ -1063,12 +1155,22 @@ export class Optimizer extends ASTVisitor {
 			hasContinue: false,
 			parentInfo: info
 		};
+		const testInfo = {
+			isLoop: true,
+			firstLoopRun: true,
+			cannotCascade: true,
+			parentLoop: node,
+			parentInfo: info
+		};
 		// 分析初始化部分
 		if (node.init) {
-			this.analyzeNode(node.init, {
-				...(info ? info : {}),
-				disposeReturn: true
-			});
+			let initInfo = {
+				...(info ?? {}),
+				cannotCascade: true,
+				isLoopInit: true
+			};
+			initInfo.isLoop = false;				// Ensure initializer
+			this.analyzeNode(node.init, initInfo);
 			
 			// 检查初始化是否有副作用
 			node.setAttribute('initHasSideEffects', this.hasSideEffects(node.init));
@@ -1077,7 +1179,7 @@ export class Optimizer extends ASTVisitor {
 		// 分析条件部分
 		if (node.test) {
 			// ! Always make changes for initialization !
-			this.analyzeNode(node.test, info);
+			this.analyzeNode(node.test, testInfo);
 			
 			// 检查条件是否为常量
 			const conditionValue = this.evaluateConstantExpression(node.test);
@@ -1110,55 +1212,69 @@ export class Optimizer extends ASTVisitor {
 		
 		// 分析更新部分
 		if (node.update) {
-			this.analyzeNode(node.update, {
-				...(info ? info : {}),
-				disposeReturn: true
-			});
+			this.analyzeNode(node.update, testInfo);
 			
 			// 检查更新是否有副作用
 			node.setAttribute('updateHasSideEffects', this.hasSideEffects(node.update));
 		}
 		
 		// 分析循环体
-		if (node.body) {
-			// 检查循环体是否有副作用
-			node.setAttribute('bodyHasSideEffects', node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
-			
-			// 分析循环体
-			this.analyzeNode(node.body, loopInfo);// Don't do changes
-			
-			
-			// 记录是否有break/continue
-			if (loopInfo.hasBreak) {
-				node.setAttribute('hasBreak', true);
-				node.setAttribute('infiniteLoop', false);
+		if (!(info && info.optimizingLoop)) {
+			if (node.body) {
+				// 检查循环体是否有副作用
+				node.setAttribute('bodyHasSideEffects', node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
+				
+				// 分析循环体
+				this.analyzeNode(node.body, loopInfo);// Don't do changes
+				
+				
+				// 记录是否有break/continue
+				if (loopInfo.hasBreak) {
+					node.setAttribute('hasBreak', true);
+					node.setAttribute('infiniteLoop', false);
+				}
+				if (loopInfo.hasContinue) {
+					node.setAttribute('hasContinue', true);
+				}
 			}
-			if (loopInfo.hasContinue) {
-				node.setAttribute('hasContinue', true);
-			}
-		}
-		let optimized = false;
-		// (Manually added) Do optimize afterwards
-		if ((!node.getAttribute('initHasSideEffects')) && (!node.getAttribute('bodyHasSideEffects'))
-			&& (!node.getAttribute('updateHasSideEffects'))
-			&& (!node.getAttribute('conditionHasSideEffects'))
-			&& (!node.getAttribute('infiniteLoop'))) {
-			if (!info || !info.isLoop) {
-				if (this.analyzeAndOptimizeForLoop(node, info)) {
-					if ((!info || !info.optimizingLoop) && this.optimizeDeterministicForLoop(node)) {
-						this.modified = true;
-						optimized = true;
+
+			let optimized = false;
+			// (Manually added) Do optimize afterwards
+			if ((!node.getAttribute('initHasSideEffects')) && (!node.getAttribute('bodyHasSideEffects'))
+				&& (!node.getAttribute('updateHasSideEffects'))
+				&& (!node.getAttribute('conditionHasSideEffects'))
+				&& (!node.getAttribute('infiniteLoop'))) {
+				if (!info || !info.isLoop) {
+					if (this.analyzeAndOptimizeForLoop(node, info)) {
+						if ((!info || !info.optimizingLoop) && this.optimizeDeterministicForLoop(node)) {
+							this.modified = true;
+							optimized = true;
+						}
 					}
 				}
 			}
+			if (!optimized && !(info && info.isLoop)) {
+				this.markLoopAsPotentiallyWithSideEffects(node);
+			}
+			// Warning for infinite for loop
+			if (node.getAttribute('infiniteLoop')) {
+				this.warnings.push(`Infinite loop detected (for with constant true condition)`, node.location);
+			}
+		} else {
+			if (!node.getAttribute('iteration')) {
+				this.analyzeAndOptimizeForLoop(node, {
+					...info,
+					noRunning: true
+				});
+			}
+ 			const prefetch = node.getAttribute('iteration');
+			if (prefetch) {
+				this.simulateLoop(node, prefetch.varName, prefetch.varInit, prefetch.condition, prefetch.update, Infinity, info);
+			} else {
+				this.markLoopAsPotentiallyWithSideEffects(node);
+			}
 		}
-		if (!optimized) {
-			this.markLoopAsPotentiallyWithSideEffects(node);
-		}
-		// Warning for infinite for loop
-		if (node.getAttribute('infiniteLoop')) {
-			this.warnings.push(`Infinite loop detected (for with constant true condition)`, node.location);
-		}
+		
 	}
 	
 	// Refer to for/while:
@@ -1249,6 +1365,17 @@ export class Optimizer extends ASTVisitor {
 				
 				// 模拟循环，更新变量的常量值
 				if (iterationCount > 0) {
+					forNode.setAttribute('iteration', {
+						node: forNode,
+						type: 'for',
+						varName: initVarName,
+						varInit: initValue,
+						condition: conditionInfo,
+						update: updateInfo,
+						count: iterationCount,
+						info: info
+					});
+					if (info && info.noRunning) return true;
 					if (!this.simulateLoop(forNode, initVarName, initValue, 
 									 conditionInfo, updateInfo, iterationCount, info)) {
 						// Failures in it...
@@ -1520,6 +1647,7 @@ export class Optimizer extends ASTVisitor {
 		const configuredMaxGrossSimulation = 50000;
 		// End
 		
+		const loopVarSymbol = this.currentScope.lookup(loopVarName);
 		const scopePath = this.currentScope.lookupScopeOf(loopVarName).getPath();
 		const localConstants = this.localConstants.get(scopePath);
 		const variableUses = this.variableUses.get(scopePath);
@@ -1540,13 +1668,6 @@ export class Optimizer extends ASTVisitor {
 			grossIterationCount: iterationCount,
 			parentInfo: envInfo
 		};
-		
-		if (envInfo && envInfo.grossIterationCount) {
-			info.grossIterationCount *= envInfo.grossIterationCount;
-		}
-		if (info.grossIterationCount > configuredMaxGrossSimulation) {
-			return false;
-		}
 		
 		// 初始化循环变量
 		localConstants.set(loopVarName, initValue);
@@ -1583,9 +1704,13 @@ export class Optimizer extends ASTVisitor {
 				}
 				
 				// 更新循环变量
-				currentValue = localConstants.get(loopVarName) || initValue;
-				const newValue = currentValue + updateInfo.step;
-				localConstants.set(loopVarName, newValue);
+				if (loopNode.type !== 'WhileStatement') {
+					currentValue = localConstants.get(loopVarName) || initValue;
+					const newValue = currentValue + updateInfo.step;
+					localConstants.set(loopVarName, newValue);	// Should be done inside otherwise!
+					this.addWrittenSymbol(loopVarSymbol, newValue, true);
+				}
+				
 				
 				// Manually added: quit also when the condition is no longer satisfied:
 				if (loopNode.test) {
@@ -1657,6 +1782,7 @@ export class Optimizer extends ASTVisitor {
 		// 标记这些变量为不可优化
 		modifiedVars.forEach(varInfo => {
 			const varName = varInfo.varName;
+			const varSymbol = varInfo.scope.lookup(varName);
 			const scopePath = ((
 				varInfo ? varInfo.scope.lookupScopeOf(varName) : null
 			) ?? this.currentScope.lookupScopeOf(varName)).getPath();			// This is because variable collector will not seriously consider scope information
@@ -1668,6 +1794,10 @@ export class Optimizer extends ASTVisitor {
 			}
 			if (constantList.has(varName)) {
 				constantList.delete(varName);
+			}
+			if (varSymbol) {
+				varSymbol.isConstant = false;
+				varSymbol.constantValue = null;
 			}
 		});
 		
@@ -2031,6 +2161,7 @@ export class Optimizer extends ASTVisitor {
 		for (const varInfo of modifiedVars) {
 			const varName = varInfo.varName;
 
+			const varSymbol = this.currentScope.lookup(varName);
 			const scopePath = this.currentScope.lookupScopeOf(varName).getPath();
 			const localConstants = this.localConstants.get(scopePath);
 			const variableUses = this.variableUses.get(scopePath);
@@ -2045,8 +2176,13 @@ export class Optimizer extends ASTVisitor {
 			const usage = variableUses.get(varName);
 			if (usage && !usage.canOptimize) {
 				// 变量标记为不可优化
+				// Side effect processor will be done in further operations
+				// (Given that it has been side effects, how the values are adjusted
+				// no longer matters)
 				return false;
 			}
+			// Add information for these writes
+			this.addWrittenSymbol(varSymbol, finalValue, true);
 		}
 		
 		// 为每个修改的变量创建赋值语句
@@ -2065,6 +2201,7 @@ export class Optimizer extends ASTVisitor {
 			exprStmt.addChild(assignmentExpr);
 			
 			replacementStatements.push(exprStmt);
+			
 		}
 		
 		// 如果有多个语句，用复合语句包装
@@ -2142,7 +2279,7 @@ export class Optimizer extends ASTVisitor {
 	 * @param {string} loopVariable - The loop index variable
 	 * @param {number} totalIterations - 总迭代次数
 	 * @param {number} firstSideEffect - 第一个有副作用的迭代索引
-	 * @param {Set<string>} modifiedVars - 修改的变量集合
+	 * @param {Set<{varName: string, scope: Scope}>} modifiedVars - 修改的变量集合
 	 * @returns {boolean} - 是否进行了优化
 	 * @remark There are adjustements done manually to adapt to existing code
 	 */
@@ -2164,8 +2301,9 @@ export class Optimizer extends ASTVisitor {
 		// 展开没有副作用的部分（通过直接赋值）
 		if (firstSideEffect > 0) {
 			
-			modifiedVars.forEach(varName => {
-				const scopePath = this.currentScope.lookupScopeOf(varName).getPath();
+			modifiedVars.forEach(varInfo => {
+				const varName = varInfo.varName;
+				const scopePath = (varInfo.scope ?? this.currentScope).lookupScopeOf(varName).getPath();
 				const localConstants = this.localConstants.get(scopePath);
 				const value = localConstants.get(varName);
 				const numericLiteral = ASTBuilder.numericLiteral(value);
@@ -2362,7 +2500,9 @@ export class Optimizer extends ASTVisitor {
 	 * @param {*} value
 	 * @param {boolean} doUpdate 
 	 */
-	addWrittenSymbol(varSymbol, value = null, doUpdate = true) {
+	addWrittenSymbol(varSymbol, value, doUpdate = true) {
+		const isNoSideEffect = val => (val != null && val != undefined);
+
 		const currentFuncScope = this.currentFunction ? (this.functionInfo.get(this.currentFunction).node.scope) : this.globalScope;
 		//doUpdate = doUpdate;	// By default suppress cross-function optimization
 		let noSideEffectValue = value;
@@ -2380,11 +2520,14 @@ export class Optimizer extends ASTVisitor {
 		const usage = variableUses.get(varName);
 		if (usage) {
 			usage.writes++;
-			if (noSideEffectValue != null) {
-				usage.canOptimize = true;
-			} else {
-				usage.canOptimize = false;
+			if (doUpdate != null) {
+				if (isNoSideEffect(value)) {
+					usage.canOptimize = true;
+				} else {
+					usage.canOptimize = false;
+				}
 			}
+			
 		}
 	
 		// Record variable access in it
@@ -2397,14 +2540,21 @@ export class Optimizer extends ASTVisitor {
 		// TODO: Consider removal only if the
 		// assigned value is NOT a constant or
 		// inside a conditional statement !!
-		if (noSideEffectValue == null) {
-			localConstants.delete(varName);
-		} else if (doUpdate) {
-			localConstants.set(varName, noSideEffectValue);
+		if (doUpdate != null) {
+			if (!isNoSideEffect(value) || doUpdate == false) {
+				localConstants.delete(varName);
+				varSymbol.isConstant = false;
+				varSymbol.constantValue = null;
+			} else if (doUpdate) {	// This branch is probably a must-go (i.e. "else,") but I don't want to change it. Zauber!
+				localConstants.set(varName, noSideEffectValue);
+				varSymbol.isConstant = true;
+				varSymbol.constantValue = noSideEffectValue;
+			}
 		}
+		
 	}
 
-	addWriteForCurrentScope(varName, noSideEffectValue = null, doUpdate = true) {
+	addWriteForCurrentScope(varName, noSideEffectValue, doUpdate = true) {
 		const varSymbol = this.currentScope.lookup(varName);
 		this.addWrittenSymbol(varSymbol, noSideEffectValue, doUpdate);
 	}
@@ -2420,30 +2570,39 @@ export class Optimizer extends ASTVisitor {
         const scopePath = scope.getPath();
         const variableUses = this.variableUses.get(scopePath) || new Map();
         const localConstants = this.localConstants.get(scopePath) || new Map();
-        
+
         // 1. 删除无用变量
-        this.removeUnusedVariablesInScope(scope, variableUses);
+        //this.removeUnusedVariablesInScope(scope, variableUses);
         
-        // 2. 常量传播
+        // 2. 常量传播 -- Done in normal analyses now!
         this.constantPropagationInScope(scope, localConstants);
         
-        // 3. 控制流优化（使用分析阶段收集的信息）
+        // 3. 控制流优化（使用分析阶段收集的信息）-- Already done!
 		//this.optimizeControlFlowInScope(scope);	// Not implemented
 		
-		// 4. 死代码消除
-		this.deadCodeEliminationInScope(scope);
+		// 4. 死代码消除 (Experimental)
+		if (this.extraConfig.getAttribute('deleteDeadCode')) {
+			this.deadCodeEliminationInScope(scope);
+		}
+
+		scope.children.forEach(child => this.optimizeScope(child));
     }
 
 	/**
 	 * 
-	 * @param {string} varName 
+	 * @param {string | SymbolEntry} varName 
 	 */
 	variableCanBeRemoved(varName) {
 		let symbol = varName;
 		if (typeof varName === 'string') {
 			symbol = this.currentScope.lookup(varName);
+		} else {
+			varName = symbol.name;
 		}
-		return (!symbol.isVolatile) && (!symbol.isExtern) && (!symbol.isStatic) && (!symbol.isAddressed);
+		// const varState = this.variableUses.get(symbol.scope.getPath()).get(varName);
+		//varState && (varState.reads == 0 && varState.writes <= 1) 
+		//&&
+		return  (!symbol.isVolatile) && (!symbol.isExtern) && (!symbol.isStatic) && (!symbol.isAddressed);
 	}
 
 	/**
@@ -2483,6 +2642,11 @@ export class Optimizer extends ASTVisitor {
         });
     }
 
+	/**
+	 * 
+	 * @param {Scope} scope 
+	 * @param {Map<string, any>} localConstants 
+	 */
     constantPropagationInScope(scope, localConstants) {
         if (!scope.astNode) return;
         this.currentScope = scope;
@@ -2537,14 +2701,17 @@ export class Optimizer extends ASTVisitor {
 	 * 
 	 * @param {ASTNode} node 
 	 * @param {Map<string, any>} constants 
-	 * @bug Notice its time complexity !
+	 * Currently not tracking whether the node self is deleted.
 	 */
-    traverseAndReplaceConstants(node, constants) {
-        if (!node) return;
+	replaceConstantsAt(node, constants) {
+		if (!node) return false;
         // Maybe not numeric?
-		let rightConstValue;
+		let rightConstValue, modified = false;
         switch (node.type) {
             case 'Identifier':
+				if (node.parent) {
+					if (node.parent.type === 'AssignmentExpression' && node.parent.left === node) break;	// Don't optimize
+				}
                 const constValue = constants.get(node.name);
                 if (constValue !== undefined) {
                     // 替换为常量值
@@ -2553,7 +2720,7 @@ export class Optimizer extends ASTVisitor {
                     replacement.location = node.location;
 					replacement.dataType = node.dataType;
                     this.replaceNode(node, replacement);
-                    this.modified = true;
+                    modified = true;
                 }
                 break;
                 
@@ -2562,7 +2729,7 @@ export class Optimizer extends ASTVisitor {
                 const leftValue = this.evaluateConstantExpression(node.left);
                 const rightValue = this.evaluateConstantExpression(node.right);
 				const isAssignment = node.operator.includes('=') && node.operator !== '==' && node.operator !== '!=' && node.operator !== '>=' && node.operator !== '<=';
-                
+                /*
 				if (isAssignment) {
 					if (node.left.type === 'Identifier' && this.variableCanBeRemoved(node.left.name) && leftValue !== undefined) {
 						console.log(`Removing assignment instruction:`,node);
@@ -2570,7 +2737,7 @@ export class Optimizer extends ASTVisitor {
 						break;
 					}
 				}
-
+				*/
                 if ((isAssignment || leftValue !== undefined) && rightValue !== undefined) {
                     const result = this.evaluateBinaryOperation(node.operator, leftValue, rightValue);
                     if (result !== undefined) {
@@ -2578,7 +2745,7 @@ export class Optimizer extends ASTVisitor {
                         replacement.location = node.location;
 						replacement.dataType = node.dataType;
                         this.replaceNode(node, replacement);
-                        this.modified = true;
+                        modified = true;
                     }
                 }
 
@@ -2606,7 +2773,7 @@ export class Optimizer extends ASTVisitor {
                         replacement.location = node.location;
 						replacement.dataType = node.dataType;
                         this.replaceNode(node, replacement);
-                        this.modified = true;
+                        modified = true;
                     }
                 }
                 break;
@@ -2623,7 +2790,7 @@ export class Optimizer extends ASTVisitor {
                         this.replaceNode(node, node.alternate || null);
 						console.log(`Optimizing always-false if statement`);
                     }
-                    this.modified = true;
+                    modified = true;
                 }
                 break;
                 
@@ -2632,42 +2799,42 @@ export class Optimizer extends ASTVisitor {
                 if (whileTestValue !== undefined && !whileTestValue) {
                     // 条件为假的while循环，直接删除
                     this.replaceNode(node, null);
-                    this.modified = true;
+                    modified = true;
 					break;
                 }
                 break;
 			
 			case 'AssignmentExpression':
 				// It is possible that assign value is given a constant
-				if (node.left.type === 'Identifier' && constants.has(node.left.name) && this.variableCanBeRemoved(node.left.name)) {
-					this.replaceNode(node, null);
-					break;
-				}
 				rightConstValue = this.evaluateConstantExpression(node.right);
-				if (rightConstValue != null) {
+				if (!this.isLiteralNode(node.right) && rightConstValue != null) {
 					// This is a constant, add it into constant set
+					console.log(`Optimzing assignment expression right`,node.right);
 					this.replaceNode(node.right, this.getLiteral(rightConstValue));
 				} else {
 					// Consider removal
-					this.traverseAndReplaceConstants(node.right, constants);
+					// this.replaceConstantsAt(node.right, constants);
+					return false;
 				}
 				break;
 			
 			case 'VariableDeclarator':
 			case 'Declarator':
-				// Some problems are here
-				if (constants.has(node.name) && this.variableCanBeRemoved(node.name)) {
-					this.replaceNode(node, null);
-					break;
-				}
-				rightConstValue = this.evaluateConstantExpression(node.initializer);
-				if (rightConstValue != null) {
-					// This is a constant, add it into constant set
-					this.replaceNode(node.initializer, this.getLiteral(rightConstValue));
+				if (node.initializer) {
+					rightConstValue = this.evaluateConstantExpression(node.initializer);
+					if (!this.isLiteralNode(node.initializer) && rightConstValue != null) {
+						// This is a constant, add it into constant set
+						console.log(`Optimzing assignment expression right`,node.initializer);
+						this.replaceNode(node.initializer, this.getLiteral(rightConstValue));
+					} else {
+						// Consider removal
+						// this.traverseAndReplaceConstants(node.initializer, constants);
+						return false;
+					}
 				} else {
-					// Consider removal
-					this.traverseAndReplaceConstants(node.initializer, constants);
+					return false;
 				}
+				
 				break;
 
 			case 'CompoundStatement':
@@ -2677,30 +2844,69 @@ export class Optimizer extends ASTVisitor {
 			default:
 				break;
 		}
-
-		if (!node) {
-			return;	// Already modified
+		if (modified) {
+			this.modified = true;
+			return true;
 		}
+		return false;
+	}
+
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 */
+	replaceConstantAtPresent(node) {
+		let constants = new Map();
+		let scope = this.currentScope;
+		while (scope) {
+			const scopePath = scope.getPath();
+			scope.getAllSymbols().forEach(symb => {
+				if (symb.isConstant && !constants.has(symb.name)) {
+					constants.set(symb.name, symb.constantValue);
+				}
+			});
+			scope = scope.parent;
+		}
+		return this.replaceConstantsAt(node, constants);
+	}
+
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 * @param {Map<string, any>} constants 
+	 * No bug because only inside current scope (but time complexity might be a problem)
+	 */
+    traverseAndReplaceConstants(node, constants) {
         
-        // 递归处理子节点
-        if (node.children) {
-            node.children.forEach(child => this.traverseAndReplaceConstants(child, constants));
-        }
-
-        const fieldsToCheck = [
-				'functions',
-				'statements', 'expression', 'test', 'consequent', 'alternate',
-				'body', 'init', 'update', 'argument',
-				'declarators', 'arguments', 'callee'
-			];	// A little bit special
-
-		for (const field of fieldsToCheck) {
-			if (Array.isArray(node[field])) {
-				node[field].forEach(elem => this.traverseAndReplaceConstants(elem, constants));
-			} else if (node[field] && typeof node[field] === 'object') {
-				this.traverseAndReplaceConstants(node[field], constants);
-			}
+		if (!node) return;
+		let replaced = false;
+		switch (node.type) {
+			case 'VariableDeclarator':
+			case 'Declarator':
+				if (constants.has(node.name) && this.variableCanBeRemoved(node.name)) {
+					console.log(`[ScopeOp Stage] Remove unused variable declarator:`,node);
+					this.replaceNode(node, null);
+					replaced = true;
+				}
+				break;
+			case 'AssignmentExpression':
+				if (node.left.type === 'Identifier' && constants.has(node.left.name) && this.variableCanBeRemoved(node.left.name)) {
+					console.log(`[ScopeOp Stage] Remove unused assignment expression:`,node);
+					this.replaceNode(node, null);
+					replaced = true;
+				}
+				break;
+			case 'UnaryExpression':
+				if (node.argument.type === 'Identifier' && constants.has(node.argument.name) && this.variableCanBeRemoved(node.argument.name)) {
+					console.log(`[ScopeOp Stage] Remove unused assignment expression:`,node);
+					this.replaceNode(node, null);
+					replaced = true;
+				}
+				break;
 		}
+		if (replaced) return;
+		this.replaceConstantsAt(node, constants);
+		this.further(node, ast => this.traverseAndReplaceConstants(ast, constants));
     }
 
     deadCodeEliminationInScope(scope) {
@@ -2859,7 +3065,7 @@ export class Optimizer extends ASTVisitor {
 	 * 
 	 * @param {ASTNode} node 
 	 * @param {boolean} [allowConstants=true] Whether to allow builtin constants to be regarded as constants
-	 * @returns {number | string | extBuiltinConstant}
+	 * @returns {number | string | extBuiltinConstant | undefined} (`undefined` means it is **not** constant)
 	 */
     evaluateConstantExpression(node, allowConstants = true) {
         if (!node) return undefined;
@@ -2980,9 +3186,16 @@ export class Optimizer extends ASTVisitor {
 
 	// ! This function has TO-DOs !
 	// This function is manually merged from AI output.
-    hasSideEffects(node, special = null) {
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 * @param {*?} special 
+	 * @param {Scope?} selectedScope 
+	 * @returns 
+	 */
+    hasSideEffects(node, special = null, selectedScope = null) {
         if (!node) return false;
-		const selectedScope = node.scope ?? this.currentScope;
+		selectedScope = node.scope ?? (selectedScope ?? this.currentScope);
 		const inFunction = special && special.inFunction;
 
 		const functionBuiltin = ['set', 'op', 'jump', 'asm'];
@@ -2998,7 +3211,7 @@ export class Optimizer extends ASTVisitor {
 					return true;
 				}
 				if (node.initializer) {
-					return this.hasSideEffects(node.initializer, special);
+					return this.hasSideEffects(node.initializer, special, selectedScope);
 				}
 				break;
             case 'AssignmentExpression':
@@ -3009,7 +3222,7 @@ export class Optimizer extends ASTVisitor {
 					return true;
 				}
 			case 'BinaryExpression':
-				return (this.hasSideEffects(node.left, special)) || (this.hasSideEffects(node.right, special));
+				return (this.hasSideEffects(node.left, special, selectedScope)) || (this.hasSideEffects(node.right, special, selectedScope));
 				// TODO: Double-check logic here
 				break;
 			//case 'InitializerList':	// Depending on its children
@@ -3046,22 +3259,22 @@ export class Optimizer extends ASTVisitor {
 			case 'ReturnStatement':
 				// return可能有副作用（返回值表达式）
 				// Abortion of control is dealt with elsewhere
-				return node.argument ? this.hasSideEffects(node.argument, special) : false;
+				return node.argument ? this.hasSideEffects(node.argument, special, selectedScope) : false;
 			case 'IfStatement':
 			case 'WhileStatement':
 			case 'ForStatement':
 				// 控制语句可能有副作用
-				return (node.test && this.hasSideEffects(node.test, special)) ||
-					   (node.consequent && this.hasSideEffects(node.consequent, special)) ||
-					   (node.alternate && this.hasSideEffects(node.alternate, special)) ||
-					   (node.body && this.hasSideEffects(node.body, special)) ||
-					   (node.init && this.hasSideEffects(node.init, special)) ||
-					   (node.update && this.hasSideEffects(node.update, special));
+				return (node.test && this.hasSideEffects(node.test, special, selectedScope)) ||
+					   (node.consequent && this.hasSideEffects(node.consequent, special, selectedScope)) ||
+					   (node.alternate && this.hasSideEffects(node.alternate, special, selectedScope)) ||
+					   (node.body && this.hasSideEffects(node.body, special, selectedScope)) ||
+					   (node.init && this.hasSideEffects(node.init, special, selectedScope)) ||
+					   (node.update && this.hasSideEffects(node.update, special, selectedScope));
 			case 'CompoundStatement':
 				// 如果其任何子语句有副作用，复合语句有副作用
 				if (node.statements) {
 					for (const stmt of node.statements) {
-						if (this.hasSideEffects(stmt, special)) {
+						if (this.hasSideEffects(stmt, special, selectedScope)) {
 							return true;
 						}
 					}
@@ -3090,13 +3303,13 @@ export class Optimizer extends ASTVisitor {
 		if (node.declarators) {
 			let hasSideEffects = false;
 			node.declarators.forEach(declarator => {
-				hasSideEffects = hasSideEffects || this.hasSideEffects(declarator, special);
+				hasSideEffects = hasSideEffects || this.hasSideEffects(declarator, special, selectedScope);
 			});
 			return hasSideEffects;
 		}
         if (node.children) {
             for (const child of node.children) {
-                if (this.hasSideEffects(child, special)) {
+                if (this.hasSideEffects(child, special, selectedScope)) {
                     return true;
                 }
             }
@@ -3671,6 +3884,19 @@ export class Optimizer extends ASTVisitor {
 		// 对每个调用点进行内联
 		for (const {callNode, parentNode, context} of callSites) {
 			this.inlineFunctionAtSite(funcInfo.node, callNode, parentNode, context);
+			
+			/**
+			 * 
+			 * @param {Scope} s 
+			 */
+			 /*
+			const scopeUpdater = s => {
+				if (s.astNode) s.astNode.scope = s;
+				s.children.forEach(s => scopeUpdater(s));
+			};
+			scopeUpdater(this.globalScope);	// Band-Aid solution, but I just can't do anything better
+			// Let it runnable first
+			*/
 		}
 		
 		// 如果函数现在没有被调用，可以删除它
@@ -3831,24 +4057,32 @@ export class Optimizer extends ASTVisitor {
 			funcNode.parameters.forEach((param, index) => {
 				if (index < callNode.arguments.length && param.name) {
 					//const paramSymbol = funcNode.scope.lookup(param.name).duplicate();
+					const currentType = callNode.arguments[index].dataType;
 					const symbolName = funcNode.name + ':' + param.name;
 					const ident = ASTBuilder.identifier(symbolName);
 					const value = this.cloneAST(callNode.arguments[index]);
-					const assigner = ASTBuilder.assignmentExpression('=', ident, value);
-					ident.dataType = callNode.arguments[index].dataType;
-					ident.parent = assigner;
-					value.parent = assigner;
+					// const assigner = ASTBuilder.assignmentExpression('=', ident, value);
+					const decler = ASTBuilder.variableDeclarator(symbolName);
+					decler.initializer = value;
+					value.parent = decler;
+					const decl = ASTBuilder.variableDeclaration(currentType, [decler]);
+					decler.parent = decl;
+					ident.dataType = currentType;
+					//ident.parent = assigner;
+					
 					//clonedBody.statements.unshift(assigner);
-					unshifts.push(assigner);
-					assigner.parent = clonedBody;
-					assigner.dataType = ident.dataType;
-					ident.scope = value.scope = assigner.scope = funcNode.scope;// parentNode.scope ?? callNode.scope;
+					unshifts.push(decl);
+					decl.parent = clonedBody;
+					decl.dataType = ident.dataType;
+					ident.scope = value.scope = decl.scope = decler.scope = parentNode.scope;// parentNode.scope ?? callNode.scope;
 					//paramMap.set(param.name, callNode.arguments[index]);
 					paramMap.set(param.name, ident);
 
 					if (parentNode.scope) {
 						// TODO: Add new symbol into caller's symbol table!
 						this.duplicateVariable(funcNode.scope, param.name, parentNode.scope, symbolName);
+						const symbolTarget = parentNode.scope.lookupCurrent(symbolName);
+						symbolTarget.kind = 'variable';	// Don't be 'parameter'!
 					}
 				}
 			});
@@ -3861,10 +4095,14 @@ export class Optimizer extends ASTVisitor {
 
 		// TODO: ! See whether the return value is got somewhere !
 		const doInsertInto = (targetNode, lvalOfReturn, doDeletion) => {
-			const params = changeParameter();
-
+			let retIndex = -1;
 			const index = targetNode.statements.indexOf(parentNode);
+			if (lvalOfReturn && lvalOfReturn.arguments) {
+				retIndex = lvalOfReturn.arguments.indexOf(callNode);
+				if (retIndex == -1) return false;
+			}
 			if (index !== -1) {
+				const params = changeParameter();
 				// 删除原表达式语句，插入函数体内容
 				if (lvalOfReturn) {
 					// To prepare for returning, the corresponding content must be put elsewhere
@@ -3874,7 +4112,12 @@ export class Optimizer extends ASTVisitor {
 				let spliceFix = 0;
 				let newCompound = ASTBuilder.compoundStatement();
 				//newCompound.scope = funcNode.scope;					// Apply similar structure...
-				clonedBody.statements.forEach((stmt, i) => {
+				
+				/**
+				 * 
+				 * @param {ASTNode} stmt 
+				 */
+				const cloneFunction = stmt => {
 					let actualStmt = stmt;
 					if (stmt.type === 'ReturnStatement') {
 						// Initially insert an auxiliary computer
@@ -3891,8 +4134,13 @@ export class Optimizer extends ASTVisitor {
 							if (lvalOfReturn.right && lvalOfReturn.right === callNode) {
 								this.replaceNode(lvalOfReturn.right, compStmt);
 							}
-							if (lvalOfReturn.argument && lvalOfReturn.argument === callNode) {
-								this.replaceNode(lvalOfReturn.argument, compStmt);
+							if (lvalOfReturn.argument) {
+								if (lvalOfReturn.argument === callNode) {
+									this.replaceNode(lvalOfReturn.argument, compStmt);
+								}
+							}
+							if (lvalOfReturn.arguments) {
+								this.replaceNode(lvalOfReturn.arguments[retIndex], compStmt);
 							}
 							if (lvalOfReturn.initializer && lvalOfReturn.initializer === callNode) {
 								this.replaceNode(lvalOfReturn.initializer, compStmt);
@@ -3907,6 +4155,9 @@ export class Optimizer extends ASTVisitor {
 							actualStmt = stmt.argument;
 							// Might have side effects
 						}
+					} else if (stmt.type === 'CompoundStatement') {
+						stmt.statements.forEach(stm => cloneFunction(stm));
+						return;
 					}
 					if (actualStmt) {
 						//targetNode.statements.splice(index + i + spliceFix, 0, actualStmt);
@@ -3914,8 +4165,9 @@ export class Optimizer extends ASTVisitor {
 						newCompound.statements.push(actualStmt);
 						actualStmt.parent = newCompound;
 					}
-					
-				});
+				};
+				cloneFunction(clonedBody);
+				//clonedBody.statements.forEach((stmt, i) => void(cloneFunction(stmt)));
 				// Relocate the parentNode to new compound statement
 				if (lvalOfReturn) {
 					newCompound.statements.push(parentNode);
@@ -3930,19 +4182,71 @@ export class Optimizer extends ASTVisitor {
 				const deliveringScope = funcNode.body.scope ?? funcNode.scope;
 				if (targetNode.scope && deliveringScope) {
 					const newScope = deliveringScope.duplicateAll();
+					newCompound.scope = newScope;
+					newScope.astNode = newCompound;
 					this.reRootScope(newScope, targetNode.scope, true);
 					newScope.symbols = new Map(
 						[...newScope.symbols].filter(([key, symb]) => symb.kind !== 'parameter')
 					);	// Remove all parameters!
-					newCompound.scope = newScope;
 					// Correspondingly:
 					if (lvalOfReturn) {
 						// Migrate aliases
 						params.forEach((value, key) => this.duplicateVariable(parentNode.scope, value, newScope, value));
 						parentNode.scope = newScope;
 					}
+					this.currentScope = newScope;
 					
 				}
+				newCompound.setAttribute('throughInline', true);
+				newCompound.setAttribute('functionName', funcNode.name);
+				
+				/**
+				 * 
+				 * @param {Scope} scope 
+				 */
+				/*
+				const tidyScope = scope => {
+					scope.children = [...new Set(scope.children)];
+					scope.children.forEach(tidyScope);
+				};
+				tidyScope(newCompound.scope);
+				*/
+				/**
+				 * @param {ASTNode} ast
+				 */
+				const rebinding = ast => {
+					/**
+					 * @type {Scope}
+					 */
+					const currentScope = ast.scope;
+					let childrenOrder = 0;
+					if (!currentScope) return;
+					if (ast.type === 'CompoundStatement') {
+						ast.statements.forEach(
+							/**
+							 * @param {ASTNode} sub 
+							 */
+							sub => {
+								sub.parent = ast;
+								if (sub.type === 'CompoundStatement') {
+									const currentChild = currentScope.children[childrenOrder];
+									sub.scope = currentChild;
+									currentChild.astNode = sub;
+									rebinding(sub);
+									childrenOrder++;
+								} else {
+									sub.scope = currentScope;
+									rebinding(sub);
+								}
+						});
+					} else {
+						this.further(ast, subnode => {
+							subnode.parent = ast;
+							rebinding(subnode);
+						});
+					}
+				};
+				rebinding(newCompound);
 
 				return true;
 			} else {
@@ -3990,7 +4294,7 @@ export class Optimizer extends ASTVisitor {
 			if (index !== -1) directParent.children.splice(index, 1);
 		} else if (directParent.type === 'AssignmentExpression' || directParent.type === 'BinaryExpression'
 			 || directParent.type === 'UnaryExpression' || directParent.type === 'VariableDeclarator'
-			|| directParent.type === 'Declarator') {
+			|| directParent.type === 'Declarator' || directParent.type === 'FunctionCall' || directParent.type === 'BuiltinCall') {
 			// Also need this:
 			if (clonedBody.type === 'CompoundStatement') {
 				// 将复合语句的内容插入到父节点中

@@ -69,6 +69,7 @@ export class Instruction extends AttributeClass {
 		if (this.instructionReturn && (typeof this.instructionReturn === 'object')) {
 			throw `Instruction return is not supposed to be an object`;
 		}
+		this.instructionReturn = `${this.instructionReturn}`;	// stringify
 		
 		this._attributes = attributes;
 	}

@@ -74,10 +74,13 @@ export class SymbolEntry {
     markAsConstant(value) {
         this.isConstant = true;
         this.constantValue = value;
+		/*
+
 		let typeRef = this.myType();
         if (typeRef && typeRef.qualifiers) {
             typeRef.qualifiers.push('const');
         }
+			*/
     }
 
 	/**

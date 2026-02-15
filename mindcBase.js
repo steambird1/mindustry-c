@@ -156,10 +156,12 @@ export class CompilationPhase {
     }
     
     addError(message, line = null) {
+        console.log(`Added error ${message}`);
         this.errors.push({ message, line });
     }
     
     addWarning(message, line = null) {
+        console.log(`Added warning ${message}`);
         this.warnings.push({ message, line });
     }
 
@@ -744,7 +746,7 @@ export class ASTVisitor extends CompilationPhase {
 		}
 
 		node.children.forEach(child => {
-			if (halt && (!halt())) callee(child);
+			if (!halt || (!halt())) callee(child);
 		});
 	}
 }
