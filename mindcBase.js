@@ -716,38 +716,52 @@ export class ASTVisitor extends CompilationPhase {
 	 * 
 	 * @callback ASTVisitorHalt
 	 * @returns {boolean} Whether to stop visiting.
+     * 
+     * @callback ASTVisitorReduce
+     * @param {*} reductionTarget
+     * @param {*} currentReturn
+     * @param {*} reductionResult
 	 */
+
 	/**
 	 * 
 	 * @param {ASTNode} node 
 	 * @param {ASTVisitorCallback} callee 
 	 * @param {ASTVisitorHalt | null} [halt=null]
+     * @param {ASTVisitorReduce | null} [reduce=null] 
 	 */
-	further(node, callee, halt = null) {
+	further(node, callee, halt = null, reduce = null) {
 		const fields = [
 			'functions', 'globalDeclarations', 'typeDefinitions',
 			'statements', 'expression', 'test', 'consequent', 'alternate',
 			'body', 'init', 'update', 'argument', 'left', 'right',
 			'declarators', 'arguments', 'callee', 'initializer'
 		];
-		
+        let result = null;
 		for (const field of fields) {
 			if (node[field]) {
 				if (Array.isArray(node[field])) {
 					for (const item of node[field]) {
-						callee(item);
+						const ret = callee(item);
+                        if (reduce) result = reduce(result, ret);
 						if (halt && halt()) break;
 					}
 				} else if (typeof node[field] === 'object') {
-					callee(node[field]);
+					const ret = callee(node[field]);
+                    if (reduce) result = reduce(result, ret);
 				}
 			}
 			if (halt && halt()) break;
 		}
 
 		node.children.forEach(child => {
-			if (!halt || (!halt())) callee(child);
+			if (!halt || (!halt())) {
+                const ret = callee(child);
+                if (reduce) result = reduce(result, ret);
+            }
 		});
+        
+        return result;
 	}
 }
 

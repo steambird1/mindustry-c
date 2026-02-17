@@ -178,10 +178,22 @@ export class SymbolEntry {
 export class Scope {
     constructor(parent = null, type = 'b', astNode = null, name = '') {
         this.parent = parent;
-        this.type = type; // g 'global', f 'function', b 'block'
+		/**
+		 * @type {'g' | 'f' | 'b' | 'l'}
+		 */
+        this.type = type; // g 'global', f 'function', b 'block', l 'inline'
 		this.name = name;
+		/**
+		 * @type {ASTNode}
+		 */
 		this.astNode = astNode; // 关联的AST节点
+		/**
+		 * @type {Map<string, SymbolEntry>}
+		 */
         this.symbols = new Map();
+		/**
+		 * @type {Scope[]}
+		 */
         this.children = [];
 		
 		if (parent) {
@@ -255,7 +267,11 @@ export class Scope {
 	duplicate() {
 		const scope = new Scope(this.parent, this.type, this.astNode, this.name);
 		scope.children = [...this.children];
-		scope.symbols = new Map([...this.symbols]);
+		scope.symbols = new Map([...this.symbols].map(([key, symb]) => {
+			const dup = symb.duplicate();
+			dup.scope = scope;
+			return [key, dup];
+		}));
 		scope.duplicateIdent = (this.duplicateIdent ?? 0) + 1;
 		return scope;
 	}
@@ -266,7 +282,11 @@ export class Scope {
 		scope.children.forEach(child => {
 			child.parent = scope;
 		});
-		scope.symbols = new Map([...this.symbols].map(([key, symb]) => [key, symb.duplicate()]));
+		scope.symbols = new Map([...this.symbols].map(([key, symb]) => {
+			const dup = symb.duplicate();
+			dup.scope = scope;
+			return [key, dup];
+		}));
 		scope.fullDuplicateIdent = (this.fullDuplicateIdent ?? 0) + 1;
 		return scope;
 	}

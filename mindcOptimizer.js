@@ -4,8 +4,11 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	liquidList, unitList, buildingList, ConstantManager,
 	CastExpression,
 	ForStatementNode,
-	VariableDeclarationNode
+	VariableDeclarationNode,
+	TypeSpecifierNode,
+	IdentifierNode
  } from "./mindcBase.js";
+import { InstructionBuilder } from "./mindcGeneratorBase.js";
 
 import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mindcSemantic.js";
 
@@ -34,6 +37,7 @@ export class Optimizer extends ASTVisitor {
         this.modified = false;
         this.errors = [];
         this.warnings = [];
+		this.inlinedScopeId = 0;
         
         // 优化状态
         this.functionCallGraph = new Map();
@@ -259,7 +263,8 @@ export class Optimizer extends ASTVisitor {
 		if (!varState || !varState.reads || !varState.writes ) {
 			varState = {
 				reads: 1,
-				writes: 1
+				writes: 1,
+				canOptimize: true
 			};	// Prevent unexpected optimizing
 		}
 		targetVariableScope.set(targetName, { ...varState });
@@ -445,7 +450,7 @@ export class Optimizer extends ASTVisitor {
 	// ! Manually added scope entrance !
 	analyzeCompoundStatement(node, info = null) {
 		let enteredScope = false;
-		if (node.scope && node.scope.name !== this.currentScope.name) {
+		if (node.scope && node.scope.getPath() !== this.currentScope.getPath()) {
 			enteredScope = true;
 			this.enterScope(node.scope);
 		}
@@ -644,7 +649,7 @@ export class Optimizer extends ASTVisitor {
             // 初始化使用统计
             variableUses.set(declarator.name, {
                 reads: 0,
-                writes: 1, // 初始化算作一次写入
+                writes: 0, // 初始化算作一次写入
 				canOptimize: canOptimizeThis,	// False: already symbolized as no-optimize
                 location: declarator.location,
                 node: declarator
@@ -1030,11 +1035,11 @@ export class Optimizer extends ASTVisitor {
 						
 						if (iterationCount !== null && iterationCount >= 0) {
 							whileNode.setAttribute('iterationCount', iterationCount);
-							
+							const MAX_OPTIMIZE_ITERATIONS = 250; // 最大优化循环次数
 							if (iterationCount === 0) {
 								whileNode.setAttribute('neverExecuted', true);
 								return true;
-							} else if (iterationCount <= 100) {
+							} else if (iterationCount <= MAX_OPTIMIZE_ITERATIONS) {
 								// 可以优化
 								whileNode.setAttribute('iteration', {
 									node: whileNode,
@@ -1358,7 +1363,7 @@ export class Optimizer extends ASTVisitor {
 			forNode.setAttribute('iterationCount', iterationCount);
 			forNode.setAttribute('iterationCountKnown', true);
 			// 检查循环次数是否超过优化限制
-			const MAX_OPTIMIZE_ITERATIONS = 100; // 最大优化循环次数
+			const MAX_OPTIMIZE_ITERATIONS = 250; // 最大优化循环次数
 			if (iterationCount <= MAX_OPTIMIZE_ITERATIONS) {
 				// 可以优化这个循环
 				forNode.setAttribute('canOptimize', true);
@@ -1643,7 +1648,7 @@ export class Optimizer extends ASTVisitor {
 	simulateLoop(loopNode, loopVarName, initValue, conditionInfo, updateInfo, iterationCount, envInfo = null) {
 		
 		// User configuration
-		const configuredMaxSimulation = 100;
+		const configuredMaxSimulation = 300;
 		const configuredMaxGrossSimulation = 50000;
 		// End
 		
@@ -2880,19 +2885,38 @@ export class Optimizer extends ASTVisitor {
         
 		if (!node) return;
 		let replaced = false;
+
+		/**
+		 * 
+		 * @param {ASTNode} nodeTarget 
+		 * @param {ASTNode} sideTarget 
+		 */
+		const tryReplacing = (nodeTarget, sideTarget) => {
+			if (sideTarget && this.hasSideEffects(sideTarget)) {
+				const expr = new ASTNode('ExpressionStatement', sideTarget.location);
+				expr.addChild(sideTarget);
+				sideTarget.parent = expr;
+				expr.parent = nodeTarget.parent;
+				this.replaceNode(nodeTarget, expr);
+				console.log(`[ScopeOp Stage] reserving side effect expression`,expr);
+			} else {
+				this.replaceNode(nodeTarget, null);
+			}
+		};
+
 		switch (node.type) {
 			case 'VariableDeclarator':
 			case 'Declarator':
 				if (constants.has(node.name) && this.variableCanBeRemoved(node.name)) {
 					console.log(`[ScopeOp Stage] Remove unused variable declarator:`,node);
-					this.replaceNode(node, null);
+					tryReplacing(node, node.initializer);
 					replaced = true;
 				}
 				break;
 			case 'AssignmentExpression':
 				if (node.left.type === 'Identifier' && constants.has(node.left.name) && this.variableCanBeRemoved(node.left.name)) {
 					console.log(`[ScopeOp Stage] Remove unused assignment expression:`,node);
-					this.replaceNode(node, null);
+					tryReplacing(node, node.right);
 					replaced = true;
 				}
 				break;
@@ -4043,11 +4067,17 @@ export class Optimizer extends ASTVisitor {
 		// (This function is no longer used)
 		//const returnValue = this.extractAndReplaceReturns(clonedBody, parentNode, callNode);
 		
-		const changeParameter = () => {
+		/**
+		 * 
+		 * @param {Scope} ziel 
+		 * @param {CompoundStatementNode} target
+		 * @returns 
+		 */
+		const changeParameter = (ziel, target) => {
 			// Insert parameters after determining where the parent is!
 			// 创建参数映射
 			/**
-			 * @type {Map<string, string>}
+			 * @type {Map<string, IdentifierNode>}
 			 */
 			const paramMap = new Map();
 			/**
@@ -4058,30 +4088,32 @@ export class Optimizer extends ASTVisitor {
 				if (index < callNode.arguments.length && param.name) {
 					//const paramSymbol = funcNode.scope.lookup(param.name).duplicate();
 					const currentType = callNode.arguments[index].dataType;
-					const symbolName = funcNode.name + ':' + param.name;
+					const symbolName = `${funcNode.name}:${param.name}:${this.inlinedScopeId}`;//funcNode.name + ':' + param.name;
 					const ident = ASTBuilder.identifier(symbolName);
 					const value = this.cloneAST(callNode.arguments[index]);
 					// const assigner = ASTBuilder.assignmentExpression('=', ident, value);
 					const decler = ASTBuilder.variableDeclarator(symbolName);
+					decler.setAttribute('inliningAlias', param);
 					decler.initializer = value;
 					value.parent = decler;
-					const decl = ASTBuilder.variableDeclaration(currentType, [decler]);
+					// Warning: not a type specifier now!!!
+					const decl = ASTBuilder.variableDeclaration(new TypeSpecifierNode(callNode.arguments[index].dataType), [decler]);
 					decler.parent = decl;
 					ident.dataType = currentType;
 					//ident.parent = assigner;
-					
+					decl.setAttribute('inliningAlias', param);
 					//clonedBody.statements.unshift(assigner);
 					unshifts.push(decl);
 					decl.parent = clonedBody;
 					decl.dataType = ident.dataType;
-					ident.scope = value.scope = decl.scope = decler.scope = parentNode.scope;// parentNode.scope ?? callNode.scope;
+					ident.scope = value.scope = decl.scope = decler.scope = ziel;// parentNode.scope ?? callNode.scope;
 					//paramMap.set(param.name, callNode.arguments[index]);
 					paramMap.set(param.name, ident);
 
-					if (parentNode.scope) {
+					if (ziel) {
 						// TODO: Add new symbol into caller's symbol table!
-						this.duplicateVariable(funcNode.scope, param.name, parentNode.scope, symbolName);
-						const symbolTarget = parentNode.scope.lookupCurrent(symbolName);
+						this.duplicateVariable(funcNode.scope, param.name, ziel, symbolName);
+						const symbolTarget = ziel.lookupCurrent(symbolName);
 						symbolTarget.kind = 'variable';	// Don't be 'parameter'!
 					}
 				}
@@ -4089,7 +4121,8 @@ export class Optimizer extends ASTVisitor {
 			
 			// 替换参数
 			this.replaceParametersInAST(clonedBody, paramMap, funcNode);
-			clonedBody.statements.unshift(...unshifts);
+			//clonedBody.statements.unshift(...unshifts);
+			target.statements.unshift(...unshifts);
 			return paramMap;
 		};
 
@@ -4100,109 +4133,245 @@ export class Optimizer extends ASTVisitor {
 			if (lvalOfReturn && lvalOfReturn.arguments) {
 				retIndex = lvalOfReturn.arguments.indexOf(callNode);
 				if (retIndex == -1) return false;
+				
 			}
 			if (index !== -1) {
-				const params = changeParameter();
+				let newCompound = ASTBuilder.compoundStatement();
+				const tmpScope = new Scope(targetNode.scope, 'l', newCompound, `${this.inlinedScopeId}`);
+				newCompound.scope = tmpScope;
+				const params = changeParameter(tmpScope, newCompound);
+				const addedVariables = [...params].map(([key, val]) => val.name);
+				let returnerName, returnerDecl, returnerWrapper, returnerIdent;
 				// 删除原表达式语句，插入函数体内容
 				if (lvalOfReturn) {
 					// To prepare for returning, the corresponding content must be put elsewhere
 					targetNode.statements.splice(index, 1);
+					// For returning, create a special symbol
+					returnerName = `${funcNode.name}:@:${this.inlinedScopeId}`;
+					tmpScope.addSymbol(new SymbolEntry(returnerName, callNode.dataType, tmpScope, 'variable', null, callNode.dataType.size ?? 1));
+					/**
+					 * @todo Create an identifier for returning...
+					 */
+					returnerDecl = ASTBuilder.variableDeclarator(returnerName);
+					returnerWrapper = ASTBuilder.variableDeclaration(new TypeSpecifierNode(callNode.dataType));
+					returnerWrapper.declarators.push(returnerDecl);
+					returnerDecl.parent = returnerWrapper;
+					returnerIdent = ASTBuilder.identifier(returnerName);
+					returnerIdent.parent = lvalOfReturn; // To be added somewhere!
+					newCompound.statements.push(returnerWrapper);
+					returnerWrapper.parent = newCompound;
+					addedVariables.push(returnerName);
 				}
-				
-				let spliceFix = 0;
-				let newCompound = ASTBuilder.compoundStatement();
-				//newCompound.scope = funcNode.scope;					// Apply similar structure...
-				
+
 				/**
-				 * 
+				 * Duplicating and rebinding scope for cloned body.
 				 * @param {ASTNode} stmt 
+				 * @returns {Scope[]} Scope that should become a descend of current available parent
+				 * (given that the root is one single node, this return value is not necessary to be proceed)
 				 */
-				const cloneFunction = stmt => {
-					let actualStmt = stmt;
-					if (stmt.type === 'ReturnStatement') {
-						// Initially insert an auxiliary computer
-						const compStmt = stmt.argument;
-						
-						actualStmt = null;
-						if (lvalOfReturn) {
-							// The right value is the function call
-							//lvalOfReturn.right = stmt.argument;
-							if (lvalOfReturn.left && lvalOfReturn.left === callNode) {
-								//lvalOfReturn.left = compStmt;
-								this.replaceNode(lvalOfReturn.left, compStmt);
-							}
-							if (lvalOfReturn.right && lvalOfReturn.right === callNode) {
-								this.replaceNode(lvalOfReturn.right, compStmt);
-							}
-							if (lvalOfReturn.argument) {
-								if (lvalOfReturn.argument === callNode) {
-									this.replaceNode(lvalOfReturn.argument, compStmt);
-								}
-							}
-							if (lvalOfReturn.arguments) {
-								this.replaceNode(lvalOfReturn.arguments[retIndex], compStmt);
-							}
-							if (lvalOfReturn.initializer && lvalOfReturn.initializer === callNode) {
-								this.replaceNode(lvalOfReturn.initializer, compStmt);
-							}
-							//actualStmt = lvalOfReturn;	// There's no need to insert
-							compStmt.parent = lvalOfReturn;
-							
-							// Not that easy. In fact, you have to migrate the whole 'parentNode'...
-							//actualStmt = lvalOfReturn;	// Regard it as a part of new function
-							// (or the returning will be unable to use anything in the original scope)
-						} else if (!actualStmt) {
-							actualStmt = stmt.argument;
-							// Might have side effects
-						}
-					} else if (stmt.type === 'CompoundStatement') {
-						stmt.statements.forEach(stm => cloneFunction(stm));
-						return;
+				const scopeRebinder = stmt => {
+					/**
+					 * @type {Scope}
+					 */
+					let relatedNewScope;
+					if (stmt.type === 'CompoundStatement') {
+						relatedNewScope = stmt.scope.duplicate();
+						relatedNewScope.astNode = stmt;
+						relatedNewScope.children = [];
+						stmt.scope = relatedNewScope;
 					}
-					if (actualStmt) {
-						//targetNode.statements.splice(index + i + spliceFix, 0, actualStmt);
-						//actualStmt.parent = targetNode;
-						newCompound.statements.push(actualStmt);
-						actualStmt.parent = newCompound;
+					const rets = this.further(stmt, scopeRebinder, null, (prev, curr) => {
+						if (!prev) return curr;
+						if (!curr) return prev;
+						return [...prev, ...curr];
+					});
+					/**
+					 * @type {Scope[]}
+					 */
+					const expectedChildren = rets ?? [];
+					// Post-visit
+					if (relatedNewScope) {
+						/*this.further(stmt, sub => {
+							sub.parent = stmt;
+							sub.scope.parent = relatedNewScope;
+							relatedNewScope.children.push(sub.scope);
+						});
+						*/
+						expectedChildren.forEach(kinder => {
+							relatedNewScope.children.push(kinder);
+							kinder.parent = relatedNewScope;
+						});
+						return [relatedNewScope];
 					}
+					return expectedChildren;
 				};
-				cloneFunction(clonedBody);
-				//clonedBody.statements.forEach((stmt, i) => void(cloneFunction(stmt)));
+				const deliveringScope = scopeRebinder(clonedBody)[0];	// Given that the cloneFor() works for only references!
+				
+				const scopeRelinker = stmt => {
+					if (stmt.type !== 'CompoundStatement') {
+						stmt.scope = stmt.parent.scope;
+					}
+					this.further(stmt, scopeRelinker);
+				};
+				scopeRelinker(clonedBody);
+
+				let originals;// = ASTBuilder.compoundStatement();
+				//newCompound.scope = funcNode.scope;					// Apply similar structure...
+
+				/**
+				 * Guaranteed that the return statement is at the top!
+				 * @param {ASTNode} stm
+				 */
+				const cloneFor = stm => {
+					let original = ASTBuilder.compoundStatement();
+					/**
+					 * Guaranteed that the return statement is at the top!
+					 * @param {ASTNode} stmt
+					 */
+					const cloneFunction = stmt => {
+						let actualStmt = stmt;
+						if (stmt.type === 'ReturnStatement') {
+							// Initially insert an auxiliary computer
+							const compStmt = stmt.argument;
+
+							actualStmt = null;
+							if (lvalOfReturn) {
+								// The right value is the function call
+								//lvalOfReturn.right = stmt.argument;
+								if (lvalOfReturn.left && lvalOfReturn.left === callNode) {
+									//lvalOfReturn.left = compStmt;
+									this.replaceNode(lvalOfReturn.left, returnerIdent);
+								}
+								if (lvalOfReturn.right && lvalOfReturn.right === callNode) {
+									this.replaceNode(lvalOfReturn.right, returnerIdent);
+								}
+								if (lvalOfReturn.argument) {
+									if (lvalOfReturn.argument === callNode) {
+										this.replaceNode(lvalOfReturn.argument, returnerIdent);
+									}
+								}
+								if (lvalOfReturn.arguments) {
+									this.replaceNode(lvalOfReturn.arguments[retIndex], returnerIdent);
+								}
+								if (lvalOfReturn.initializer && lvalOfReturn.initializer === callNode) {
+									this.replaceNode(lvalOfReturn.initializer, returnerIdent);
+								}
+								//actualStmt = lvalOfReturn;	// There's no need to insert
+
+								// Add an assignment expression!
+								const returnAssignerIdent = ASTBuilder.identifier(returnerName);
+								const returnAssigner = ASTBuilder.assignmentExpression('=', returnAssignerIdent, stmt.argument);
+								stmt.argument.parent = returnAssigner;
+								returnAssignerIdent.parent = returnAssigner;
+								actualStmt = returnAssigner;
+								
+								// Not that easy. In fact, you have to migrate the whole 'parentNode'...
+								//actualStmt = lvalOfReturn;	// Regard it as a part of new function
+								// (or the returning will be unable to use anything in the original scope)
+							} else if (!actualStmt) {
+								actualStmt = stmt.argument;
+								// Might have side effects
+							}
+						} else if (stmt.type === 'CompoundStatement') {
+							// Ensure that the return statement is at the top.
+							actualStmt = cloneFor(stmt);
+						}
+						/**
+						 * @todo MORE WORK IS NEEDED HERE
+						*/
+						if (actualStmt) {
+							/** This doesn't really work.
+							 */
+							original.statements.push(actualStmt); // newCompound.statements.push(actualStmt);
+							actualStmt.parent = original;// actualStmt.parent = newCompound;
+							actualStmt.scope = stmt.scope;
+						}
+					};
+					stm.statements.forEach(stmt => void (cloneFunction(stmt)));
+					original.scope = stm.scope;
+					return original;
+				};
+				
+				originals = cloneFor(clonedBody);
+				/**
+				 * @todo !! adjust scope for clonedBody !!
+				*/
+				
 				// Relocate the parentNode to new compound statement
-				if (lvalOfReturn) {
+				
+				newCompound.statements.push(originals);
+				if (lvalOfReturn) {	// Or there will be errors in further inlining!
 					newCompound.statements.push(parentNode);
 					parentNode.parent = newCompound;
 				}
-				
-
+				originals.parent = newCompound;
 				targetNode.statements.splice(index, 0, newCompound);
 				newCompound.parent = targetNode;
 
-				// Deliver the scope:
-				const deliveringScope = funcNode.body.scope ?? funcNode.scope;
-				if (targetNode.scope && deliveringScope) {
-					const newScope = deliveringScope.duplicateAll();
-					newCompound.scope = newScope;
-					newScope.astNode = newCompound;
-					this.reRootScope(newScope, targetNode.scope, true);
-					newScope.symbols = new Map(
-						[...newScope.symbols].filter(([key, symb]) => symb.kind !== 'parameter')
+				/**
+				 * @todo Consider: use "(function):@" for returner, and then the
+				 * returner is assigned this value -- so that to prevent scope issue.
+				 */
+				// deliveringScope is now bound much earlier
+				if (tmpScope && deliveringScope) {
+					// const newScope = deliveringScope.duplicateAll();
+					this.reRootScope(deliveringScope, tmpScope, false);
+					const varUseRef = this.variableUses.get(tmpScope.getPath());
+					addedVariables.forEach(
+						/**
+						 * 
+						 * @param {string} addedVarName 
+						 */
+						addedVarName => {
+							varUseRef.set(addedVarName, {
+								reads: 1,			// Use 'infinity' to prevent variable deletion
+								writes: 1,					// Actual situation
+								canOptimize: true			// Allow continuous operation
+							});
+					});
+					/*
+					// Seems useless
+					deliveringScope.symbols = new Map(
+						[...deliveringScope.symbols].filter(([key, symb]) => symb.kind !== 'parameter')
 					);	// Remove all parameters!
 					// Correspondingly:
 					if (lvalOfReturn) {
-						// Migrate aliases
-						params.forEach((value, key) => this.duplicateVariable(parentNode.scope, value, newScope, value));
-						parentNode.scope = newScope;
+						// Migrate aliases (I think this is correct anyway)
+						params.forEach((value, key) => this.duplicateVariable(parentNode.scope, value, tmpScope, value));
+						parentNode.scope = tmpScope;
 					}
-					this.currentScope = newScope;
-					
+					*/
+				} else {
+					throw `No scope for function to inline!`;
+					return false;
 				}
 				newCompound.setAttribute('throughInline', true);
 				newCompound.setAttribute('functionName', funcNode.name);
+
+				if (lvalOfReturn) {
+					// If its descendant has sth...
+					// Then that staff of parentNode must have its scope relocated
+					const controller = sub => {
+						if (sub.type === 'CompoundStatement') {
+							throw `Internal Error: unexpected compound statement!`;
+						}
+						sub.scope = tmpScope;
+					};
+					this.further(parentNode, cont => {
+						// Only compound statements may own its scope, as functions can't be embedded
+						
+						if (cont.type === 'CompoundStatement' && cont.scope) {
+							this.reRootScope(cont.scope, tmpScope, false);
+						} else {
+							this.further(cont, controller);
+						}
+					});
+					lvalOfReturn.scope = tmpScope; // Used for side effect analyses
+				}
 				
 				/**
-				 * 
-				 * @param {Scope} scope 
+				 * The incorrectness is, in a word, caused by incorrect order of Scopes. re-ordering doesn't help. 15 Feb 22Z
+				 * @todo WHAT YOU REALLY NEED TO DO IS: ADD AN INDEPENDENT COMPOUND STATEMENT FOR THE ORIGINAL STATEMENTS IN FUNCTIONS!
 				 */
 				/*
 				const tidyScope = scope => {
@@ -4214,40 +4383,12 @@ export class Optimizer extends ASTVisitor {
 				/**
 				 * @param {ASTNode} ast
 				 */
-				const rebinding = ast => {
-					/**
-					 * @type {Scope}
-					 */
-					const currentScope = ast.scope;
-					let childrenOrder = 0;
-					if (!currentScope) return;
-					if (ast.type === 'CompoundStatement') {
-						ast.statements.forEach(
-							/**
-							 * @param {ASTNode} sub 
-							 */
-							sub => {
-								sub.parent = ast;
-								if (sub.type === 'CompoundStatement') {
-									const currentChild = currentScope.children[childrenOrder];
-									sub.scope = currentChild;
-									currentChild.astNode = sub;
-									rebinding(sub);
-									childrenOrder++;
-								} else {
-									sub.scope = currentScope;
-									rebinding(sub);
-								}
-						});
-					} else {
-						this.further(ast, subnode => {
-							subnode.parent = ast;
-							rebinding(subnode);
-						});
-					}
-				};
+				/*
+				
 				rebinding(newCompound);
+				*/
 
+				this.inlinedScopeId++;
 				return true;
 			} else {
 				return false;
@@ -4491,7 +4632,7 @@ export class Optimizer extends ASTVisitor {
 	}
 
 	/**
-	 * 清理全局声明
+	 * 清理全局声明 (Probably unused)
 	 */
 	cleanupGlobalDeclarations() {
 		if (!this.ast || this.ast.type !== 'Program') return;

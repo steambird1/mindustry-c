@@ -167,11 +167,11 @@ export class CodeGenerator extends ASTVisitor {
 				//case 'struct':	// Not allocating memory space for structures for now
 				case 'parameter':
 				//case 'union':
-					const symbolType = symbol.type.type;
+					const symbolType = symbol.myType();
 					symbol.size = symbolType.size;
 					switch (symbolType.kind) {
 						case 'struct':
-						case 'union':
+						case 'union': 
 							break;
 						case 'device':
 							if (symbol.isAutoDevice) {
