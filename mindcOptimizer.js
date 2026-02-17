@@ -413,7 +413,7 @@ export class Optimizer extends ASTVisitor {
 				// Don't further analyze them!!!
 				this.analyzeNode(node.children[0]);
 				if (node.getAttribute('computed')) {
-					this.analyzeNode(node.children[1]);
+					this.analyzeNode(node.children[1], info);
 				}
 				// Otherwise it is NOT a valid variable!!
 				return;
@@ -4316,7 +4316,12 @@ export class Optimizer extends ASTVisitor {
 				if (tmpScope && deliveringScope) {
 					// const newScope = deliveringScope.duplicateAll();
 					this.reRootScope(deliveringScope, tmpScope, false);
-					const varUseRef = this.variableUses.get(tmpScope.getPath());
+					const tmpPath = tmpScope.getPath();
+					let varUseRef = this.variableUses.get(tmpPath);
+					if (!varUseRef) {
+						varUseRef = new Map();
+						this.variableUses.set(tmpPath, varUseRef);
+					}
 					addedVariables.forEach(
 						/**
 						 * 
