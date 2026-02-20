@@ -1206,6 +1206,9 @@ export class CodeGenerator extends ASTVisitor {
 			// Structure demands special processor
 			let result = new Instruction();
 			for (let i = 0; i < knownType.members.length && i < node.children.length; i++) {
+				if (node.children[i].type === 'InitializerList') {
+					node.children[i].dataType = knownType.members[i].type;
+				}
 				const ret = this.visitAndRead(node.children[i]);
 				const current = knownType.members[i];
 				const currentTarget = `${tmpVar.getAssemblySymbol()}.${current.name}`;
@@ -1214,7 +1217,7 @@ export class CodeGenerator extends ASTVisitor {
 					result.concat(this.copyObject(currentTarget, 
 						ret.instructionReturn, current.type, node.children[i].dataType));
 				} else {
-					result.concat(ret.replace_variable(ret.instructionReturn, currentTarget));
+					result.concat(ret.replace_variable(currentTarget, ret.instructionReturn));
 				}
 			}
 			result.set_returns(tmpVar);
