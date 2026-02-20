@@ -79,6 +79,10 @@ export class CodeGenerator extends ASTVisitor {
         // 将AST转换为目标代码
         let result = new Instruction(), success = true;
 		try {
+			let noMemory = this.compiler.config.getAttribute('noMemory');
+			if (this.memory.memoryBlocks.length == 0) {
+				noMemory = true;
+			}
 			this.recuriveInfo = this.findRecursiveFunctions(this.functionCallGraph);
 			this.currentScope = this.semantic.globalScope;
 			if (ast.scope) this.processHeapMemory(ast.scope);
@@ -92,9 +96,11 @@ export class CodeGenerator extends ASTVisitor {
 			this.RValueMax = 0;
 			const buildings = new BuildingLinker(this.memory.memoryBlocks.map(block => block.name), 
 				this.functionManagement);
-			result.concat(buildings.outputLinkInitializer());
-			result.concat(this.memory.outputLinkInitializer());
-			if (!this.compiler.config.getAttribute('noPointerFunction')) {
+			if (!noMemory) {
+				result.concat(buildings.outputLinkInitializer());
+				result.concat(this.memory.outputLinkInitializer());	
+			}
+			if (!noMemory && !this.compiler.config.getAttribute('noPointerFunction')) {
 				result.concat(this.memory.outputPointerForwardFunction(this.functionManagement));
 				result.concat(this.memory.outputPointerBackwardFunction(this.functionManagement));
 				result.concat(this.memory.outputMemcpyFunction(this.functionManagement));
@@ -102,8 +108,10 @@ export class CodeGenerator extends ASTVisitor {
 			const programBody = this.visit(ast);
 			const mainSymbol = programBody.getAttribute('mainSymbol');
 			result.concat(programBody);
-			this.memory.forwarding(this.RValueMax);
-			result.concat(this.functionManagement.getSystemInitializer(this.memory));
+			if (!noMemory) {
+				this.memory.forwarding(this.RValueMax);
+				result.concat(this.functionManagement.getSystemInitializer(this.memory));
+			}
 			if (mainSymbol) {
 				result.concat(this.functionManagement.getFunctionCall('main', new Map(), this.memory, true));
 			} else {

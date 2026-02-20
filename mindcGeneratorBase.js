@@ -527,9 +527,11 @@ export class FunctionRegisterer {
 		this.functionCollection = new Map();
 		this.callerId = 0;
 		this.memoryObject = memoryObject;
-		memoryObject.outputPointerForwardFunction(this, '__stackframe_forward', '__stackframe_');
-		memoryObject.outputPointerBackwardFunction(this, '__stackframe_backward', '__stackframe_');
 
+		if (this.memoryObject.memoryBlocks.length > 0) {
+			memoryObject.outputPointerForwardFunction(this, '__stackframe_forward', '__stackframe_');
+			memoryObject.outputPointerBackwardFunction(this, '__stackframe_backward', '__stackframe_');
+		}
 	}
 	
 	// stackSymbols are symbol entries

@@ -333,7 +333,7 @@ void main() {
                                         </div>
                                     </div>
                                     <div class="col-md-2 text-center">
-                                        <button type="button" class="btn btn-danger btn-sm mt-md-4 remove-memory-btn" disabled>
+                                        <button type="button" class="btn btn-danger btn-sm mt-md-4 remove-memory-btn">
                                             删除
                                         </button>
                                     </div>
@@ -656,12 +656,12 @@ void main() {
             function updateFirstMemoryBlockDeleteButton() {
     const memoryBlockItems = document.querySelectorAll('.memory-block-item');
     const firstDeleteBtn = document.querySelector('.remove-memory-btn');
-    
+    /*
     if (memoryBlockItems.length > 1 && firstDeleteBtn) {
         firstDeleteBtn.disabled = false;
     } else if (firstDeleteBtn) {
         firstDeleteBtn.disabled = true;
-    }
+    }*/
 }
             // 函数：编译代码
 
@@ -970,9 +970,9 @@ void main() {
             // 为现有内存块的删除按钮添加事件监听
             document.querySelectorAll('.remove-memory-btn').forEach(btn => {
                 btn.addEventListener('click', function() {
-                    if (document.querySelectorAll('.memory-block-item').length > 1) {
+                    // if (document.querySelectorAll('.memory-block-item').length > 1) {
                         btn.closest('.memory-block-item').remove();
-                    }
+                    // }
                 });
             });
         });
