@@ -299,13 +299,16 @@ export class TypeInfo {
 	 * @param {string} name 
 	 * @param {string} kind 
 	 * @param {number} size 
-	 * @param {any[] | null} members 
+	 * @param {MemberInfo[] | null} members 
 	 */
     constructor(name, kind, size = 1, members = null) {
         this.name = name; // 类型名称
         this.kind = kind; // 'basic', 'struct', 'union', 'pointer', 'array', 'function', 'device', 'null'
         this.size = size; // 类型大小（按1字节对齐）
-        this.members = members || []; // 结构体/联合体成员
+		/**
+		 * @type {MemberInfo[]}
+		 */
+        this.members = members ?? []; // 结构体/联合体成员
         this.pointerTo = null; // 对于指针类型，指向的类型 (MUST BE A TYPE, NOT A FUNCTION)
         this.arraySize = null; // 对于数组类型，数组大小
         this.qualifiers = []; // 类型限定符: const, volatile, auto, register, extern, etc.

@@ -1121,9 +1121,9 @@ export class CodeGenerator extends ASTVisitor {
 				}
 				
 				// Oh no, this was wrong. YOU CAN'T ASSUME THAT THE RIGHT SIDE IS SIMILAR THING AS WELL!
-
+				// 'isStructRet' is used only for initializer list
 				if (node.initializer.dataType && (
-					node.initializer.dataType.kind === 'struct' || node.initializer.dataType.kind === 'union'
+					node.initializer.dataType.kind === 'struct' || node.initializer.dataType.kind === 'union' || evaluation.getAttribute('isStructRet')
 				)) {
 					if (evaluation.getAttribute('disallowReplacement')) {
 						finalize.concat(evaluation);
@@ -1179,7 +1179,12 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	visitInitializerList(node) {
 		const declaratorTypes = ['VariableDeclarator', 'Declarator'];
-		let assignedSpace = node.symbol ? node.symbol.memoryLocation : null, result = new Instruction(), tmpVar = this.getTempSymbol(node.dataType);//this.getTempVariable();
+		const realiableTypes = [...declaratorTypes, 'AssignmentExpression', 'CastExpression'];
+		let assignedSpace = node.symbol ? node.symbol.memoryLocation : null, result = new Instruction();
+		
+		/**
+		 * @type {TypeInfo}
+		 */
 		let knownType = null;
 		if (node.parent) {
 			if (declaratorTypes.includes(node.parent.type)) {
@@ -1190,45 +1195,74 @@ export class CodeGenerator extends ASTVisitor {
 					result.setAttribute('noCopy', true);
 				}
 			}
-		}
-		assignedSpace = assignedSpace ?? this.memory.assign(this.getTempSpace(), node.dataType.size);
-		result.concat(assignedSpace.getAssignmentInstruction(tmpVar.getAssemblySymbol()));
-		result.instructionReturn = tmpVar.getAssemblySymbol();
-		result.setAttribute('isPointer', true);
-		//let currentPointer = 0;
-		/**
-		 * 
-		 * @param {ASTNode} obj 
-		 * @param {TypeInfo} typeLayer
-		 */
-		const initializerProcessor = (obj, typeLayer) => {
-
-			const warnedTypes = ['content_t', 'device', 'null_t'];
-
-			if (obj.type === 'InitializerList') {
-				obj.children.forEach(child => initializerProcessor(child, typeLayer ? typeLayer.pointerTo : null));
-			} else {
-				if (obj.dataType && warnedTypes.includes(obj.dataType.name)) {
-					this.addWarning(`Initializing object of type ${obj.dataType.toString()} in initializer list is an undefined behavior`, node.location);
-				}
-				const valueFetch = this.visitAndRead(obj);
-				result.concat(valueFetch);
-				// Process assignment-like
-				if (valueFetch.getAttribute('isPointer') || obj.dataType.isPointerImpl()) {
-					// They are implemented as pointer...
-					result.concat(new Instruction([
-						this.memory.outputStorageOf(assignedSpace, `${valueFetch.instructionReturn}_block`),
-						this.memory.outputStorageOf(assignedSpace.duplicate().forwarding(1), `${valueFetch.instructionReturn}_ptr`)
-					]));
-				} else {
-					result.concat(this.memory.outputStorageOf(assignedSpace, valueFetch.instructionReturn));
-				}
-				assignedSpace.forwarding(
-					(typeLayer && (typeLayer.size != null)) ? typeLayer.size 
-					: (obj.dataType.size ?? 0));
+			if (realiableTypes.includes(node.parent.type)) {
+				knownType = node.parent.dataType;
 			}
-		};
-		initializerProcessor(node, knownType);
+		}
+		knownType = knownType ?? node.dataType;
+		let tmpVar = this.getTempSymbol(knownType ?? node.dataType);
+
+		if (knownType && knownType.isRegStruct()) {
+			// Structure demands special processor
+			let result = new Instruction();
+			for (let i = 0; i < knownType.members.length && i < node.children.length; i++) {
+				const ret = this.visitAndRead(node.children[i]);
+				const current = knownType.members[i];
+				const currentTarget = `${tmpVar.getAssemblySymbol()}.${current.name}`;
+				if (ret.getAttribute('disallowReplacement')) {
+					result.concat(ret);
+					result.concat(this.copyObject(currentTarget, 
+						ret.instructionReturn, current.type, node.children[i].dataType));
+				} else {
+					result.concat(ret.replace_variable(ret.instructionReturn, currentTarget));
+				}
+			}
+			result.set_returns(tmpVar);
+			result.setAttribute('isStructRet', true);
+			return result;
+		} else {
+			//let currentPointer = 0;
+			/**
+			 * 
+			 * @param {ASTNode} obj 
+			 * @param {TypeInfo} typeLayer
+			 */
+			assignedSpace = assignedSpace ?? this.memory.assign(this.getTempSpace(), node.dataType.size);
+			result.concat(assignedSpace.getAssignmentInstruction(tmpVar.getAssemblySymbol()));
+			result.instructionReturn = tmpVar.getAssemblySymbol();
+			result.setAttribute('isPointer', true);
+			const initializerProcessor = (obj, typeLayer) => {
+				
+				const warnedTypes = ['content_t', 'device', 'null_t'];
+				typeLayer = typeLayer ?? obj.dataType;
+				
+				if (obj.type === 'InitializerList') {
+					obj.children.forEach(child => initializerProcessor(child, typeLayer ? typeLayer.pointerTo : null));
+				} else {
+					if (obj.dataType && warnedTypes.includes(obj.dataType.name)) {
+						this.addWarning(`Initializing object of type ${obj.dataType.toString()} in initializer list is an undefined behavior`, node.location);
+					}
+					const valueFetch = this.visitAndRead(obj);
+					result.concat(valueFetch);
+					// Process assignment-like
+					if (valueFetch.getAttribute('isPointer') || obj.dataType.isPointerImpl()) {
+						// They are implemented as pointer...
+						result.concat(new Instruction([
+							this.memory.outputStorageOf(assignedSpace, `${valueFetch.instructionReturn}_block`),
+							this.memory.outputStorageOf(assignedSpace.duplicate().forwarding(1), `${valueFetch.instructionReturn}_ptr`)
+						]));
+					} else {
+						result.concat(this.memory.outputStorageOf(assignedSpace, valueFetch.instructionReturn));
+					}
+					assignedSpace.forwarding(
+						(typeLayer && (typeLayer.size != null)) ? typeLayer.size 
+						: (obj.dataType.size ?? 0));
+				}
+			};
+			initializerProcessor(node, knownType);
+		}
+
+		
 		
 		return result;
 	}
