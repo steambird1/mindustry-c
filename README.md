@@ -25,7 +25,11 @@ There have been many similar softwares aiming at using languages like C/C++ (ali
 
 Installation is not needed. Just download `main.html` and all javascript files and ensure that you have Internet connection (UI requires Bootstrap from CDN; or the display might be a little bit weird).
 
-Then, **start a server and browse `main.html` from it (or you will be blocked by CORS policy of browsers)**. Execute the following command in the root directory of the download files if you have python 3:
+Then, **start a server and browse `main.html` from it (or you will be blocked by CORS policy of browsers)**.
+
+(If you use Windows, then `start.bat` can do these for you.)
+
+Execute the following command in the root directory of the download files if you have python 3:
 
 ```
 python -m http.server
