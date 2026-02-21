@@ -655,12 +655,12 @@ export class CodeGenerator extends ASTVisitor {
 				throw new InternalGenerationFailure(`Cannot generate copy from ${source} to ${target}`);
 			}
 		} else if (finalSourceType.name === 'content_t' && special.includes(actualType.name)) {
-			const implicitConv = this.implicitToContentRaw(
-				new Instruction([], source, new Map([['disallowReplacement', true]])), referrer(actualType.name));
+			const implicitConv = this.implicitContentToNumericRaw(new Instruction([], source, new Map([['disallowReplacement', true]])));
 			result.concat(implicitConv);
 			result.concat(InstructionBuilder.set(target, implicitConv.instructionReturn));
 		} else if (special.includes(finalSourceType.name) && !this.semantic.isSameType(finalSourceType, actualType)) {
-			const implicitConv = this.implicitContentToNumericRaw(new Instruction([], source, new Map([['disallowReplacement', true]])));
+			const implicitConv = this.implicitToContentRaw(
+				new Instruction([], source, new Map([['disallowReplacement', true]])), referrer(finalSourceType.name));
 			result.concat(implicitConv);
 			result.concat(InstructionBuilder.set(target, implicitConv.instructionReturn));
 		} else {

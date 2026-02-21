@@ -4514,11 +4514,13 @@ export class Optimizer extends ASTVisitor {
 		
 		switch (node.type) {
 			case 'Identifier':
-				const replacement = paramMap.get(node.name);
-				if (replacement) {
-					const clonedReplacement = this.cloneAST(replacement);
-					clonedReplacement.location = node.location;
-					this.replaceNode(node, clonedReplacement);
+				if (node.symbol && node.symbol.kind === 'parameter') {
+					const replacement = paramMap.get(node.name);
+					if (replacement) {
+						const clonedReplacement = this.cloneAST(replacement);
+						clonedReplacement.location = node.location;
+						this.replaceNode(node, clonedReplacement);
+					}
 				}
 				break;
 		}
@@ -4807,7 +4809,8 @@ export class Optimizer extends ASTVisitor {
 		const clone = new ASTNode(node.type, node.location);
 		clone.parent = node.parent;
 		clone.scope = node.scope;
-		
+		clone.symbol = node.symbol;
+
 		// 复制属性
 		for (const [key, value] of node._attributes) {
 			clone.setAttribute(key, value);
