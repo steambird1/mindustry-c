@@ -522,7 +522,7 @@ void main() {
             }
             
             // 函数：应用语法高亮
-            function applySyntaxHighlighting() {
+            async function applySyntaxHighlighting() {
                 const code = codeInput.value;
                 
                 // 如果没有代码，清空高亮区域
@@ -533,8 +533,8 @@ void main() {
                 //console.log('SyntaxHighlight!')
                 // 创建词法分析器实例
                 try {
-                    const lexer = new Lexer(code);
-                    const result = lexer.tokenize();
+                    const lexer = new Lexer(code, {}, true);
+                    const result = await lexer.tokenize();
                     //console.log(result);
                     // 处理高亮HTML
                     let highlightedHTML = '';
@@ -775,7 +775,7 @@ void main() {
                 outputText.textContent = '编译中...';
                 
                 // 使用 setTimeout 确保 UI 能够更新状态
-                setTimeout(() => {
+                setTimeout(async () => {
                     try {
                         // 创建编译器实例
                         // 根据 Compiler 类构造函数的参数说明：
@@ -790,60 +790,7 @@ void main() {
                         const compiler = new Compiler(code, memoryBlocks, null);
                         
                         // 执行编译
-                        const result = compiler.compile();
-                        
-                        // 显示编译结果
-                        /*
-                        if (result.success) {
-                            showCompileStatus('success', '成功', '编译成功完成');
-                            outputText.textContent = result.code || '编译成功，但未生成代码';
-                            
-                            // 显示错误和警告信息（如果有）
-                            if (result.errors && result.errors.length > 0) {
-                                outputText.textContent += '\n\n--- 编译错误 ---\n';
-                                result.errors.forEach(error => {
-                                    // 错误对象可能有 line 和 column 属性
-                                    if (error.line && error.column) {
-                                        outputText.textContent += `第${error.line}行，第${error.column}列: ${error.message || error}\n`;
-                                    } else {
-                                        outputText.textContent += `${error.message || error}\n`;
-                                    }
-                                });
-                            }
-                            
-                            if (result.warnings && result.warnings.length > 0) {
-                                outputText.textContent += '\n\n--- 编译警告 ---\n';
-                                result.warnings.forEach(warning => {
-                                    if (!warning) return;
-                                    if (warning.line && warning.column) {
-                                        outputText.textContent += `第${warning.line}行，第${warning.column}列: ${warning.message || warning}\n`;
-                                    } else {
-                                        outputText.textContent += `${warning.message || warning}\n`;
-                                    }
-                                });
-                            }
-                        } else {
-                            showCompileStatus('error', '失败', '编译失败');
-                            outputText.textContent = '编译失败:\n';
-                            
-                            // 显示致命错误（如果有）
-                            if (result.fatalError) {
-                                outputText.textContent += result.fatalError + '\n';
-                            }
-                            
-                            // 显示错误信息
-                            if (result.errors && result.errors.length > 0) {
-                                outputText.textContent += '\n错误详情:\n';
-                                result.errors.forEach(error => {
-                                    if (error.line && error.column) {
-                                        outputText.textContent += `第${error.line}行，第${error.column}列: ${error.message || error}\n`;
-                                    } else {
-                                        outputText.textContent += `${error.message || error}\n`;
-                                    }
-                                });
-                            }
-                        }
-                            */
+                        const result = await compiler.compile();
                         
                         // 修改为：
                         if (result.success) {
@@ -936,12 +883,12 @@ void main() {
             
             
             // 函数：加载示例代码
-            function loadExampleCode() {
+            async function loadExampleCode() {
                 const exampleCode = ``; // leave it blank now
                 
                 codeInput.value = exampleCode;
                 updateLineNumbers();
-                applySyntaxHighlighting();
+                await applySyntaxHighlighting();
                 showCompileStatus('info', '已加载', '示例代码已加载到编辑器');
             }
             

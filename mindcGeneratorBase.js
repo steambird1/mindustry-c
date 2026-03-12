@@ -663,48 +663,48 @@ export class FunctionRegisterer {
 			heapPreparation.concat(memFwdCall);
 			if (symbol.name === '__stackpos') {
 				stackPositionPointer = symbol.getAssemblySymbol();
-
-				const outSetStackpos = () => {
-					let temp = new Instruction();
-					if (func.preservedStack) {
-						temp.concat(this.memoryObject.outputPointerStorageOf(`${stackPositionPointer}.__pointer`, func.preservedStack.getAssemblySymbol()));
-					} else {
-						temp.concat(this.memoryObject.outputPointerStorageOf(`${stackPositionPointer}.__pointer`, '__internal_stackpos'));
-					}
-					return temp;
-				};
-				const outResetStackpos = () => {
-					let temp = new Instruction();
-					if (func.preservedStack) {
-						temp.concat(this.memoryObject.outputPointerFetchOf(`${stackPositionPointer}.__pointer`, func.preservedStack.getAssemblySymbol()));
-					} else {
-						temp.concat(this.memoryObject.outputPointerFetchOf(`${stackPositionPointer}.__pointer`, '__internal_stackpos'));
-					}
-					// Requires something more for resetting
-					refFunction.stackSymbols.forEach(symb => {
-						if (symb.name === '__stackpos') return;	// Already considered
-						temp.concat(this.memoryObject.outputPointerFetchOf(`${symb.getAssemblySymbol()}.__pointer`, symb.getAssemblySymbol()));
-					});
-					return temp;
-				};
-
-				if (dynamicSetStackpos) {
-					const jumper = InstructionBuilder.jump('{set_stackpos_end}', 'equal', '__set_stackpos', 'false');
-					const terminate = InstructionBuilder.jump('{set_stackpos_term}', 'always');
-					heapPreparation.concat(jumper);
-					heapPreparation.concat(outSetStackpos());
-					heapPreparation.concat(terminate);
-					heapPreparation.concat(new InstructionReferrer(jumper, 'set_stackpos_end'));
-					heapPreparation.concat(outResetStackpos());
-					heapPreparation.concat(new InstructionReferrer(terminate, 'set_stackpos_term'));
-				} else if (setStackpos) {
-					heapPreparation.concat(outSetStackpos());
-				} else {
-					heapPreparation.concat(outResetStackpos());
-				}
-				
 			}
 		});
+
+		const outSetStackpos = () => {
+			let temp = new Instruction();
+			if (func.preservedStack) {
+				temp.concat(this.memoryObject.outputPointerStorageOf(`${stackPositionPointer}.__pointer`, func.preservedStack.getAssemblySymbol()));
+			} else {
+				temp.concat(this.memoryObject.outputPointerStorageOf(`${stackPositionPointer}.__pointer`, '__internal_stackpos'));
+			}
+			return temp;
+		};
+		const outResetStackpos = () => {
+			let temp = new Instruction();
+			if (func.preservedStack) {
+				temp.concat(this.memoryObject.outputPointerFetchOf(`${stackPositionPointer}.__pointer`, func.preservedStack.getAssemblySymbol()));
+			} else {
+				temp.concat(this.memoryObject.outputPointerFetchOf(`${stackPositionPointer}.__pointer`, '__internal_stackpos'));
+			}
+			// Requires something more for resetting
+			refFunction.stackSymbols.forEach(symb => {
+				if (symb.name === '__stackpos') return;	// Already considered
+				temp.concat(this.memoryObject.outputPointerFetchOf(`${symb.getAssemblySymbol()}.__pointer`, symb.getAssemblySymbol()));
+			});
+			return temp;
+		};
+
+		if (dynamicSetStackpos) {
+			const jumper = InstructionBuilder.jump('{set_stackpos_end}', 'equal', '__set_stackpos', 'false');
+			const terminate = InstructionBuilder.jump('{set_stackpos_term}', 'always');
+			heapPreparation.concat(jumper);
+			heapPreparation.concat(outSetStackpos());
+			heapPreparation.concat(terminate);
+			heapPreparation.concat(new InstructionReferrer(jumper, 'set_stackpos_end'));
+			heapPreparation.concat(outResetStackpos());
+			heapPreparation.concat(new InstructionReferrer(terminate, 'set_stackpos_term'));
+		} else if (setStackpos) {
+			heapPreparation.concat(outSetStackpos());
+		} else {
+			heapPreparation.concat(outResetStackpos());
+		}
+				
 
 		// End
 		/*

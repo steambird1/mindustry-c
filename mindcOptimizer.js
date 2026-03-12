@@ -282,8 +282,8 @@ export class Optimizer extends ASTVisitor {
         if (!node) return;
 
 		const inheritances = ['hasBreak', 'hasContinue', 'returnCount'];	// Use OR-merge
-		const copies = ['isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop', 'cannotCascade'];
-		const clarifications = ['hasBreak', 'hasContinue', 'isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop', 'cannotCascade'];
+		const copies = ['isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop', 'cannotCascade', 'fromCallNodeAnalysis'];
+		const clarifications = ['hasBreak', 'hasContinue', 'isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop', 'cannotCascade', 'fromCallNodeAnalysis'];
         
 		if (info && info.parentInfo) {
 			for (const att of copies) {
@@ -309,121 +309,130 @@ export class Optimizer extends ASTVisitor {
 			this.replaceConstantAtPresent(node);
 		}
 
-        switch (node.type) {
-			case 'Program':
-				// this.functionInfo.clear();	// Reserved for further use
-				if (node.globalDeclarations) {
-					node.globalDeclarations.forEach(decl => this.analyzeNode(decl, info));
-				}
-				if (node.functions) {
-					node.functions.forEach(func => {
-						if (func.name === 'main') {
-							this.analyzeNode(func, {
-								actualCalling: true,
-								parentInfo: info
-							});
-						}
-					});	// Starting just from main function to prevent all those strange problems!
-					node.functions.forEach(func => {
-						const relevantSymbol = this.globalScope.lookup(func.name);
-						if (relevantSymbol.isAddressed) {
-							this.analyzeNode(func, {
-								actualCalling: false,
-								parentInfo: info
-							});
-						}
-					});
-				}
-				break;
-			
-            case 'FunctionDeclaration':
-                this.analyzeFunction(node, info);
-                break;
-                
-            case 'VariableDeclaration':
-                this.analyzeVariableDeclaration(node, info);
-                break;
-                
-            case 'CompoundStatement':
-                this.analyzeCompoundStatement(node, info);
-                break;
-                
-            case 'ExpressionStatement':
-                //this.analyzeExpressionStatement(node, info);
-                break;
-                
-            case 'AssignmentExpression':
-                this.analyzeAssignmentExpression(node, info);
-                break;
-                
-            case 'Identifier':
-                this.analyzeIdentifier(node, info);
-                break;
-                
-            case 'BinaryExpression':
-                this.analyzeBinaryExpression(node, info);
-                break;
-                
-            case 'UnaryExpression':
-                this.analyzeUnaryExpression(node, info);
-                break;
-                
-            case 'IfStatement':
-			case 'ConditionalExpression':
-                this.analyzeIfStatement(node, info);
-                break;
-                
-            case 'WhileStatement':
-                this.analyzeWhileStatement(node, info);
-                break;
-                
-            case 'ForStatement':
-                this.analyzeForStatement(node, info);
-                break;
-                
-            case 'ReturnStatement':
-                this.analyzeReturnStatement(node, info);
-                break;
-                
-            case 'FunctionCall':
-                this.analyzeFunctionCall(node, info);
-                break;
+		try {
+			switch (node.type) {
+				case 'Program':
+					// this.functionInfo.clear();	// Reserved for further use
+					if (node.globalDeclarations) {
+						node.globalDeclarations.forEach(decl => this.analyzeNode(decl, info));
+					}
+					if (node.functions) {
+						node.functions.forEach(func => {
+							if (func.name === 'main') {
+								this.analyzeNode(func, {
+									actualCalling: true,
+									parentInfo: info
+								});
+							}
+						});	// Starting just from main function to prevent all those strange problems!
+						const recursiveGraph = this.findRecursiveFunctions(this.functionCallGraph);
+						node.functions.forEach(func => {
+							const relevantSymbol = this.globalScope.lookup(func.name);
+							if (relevantSymbol.isAddressed || recursiveGraph.has(func.name)) {
+								this.analyzeNode(func, {
+									actualCalling: false,
+									parentInfo: info
+								});
+							}
+						});
+					}
+					break;
 				
-			case 'BreakStatement':
-				this.analyzeBreakStatement(node, info);
-				break;
-				
-			case 'ContinueStatement':
-				this.analyzeContinueStatement(node, info);
-				break;
+				case 'FunctionDeclaration':
+					this.analyzeFunction(node, info);
+					break;
+					
+				case 'VariableDeclaration':
+					this.analyzeVariableDeclaration(node, info);
+					break;
+					
+				case 'CompoundStatement':
+					this.analyzeCompoundStatement(node, info);
+					break;
+					
+				case 'ExpressionStatement':
+					//this.analyzeExpressionStatement(node, info);
+					break;
+					
+				case 'AssignmentExpression':
+					this.analyzeAssignmentExpression(node, info);
+					break;
+					
+				case 'Identifier':
+					this.analyzeIdentifier(node, info);
+					break;
+					
+				case 'BinaryExpression':
+					this.analyzeBinaryExpression(node, info);
+					break;
+					
+				case 'UnaryExpression':
+					this.analyzeUnaryExpression(node, info);
+					break;
+					
+				case 'IfStatement':
+				case 'ConditionalExpression':
+					this.analyzeIfStatement(node, info);
+					break;
+					
+				case 'WhileStatement':
+					this.analyzeWhileStatement(node, info);
+					break;
+					
+				case 'ForStatement':
+					this.analyzeForStatement(node, info);
+					break;
+					
+				case 'ReturnStatement':
+					this.analyzeReturnStatement(node, info);
+					break;
+					
+				case 'FunctionCall':
+					this.analyzeFunctionCall(node, info);
+					break;
+					
+				case 'BreakStatement':
+					this.analyzeBreakStatement(node, info);
+					break;
+					
+				case 'ContinueStatement':
+					this.analyzeContinueStatement(node, info);
+					break;
 
-			case 'CastExpression':
-				this.analyzeCastExpression(node, info);
-				break;
-			
-			case 'BuiltinCall':
-				const builtins = info ? { ...info } : {};
-				builtins.callNode = node;
-				node.arguments.forEach(args => {
-					this.analyzeNode(args, builtins);
-				});
-				break;
+				case 'CastExpression':
+					this.analyzeCastExpression(node, info);
+					break;
 				
-			case 'MemberExpression':
-				// Don't further analyze them!!!
-				this.analyzeNode(node.children[0]);
-				if (node.getAttribute('computed')) {
-					this.analyzeNode(node.children[1], info);
-				}
-				// Otherwise it is NOT a valid variable!!
-				return;
-				break;
-                
-            default:
-                // 递归分析子节点
-				
-                break;
-        }
+				case 'BuiltinCall':
+					const builtins = info ? { ...info } : {};
+					builtins.callNode = node;
+					node.arguments.forEach(args => {
+						this.analyzeNode(args, builtins);
+					});
+					break;
+					
+				case 'MemberExpression':
+					// Don't further analyze them!!!
+					this.analyzeNode(node.children[0]);
+					if (node.getAttribute('computed')) {
+						this.analyzeNode(node.children[1], info);
+					}
+					// Otherwise it is NOT a valid variable!!
+					return;
+					break;
+					
+				default:
+					// 递归分析子节点
+					
+					break;
+			}
+		} catch (err) {
+			if (err instanceof RangeError) {
+				console.log(`Exceeding maximum range of iteration: `, err);
+			} else {
+				throw err;
+			}
+		}
 
 		if (node.declarators) {
 			this.analyzeVariableDeclaration(node, info);
@@ -599,7 +608,9 @@ export class Optimizer extends ASTVisitor {
 		};
 		
         // 分析函数体
-        if (funcNode.body) {
+		const analyzedBody = Boolean(funcNode.body && (!info.fromCallNodeAnalysis 
+			|| !this.findRecursiveFunctions(this.functionCallGraph).has(funcNode.name)));
+        if (analyzedBody) {
             this.analyzeNode(funcNode.body, funcInfo);
         }
 		if (enteredScope) {
@@ -607,13 +618,16 @@ export class Optimizer extends ASTVisitor {
 		}
 		
 		// Consider whether this can be inlined
-		if (!this.functionInfo.get(funcName).isAddressed) {
-			if (funcInfo.returnCount > 1) {
-				this.functionInfo.get(funcName).canInline = false;
-			} else if (funcInfo.returnCount == 1) {
-				this.functionInfo.get(funcName).canInline = funcNode.body.statements[funcNode.body.statements.length - 1].type === 'ReturnStatement';
-			} else {
-				this.functionInfo.get(funcName).canInline = true;
+		
+		if (analyzedBody) {
+			if (!this.functionInfo.get(funcName).isAddressed) {
+				if (funcInfo.returnCount > 1) {
+					this.functionInfo.get(funcName).canInline = false;
+				} else if (funcInfo.returnCount == 1) {
+					this.functionInfo.get(funcName).canInline = funcNode.body.statements[funcNode.body.statements.length - 1].type === 'ReturnStatement';
+				} else {
+					this.functionInfo.get(funcName).canInline = true;
+				}
 			}
 		}
 		
@@ -796,16 +810,16 @@ export class Optimizer extends ASTVisitor {
 				});	// Other information given as undefined
 				funinfo = this.functionInfo.get(funcName);
 			}
+			// 记录调用关系
+			if (this.currentScope && this.currentScope.astNode) {
+				const callerName = this.currentFunction || 'anonymous';
+				this.recordFunctionCall(callerName, funcName);
+			}
 			this.analyzeNode(funinfo.node, {
 				actualCalling: Boolean(info.actualCalling && (shouldRun || info.optimizingLoop)),
 				fromCallNodeAnalysis: true,
 				parentInfo: info
 			});
-            // 记录调用关系
-			if (this.currentScope && this.currentScope.astNode) {
-				const callerName = this.currentFunction || 'anonymous';
-				this.recordFunctionCall(callerName, funcName);
-			}
         }
         
         // 分析参数
@@ -3048,8 +3062,8 @@ export class Optimizer extends ASTVisitor {
 			if (info.isAddressed) return;	// Can't be inlined!
 			if (!info.node || !info.node.body) return;
 			const paraSize = (info.node.parameters ? (info.node.parameters.length ?? 0) : 0);
-			const inlineEstimate = info.calls * info.size;
-			const noInlineEstimate = (info.size + 16 + (8 + paraSize) * info.calls + paraSize * 2);
+			const inlineEstimate = (info.calls + paraSize) * info.size;
+			const noInlineEstimate = (info.size + paraSize + 4 + (4 + paraSize) * info.calls);
             if (info.calls === 1 || info.isInline || inlineEstimate <= noInlineEstimate) {
                 inlineCandidates.push(funcName);
             }

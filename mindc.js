@@ -319,47 +319,56 @@ export class Compiler {
 	 */
     constructor(sourceCode, memoryInfo, config, extensions = defaultExtensions) {
 
-		const exTypeNames = extensions.flatMap(ext => [...ext.types].map(([name, type]) => name));
-		const exTypes = extensions.flatMap(ext => [...ext.types].map(([name, type]) => type));
-		const exFuncNames = extensions.flatMap(ext => [...ext.functions].map(([name, func]) => name));
-		const exFuncs = extensions.flatMap(ext => [...ext.functions].map(([name, func]) => func));
-
-		if (exTypeNames.length != new Set(exTypeNames).size) {
-			throw new InternalGenerationFailure('Ambiguous type name in imported extensions');
-		}
-
-		if (exFuncNames.length != new Set(exFuncNames).size) {
-			throw new InternalGenerationFailure('Ambiguous function name in imported extensions');
-		}
-
-		let parserConfig = new AttributeClass();
-		parserConfig.setAttribute('extraTypes', exTypes);
-		parserConfig.setAttribute('extraFunctions', exFuncs);
-		parserConfig.setAttribute('extraHandler', new Map(extensions.flatMap(ext => [...ext.handlers])));
-
+		this.embeddedExtensions = [...extensions];
 		this.config = config ?? new AttributeClass();
 		if (!this.config.hasAttribute('targetVersion')) {
 			this.config.setAttribute('targetVersion', 154.3);
 		}
 
-		this.extraConfig = parserConfig;
-
 		this.memoryInfo = memoryInfo;
 		
         this.lexer = new Lexer(sourceCode);
+		let parserConfig = new AttributeClass();
+		parserConfig.setAttribute('extraTypes', []);
         this.parser = new Parser(this.lexer, parserConfig);
         this.semanticAnalyzer = new SemanticAnalyzer(this);
         this.optimizer = new Optimizer(this);
         this.codeGenerator = new CodeGenerator(this);
 		this.extensions = extensions;
 
-		
     }
     
-    compile() {
+    async compile() {
         try {
             // 编译管道
-            const tokens = this.lexer.tokenize();
+            const tokens = await this.lexer.tokenize();
+
+			// Handle extensions here now
+			const extensions = [...this.embeddedExtensions, ...tokens.extraExtensions];
+			const exTypeNames = extensions.flatMap(ext => [...ext.types].map(([name, type]) => name));
+			const exTypes = extensions.flatMap(ext => [...ext.types].map(([name, type]) => type));
+			const exFuncNames = extensions.flatMap(ext => [...ext.functions].map(([name, func]) => name));
+			const exFuncs = extensions.flatMap(ext => [...ext.functions].map(([name, func]) => func));
+
+			if (exTypeNames.length != new Set(exTypeNames).size) {
+				throw new InternalGenerationFailure('Ambiguous type name in imported extensions');
+			}
+
+			if (exFuncNames.length != new Set(exFuncNames).size) {
+				throw new InternalGenerationFailure('Ambiguous function name in imported extensions');
+			}
+			this.extensions = extensions;
+			let parserConfig = new AttributeClass();
+			parserConfig.setAttribute('extraTypes', exTypes);
+			parserConfig.setAttribute('extraFunctions', exFuncs);
+			parserConfig.setAttribute('extraHandler', new Map(extensions.flatMap(ext => [...ext.handlers])));
+			this.parser = new Parser(this.lexer, parserConfig);
+			this.extraConfig = parserConfig;
+			// Renew everything
+			this.semanticAnalyzer = new SemanticAnalyzer(this);
+			this.optimizer = new Optimizer(this);
+			this.codeGenerator = new CodeGenerator(this);
+
             const ast = this.parser.parse();
 			if (ast.errors.length) {
 				return {

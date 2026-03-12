@@ -36,11 +36,11 @@ export class Parser {
     }
 
     parse() {
-        this.lexer.tokenize();
+        //this.lexer.tokenize();
         this.tokens = this.lexer.tokens;
         this.errors = [...this.lexer.errors];
         
-        try {
+        try {   
             const program = this.parseProgram();
             return {
                 success: this.errors.length === 0,

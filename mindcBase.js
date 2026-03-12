@@ -170,7 +170,7 @@ export class CompilationPhase {
 	 * 找到所有递归的函数
 	 * @param {Map<string, Set<string>>} callGraph - 函数调用关系图
 	 * @returns {Set<string>} - 递归的函数集合
-	 * @remark By deepseek
+	 * @remark By deepseek (so stupid) and myself (I still need some OI techniques)
 	 */
 	findRecursiveFunctions(callGraph) {
 		// 收集所有函数节点
@@ -184,9 +184,12 @@ export class CompilationPhase {
 		}
 		
 		// 初始化数据结构
-		const visited = new Map(); // 访问状态：0=未访问，1=访问中，2=已访问
+		const visited = new Map(); // 访问状态：0=未访问，1=访问中，2=已访问 (AI's creation!)
+        const dfn = new Map(), low = new Map(); // Tarjan
 		const recursive = new Map(); // 是否为递归函数
 		const callStack = []; // DFS调用栈
+
+        let dfnId = 0;
 		
 		for (const func of allFunctions) {
 			visited.set(func, 0);
@@ -196,6 +199,9 @@ export class CompilationPhase {
 		// DFS搜索，检测环
 		function dfs(node) {
 			// 将节点标记为访问中
+            dfnId++;
+            dfn.set(node, dfnId);
+            low.set(node, dfnId);
 			visited.set(node, 1);
 			callStack.push(node);
 			
@@ -204,7 +210,15 @@ export class CompilationPhase {
 			
 			for (const neighbor of neighbors) {
 				const neighborState = visited.get(neighbor);
-				
+                
+                if (neighborState === 0) {
+                    dfs(neighbor);
+                    low.set(node, Math.min(low.get(node), low.get(neighbor)));
+                } else if (callStack.includes(neighbor)) {
+                    low.set(node, Math.min(low.get(node), dfn.get(neighbor)));
+                }
+                // AI here is 100% siliy.
+				/*
 				if (neighborState === 0) {
 					// 邻居未访问，递归访问
 					dfs(neighbor);
@@ -226,7 +240,11 @@ export class CompilationPhase {
 						recursive.set(node, true);
 					}
 				}
+                    */
 			}
+            if (neighbors.has(node) || low.get(node) < dfn.get(node)) {
+                recursive.set(node, true);
+            }
 			
 			// 从栈中弹出节点
 			callStack.pop();
