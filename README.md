@@ -43,7 +43,7 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
 
 - Most of C89 features
   - Yes, you'll have structs, pointers, unions, and `typedef`!
-  - But you won't have `#pragma` or `#include`
+  - But you won't have `#pragma` (**`#include` has been added**)
   - Also, support for function pointers might be limited
 
 - Some C/C++ features:
