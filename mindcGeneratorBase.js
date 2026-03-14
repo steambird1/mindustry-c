@@ -513,7 +513,7 @@ export class InstructionBuilder {
 // (for more flexible jumpers)
 /**
  * @typedef {{body: Instruction, scope: Scope, preservedStack: SymbolEntry,
- * 			stackSymbols: SymbolEntry[], stackTotal: number, specialBuiltin: boolean, recursive: boolean | undefined}} functionInfo
+ * 			stackSymbols: SymbolEntry[], stackTotal: number, specialBuiltin: boolean, recursive: boolean | undefined, calls: number}} functionInfo
  */
 export class FunctionRegisterer {
 	/**
@@ -544,9 +544,10 @@ export class FunctionRegisterer {
 	 * @param {string[]} [givenStackSymbols=[]] 
 	 * @param {boolean} [recursive=false] 
 	 * @param {boolean} [specialBuiltin=false] 
+	 * @param {boolean} [removable=false] 
 	 * @remark These two symbols won't be analyzed, so they're safe
 	 */
-	addFunction(name, body, scope = null, givenStackSymbols = [], specialBuiltin = false, recursive = false) {
+	addFunction(name, body, scope = null, givenStackSymbols = [], specialBuiltin = false, recursive = false, removable = false) {
 		if (recursive) {
 			specialBuiltin = false;
 		}
@@ -572,7 +573,8 @@ export class FunctionRegisterer {
 			stackSymbols: stackSymbols,
 			stackTotal: stackTotal,
 			specialBuiltin: specialBuiltin,
-			recursive: recursive
+			recursive: recursive,
+			calls: removable ? 0 : 1
 		});
 	}
 
@@ -780,6 +782,8 @@ export class FunctionRegisterer {
 				func.stackTotal += symb.size;
 			});
 
+			if (func.specialBuiltin && func.calls <= 0) return;
+
 			const returner = new Instruction([InstructionBuilder.set('@counter', 
 				func.preservedStack ? func.preservedStack.getAssemblySymbol() : '__stackpos')]);
 			const jumper = InstructionBuilder.jump('{end_of_body}', 'always', null, null);
@@ -872,9 +876,10 @@ export class FunctionRegisterer {
 	 * @param {string} varName 
 	 * @param {Map<string, any>} params 
 	 * @param {boolean} fromMain 
+	 * @param {string?} [callSource=null] 
 	 * @returns 
 	 */
-	getRawFunctionCall(varName, params, fromMain = false) {
+	getRawFunctionCall(varName, params, fromMain = false, callSource = null) {
 		let result = new Instruction();
 		// Caller configuring the stack
 		// (storing returning point, if not from main)
@@ -889,10 +894,21 @@ export class FunctionRegisterer {
 			result.concat(InstructionBuilder.set(name, value));
 		});
 		//result.concat(InstructionBuilder.set("__from_main", fromMain ? 'true' : 'false'));
-		result.concat(InstructionBuilder.set("__internal_stackpos", "__stackpos"));
+		let internals = null, recovery = '__internal_stackpos';
+		if (callSource && this.functionCollection.has(callSource)) {
+			const func = this.functionCollection.get(callSource);
+			if (func.preservedStack) {
+				recovery = func.preservedStack.getAssemblySymbol();
+				internals = InstructionBuilder.set(recovery, '__stackpos');
+			}
+		}
+		if (!internals) {
+			internals = InstructionBuilder.set("__internal_stackpos", "__stackpos");
+		}
+		result.concat(internals);
 		result.concat(InstructionBuilder.op("add", "__stackpos", "@counter", 1));	// Instruction 1
 		result.concat(InstructionBuilder.set("@counter", varName)); // Instruction 2 (caller)
-		result.concat(InstructionBuilder.set("__stackpos", "__internal_stackpos"));	// Better than nothing!
+		result.concat(InstructionBuilder.set("__stackpos", recovery));	// Better than nothing!
 		// (Stack cleanup)
 		// Instruction 3 and sth else: continue the control flow
 		// !!!! Function return will be responsible for setting @counter back !!!!
@@ -906,15 +922,17 @@ export class FunctionRegisterer {
 	 * @param {string} name
 	 * @param {Map<string, any>} params Notice: Only for internal calls.
 	 * @param {MemoryManager | null} [memoryObject=null] Reserved only for compatibility.
-	 * @param {boolean} fromMain
+	 * @param {boolean} [fromMain=false]
+	 * @param {string?} [callSource=null] 
 	 * @remark The return value will be stored in __returnA and __returnB (for pointer). These are set by the function itself
 	*/
-	getFunctionCall(name, params, memoryObject = null, fromMain = false) {
+	getFunctionCall(name, params, memoryObject = null, fromMain = false, callSource = null) {
 		const refFunction = this.functionCollection.get(name);
 		if (!refFunction) {
 			return new Instruction();
 		}
-		return this.getRawFunctionCall(`_${name}`, params, fromMain);
+		refFunction.calls++;
+		return this.getRawFunctionCall(`_${name}`, params, fromMain, callSource);
 	}
 }
 
@@ -1205,7 +1223,7 @@ export class MemoryManager {
 			InstructionBuilder.op('add', '__step', '__step', 1),							// 12
 			InstructionBuilder.set(`${target}pos`, this.reservedSize),							// 13
 			InstructionBuilder.jump('{0}', 'always', null, null, [0])						// 14
-		]), null, [], true);
+		]), null, [], true, false, true);
 	}
 	
 	/**
@@ -1288,7 +1306,7 @@ export class MemoryManager {
 			InstructionBuilder.getlink('__curptrblock', `${target}block`),						// 11
 			InstructionBuilder.read(`${target}pos`, '__curptrblock', 4),						// 12
 			InstructionBuilder.jump('{0}', 'always', null, null, [0])						// 13
-		]), null, [], true);
+		]), null, [], true, false, true);
 	}
 	
 	/**
@@ -1309,7 +1327,7 @@ export class MemoryManager {
 		funcReg.addFunction('__pointerValue', new Instruction([
 			InstructionBuilder.reads('__builtin_return', '__ptrblock', 3),
 			InstructionBuilder.op('add', '__builtin_return', '__builtin_return', '__ptrpos')
-		]), null, [], true);
+		]), null, [], true, false, true);
 	}
 
 	/**
@@ -1351,7 +1369,7 @@ export class MemoryManager {
 			InstructionBuilder.set('__tgtpos', this.reservedSize),							// 18
 			InstructionBuilder.op('sub', '__remain', '__remain', 1),						// 19
 			InstructionBuilder.jump('{0}', 'always', null, null, [2])						// 20
-		]), null, [], true);
+		]), null, [], true, false, true);
 	}
 
 	/**

@@ -149,6 +149,7 @@ export const TokenType = {
     PREPROCESSOR_IF: 'PREPROCESSOR_IF',
     PREPROCESSOR_IFDEF: 'PREPROCESSOR_IFDEF',
     PREPROCESSOR_IFNDEF: 'PREPROCESSOR_IFNDEF',
+    PREPROCESSOR_ELSE: 'PREPROCESSOR_ELSE',
     PREPROCESSOR_ENDIF: 'PREPROCESSOR_ENDIF',
     PREPROCESSOR_INCLUDE: 'PREPROCESSOR_INCLUDE',
     PREPROCESSOR_PRAGMA: 'PREPROCESSOR_PRAGMA',
@@ -244,6 +245,7 @@ export const KEYWORDS = {
     '#define': TokenType.PREPROCESSOR_DEFINE,
     '#undef': TokenType.PREPROCESSOR_UNDEF,
     '#if': TokenType.PREPROCESSOR_IF,
+    '#else': TokenType.PREPROCESSOR_ELSE,
     '#ifdef': TokenType.PREPROCESSOR_IFDEF,
     '#ifndef': TokenType.PREPROCESSOR_IFNDEF,
     '#endif': TokenType.PREPROCESSOR_ENDIF,
@@ -736,6 +738,7 @@ export class Lexer {
             
             return result;
         } catch (error) {
+            this.skipping = false;
             throw new Error(`Expression evaluation error: ${error.message}`);
         }
     }
@@ -776,7 +779,7 @@ export class Lexer {
             } else if (this.isDigit(char)) {
                 this.readNumber();
             } else if (this.isIdentifierStart(char)) {
-                this.readIdentifier();
+                await this.readIdentifier();
             } else if (char === '@') {
                 this.readPredefinedConstant();
             } else if (this.isOperator(char)) {
@@ -786,6 +789,10 @@ export class Lexer {
             } else {
                 this.addError(`Unexpected character: '${char}'`);
                 this.advance();
+            }
+
+            if (this.suppressMacroExpansion) {
+                this.skipping = false;  // Always false!
             }
         }
 
@@ -844,6 +851,9 @@ export class Lexer {
                 break;
             case TokenType.PREPROCESSOR_IF:
                 this.handleIf(args, startLocation);
+                break;
+            case TokenType.PREPROCESSOR_ELSE:
+                this.handleElse(args, startLocation);
                 break;
             case TokenType.PREPROCESSOR_IFDEF:
                 this.handleIfdef(args, startLocation);
@@ -957,9 +967,9 @@ export class Lexer {
             this.tokens.push(new Token(TokenType.PREPROCESSOR_IF, `#if ${args}`.trim(), location));
         } catch (error) {
             this.addError(`Error evaluating #if expression: ${error.message}`, location);
-            // 如果表达式计算出错，默认条件为假
-            this.conditionalStack.push(this.skipping);
-            this.skipping = true;
+            // this.conditionalStack.push(this.skipping);
+            // this.skipping = true;
+            this.skipping = false;
             this.tokens.push(new Token(TokenType.PREPROCESSOR_IF, `#if ${args}`.trim(), location));
         }
     }
@@ -1007,6 +1017,15 @@ export class Lexer {
             this.skipping = this.conditionalStack.pop();
         }
         this.tokens.push(new Token(TokenType.PREPROCESSOR_ENDIF, `#endif ${args}`.trim(), location));
+    }
+
+    handleElse(args, location) {
+        if (this.conditionalStack.length === 0) {
+            this.addError(`#else without matching #if`, location);
+        } else if (!this.conditionalStack[this.conditionalStack.length - 1]) {
+            this.skipping = !this.skipping;
+        }
+        this.tokens.push(new Token(TokenType.PREPROCESSOR_ELSE, `#else ${args}`.trim(), location));
     }
     
     // 处理 #pragma - 收集指令内容
@@ -1066,9 +1085,8 @@ export class Lexer {
                         return;
                     }
                     const responseText = await responseTextRaw.text();
-                    const includedLexer = new Lexer(responseText);
+                    const includedLexer = new Lexer(responseText, this.macros, false, this.macroParams);
                     // 需要合并状态，如宏定义
-                    includedLexer.macros = {...this.macros};
                     const includedResult = await includedLexer.tokenize();
                     // 合并 tokens, errors, pragmas
                     if (!this.suppressMacroExpansion) {
@@ -1280,7 +1298,7 @@ export class Lexer {
      * This function has some changes done on my own.
      * @returns {void}
      */
-    readIdentifier() {
+    async readIdentifier() {
         const startLocation = this.getLocation();
         let value = '';
 
@@ -1333,7 +1351,7 @@ export class Lexer {
             }
             if (!this.suppressMacroExpansion) {
                 const macroProcessor = new Lexer(this.macros[value], repls, false, this.macroParams);
-                const macroResult = macroProcessor.tokenize();
+                const macroResult = await macroProcessor.tokenize();
                 this.tokens.push(...macroResult.tokens.filter(token => token.type != TokenType.EOF));
                 this.errors.push(...macroResult.errors);
             }
@@ -1369,7 +1387,6 @@ export class Lexer {
     }
 
     readOperator() {
-        if (this.skipping) return; // 跳过运算符
         // 原有的 readOperator 逻辑...
         const startLocation = this.getLocation();
         let value = this.sourceCode[this.position];
@@ -1382,11 +1399,11 @@ export class Lexer {
         }
         
         this.advance(); // 前进到下一个字符
+        if (this.skipping) return; // 跳过运算符
         this.tokens.push(new Token(OPERATORS[value], value, startLocation));
     }
 
     readPunctuator() {
-        if (this.skipping) return; // 跳过标点符号
         // 原有的 readPunctuator 逻辑...
         const startLocation = this.getLocation();
         let value = this.sourceCode[this.position];
@@ -1399,6 +1416,7 @@ export class Lexer {
         }
         
         this.advance(); // 前进到下一个字符
+        if (this.skipping) return; // 跳过标点符号
         this.tokens.push(new Token(PUNCTUATORS[value], value, startLocation));
     }
 

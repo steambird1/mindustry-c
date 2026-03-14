@@ -179,7 +179,7 @@ export const pseudoList = new CompilerExtensionBase(
 					throw new InternalGenerationFailure(`Inappropriate array size`, ast.location)
 				}
 				
-				const randomIdentifier = Math.floor(10000 * Math.random());
+				const randomIdentifier = Math.floor(10000 * Math.random()) + 32768;
 				/**
 				 * 
 				 * @param {number} l 
