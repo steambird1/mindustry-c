@@ -75,6 +75,9 @@ export class AttributeClass {
 	}
 
 	setAttribute(key, value) {
+        if (key === 'location') {
+            this.location = value;
+        }
         this._attributes.set(key, value);
         return this;
     }

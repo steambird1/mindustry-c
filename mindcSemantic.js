@@ -649,6 +649,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'ceil', returnType: 'float', parameters: ['float']},
 			{ name: 'floor', returnType: 'float', parameters: ['float']},
 			{ name: 'sqrt', returnType: 'float', parameters: ['float']},
+			{ name: 'pow', returnType: 'float', parameters: ['float', 'float']},
 			{ name: 'abs', returnType: 'float', parameters: ['float']},
 			{ name: 'rand', returnType: 'float', parameters: []},
 			{ name: 'memcpy', returnType: 'void', parameters: ['void*', 'void*', 'unsigned']},
@@ -1307,6 +1308,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			if (node.name === '@counter') {
 				this.addWarning(`Deprecated to use @counter inside program`, node.getAttribute('location'));
 			}
+			/*
 			if (objectList.includes(node.name)) {
 				node.dataType = this.typeTable.get('item_t');
 			} else if (liquidList.includes(node.name)) {
@@ -1316,7 +1318,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 			} else {
 				node.dataType = this.typeTable.get('content_t');
 			}
-			
+			*/
+			node.dataType = this.typeTable.get('content_t');
 			return;
 		}
         const symbol = this.currentScope.lookup(node.name);

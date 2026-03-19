@@ -95,7 +95,7 @@ export class CodeGenerator extends ASTVisitor {
 			this.RValueAssigner = this.memory.currentState().duplicate();
 			this.RValueMax = 0;
 			const buildings = new BuildingLinker(this.memory.memoryBlocks.map(block => block.name), 
-				this.functionManagement);
+				this.functionManagement, this.compiler);
 			if (!noMemory) {
 				result.concat(buildings.outputLinkInitializer());
 				result.concat(this.memory.outputLinkInitializer());	
@@ -536,6 +536,16 @@ export class CodeGenerator extends ASTVisitor {
 		// Note: then it reads a ORIGINAL VALUE
 		// And besides: This won't dereference a pointer if it should appear to be one to the user (i.e. implementAsPointer)
 		// but will dereference those accessed through pointer!
+	}
+
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 * @returns {Instruction}
+	 * @remarks Controls the external behavior of the program.
+	 */
+	visitForContent(node) {
+		return this.implicitToContent(node, null, true);
 	}
 
 	/**
@@ -1121,29 +1131,27 @@ export class CodeGenerator extends ASTVisitor {
 			if (node.initializer) {
 				// Necessary implicit converts that is not supported by the Mindustry VM
 				if (node.initializer.dataType) {
-					if (symbol.type.type.name === 'content_t' && special.includes(node.initializer.dataType.name)) {
+					if (this.semantic.isSameType(symbol.myType(), this.semantic.getTypeInfo('content_t')) && special.includes(node.initializer.dataType.name)) {
 						evaluation = this.implicitToContentRaw(evaluation, referrer(node.initializer.dataType.name));
-					} else if (special.includes(symbol.type.name) && !this.semantic.isSameType(symbol.type.type, node.initializer.dataType)) {
+					} else if (special.includes(symbol.myType().name) && !this.semantic.isSameType(symbol.type.type, node.initializer.dataType)) {
 						evaluation = this.implicitContentToNumericRaw(evaluation);
 					}
 				}
 				
 				// Oh no, this was wrong. YOU CAN'T ASSUME THAT THE RIGHT SIDE IS SIMILAR THING AS WELL!
 				// 'isStructRet' is used only for initializer list
-				if (node.initializer.dataType && (
-					node.initializer.dataType.kind === 'struct' || node.initializer.dataType.kind === 'union' || evaluation.getAttribute('isStructRet')
-				)) {
-					if (evaluation.getAttribute('disallowReplacement')) {
-						finalize.concat(evaluation);
+				if (evaluation.getAttribute('disallowReplacement')) {
+					finalize.concat(evaluation);
+					if (node.initializer.dataType && (
+						node.initializer.dataType.kind === 'struct' || node.initializer.dataType.kind === 'union' || evaluation.getAttribute('isStructRet')
+					)) {
 						finalize.concat(this.copyStruct(symbol.getAssemblySymbol(), evaluation.instructionReturn ?? 'null', symbol.myType(), node.initializer.dataType));
 					} else {
-						finalize.concat(evaluation.replace_variable(symbol.getAssemblySymbol(), evaluation.instructionReturn));
+						finalize.concat(this.generateSymbolWrite(symbol, evaluation.instructionReturn ?? 'null'));
 					}
 				} else {
-					finalize.concat(evaluation);
-					finalize.concat(this.generateSymbolWrite(symbol, evaluation.instructionReturn ?? 'null'));
+					finalize.concat(evaluation.replace_variable(symbol.getAssemblySymbol(), evaluation.instructionReturn));
 				}
-				
 			}
 			
 			if (symbol.isStatic) {
@@ -1244,7 +1252,7 @@ export class CodeGenerator extends ASTVisitor {
 			result.setAttribute('isPointer', true);
 			const initializerProcessor = (obj, typeLayer) => {
 				
-				const warnedTypes = ['content_t', 'device', 'null_t'];
+				const warnedTypes = ['device', 'null_t'];
 				typeLayer = typeLayer ?? obj.dataType;
 				
 				if (obj.type === 'InitializerList') {
@@ -1253,7 +1261,12 @@ export class CodeGenerator extends ASTVisitor {
 					if (obj.dataType && warnedTypes.includes(obj.dataType.name)) {
 						this.addWarning(`Initializing object of type ${obj.dataType.toString()} in initializer list is an undefined behavior`, node.location);
 					}
-					const valueFetch = this.visitAndRead(obj);
+					let valueFetch;
+					if (obj.dataType && obj.dataType.name === 'content_t') {
+						valueFetch = this.implicitContentToNumericRaw(this.visitAndRead(obj));
+					} else {
+						valueFetch = this.visitAndRead(obj);
+					}
 					result.concat(valueFetch);
 					// Process assignment-like
 					if (valueFetch.getAttribute('isPointer') || obj.dataType.isPointerImpl()) {
@@ -1334,6 +1347,9 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	implicitToContentRaw(inst, contentType) {
 		let result = inst;
+		if (inst.instructionReturn.startsWith('@')) {
+			return inst;		// Already the constant
+		}
 		const temporary = this.getTempSymbol(this.semantic.getTypeInfo('content_t'));//this.getTempVariable();
 		result.concat_returns(this.operates(
 			this.operatesWith(InstructionBuilder.lookup(contentType, '{op}', '{opw}'), result), temporary
@@ -1345,9 +1361,10 @@ export class CodeGenerator extends ASTVisitor {
 	 * 
 	 * @param {ASTNode} node 
 	 * @param {string | null} [contentTypeGiven=null]
+	 * @param {boolean} [strict=false] 
 	 * @return {Instruction}
 	 */
-	implicitToContent(node, contentTypeGiven = null) {
+	implicitToContent(node, contentTypeGiven = null, strict = false) {
 		let result, temporary;
 		let contentType = contentTypeGiven;
 		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
@@ -1361,7 +1378,10 @@ export class CodeGenerator extends ASTVisitor {
 			}
 			switch (node.dataType.name) {
 				// These types are actually stored in integral form
-				case 'int': case 'item_t': case 'liquid_t': case 'unit_t': case 'block_t':
+				case 'int':
+					if (strict) break;
+					// Otherwise passthrough!
+				case 'item_t': case 'liquid_t': case 'unit_t': case 'block_t':
 					return this.implicitToContentRaw(this.visitAndRead(node), contentType);
 					break;
 			}
@@ -2122,7 +2142,18 @@ export class CodeGenerator extends ASTVisitor {
 			]);
 
 		for (let i = 0; i < relevantFunction.type.parameters.length && i < node.arguments.length; i++) {
-			const param = this.visitAndRead(node.arguments[i]);
+			/**
+			 * @type {TypeInfo}
+			 */
+			let actualType;
+			if (isFunctionPointer) {
+				actualType = this.compiler.semanticAnalyzer.getTypeInfo(relevantFunction.type.parameters[i].type);
+			} else {
+				actualType = relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name).type.type;
+			}
+			const param = this.compiler.semanticAnalyzer.isSameType(actualType, this.compiler.semanticAnalyzer.getTypeInfo('content_t'))
+				? this.implicitToContent(node.arguments[i], null, true) 
+				: this.visitAndRead(node.arguments[i]);
 			result.concat(param);
 			/*
 			result.concat(this.generateSymbolWrite(
@@ -2130,12 +2161,7 @@ export class CodeGenerator extends ASTVisitor {
 				param.instructionReturn
 			));
 			*/
-			let actualType;
-			if (isFunctionPointer) {
-				actualType = this.compiler.semanticAnalyzer.getTypeInfo(relevantFunction.type.parameters[i].type);
-			} else {
-				actualType = relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name).type.type;
-			}
+			
 			// This is so-called "post-processing"
 			
 			if (isFunctionPointer) {
@@ -2154,10 +2180,10 @@ export class CodeGenerator extends ASTVisitor {
 		// Calling
 		if (isFunctionPointer) {
 			result.concat(this.functionManagement.getRawFunctionCall(node.callee.symbol.getAssemblySymbol(),
-				new Map(), this.currentFunction === 'main'));
+				new Map(), this.currentFunction === 'main', recursive ? null : this.currentFunction));
 		} else {
 			result.concat(this.functionManagement.getFunctionCall(
-				node.callee.name, new Map(), this.memory, this.currentFunction === 'main'));
+				node.callee.name, new Map(), this.memory, this.currentFunction === 'main', recursive ? null : this.currentFunction));
 		}
 
 		// If recursive:
@@ -2235,12 +2261,19 @@ export class CodeGenerator extends ASTVisitor {
 		const referrer = typeName => typeName.slice(0, typeName.length - 2);
 		if (isBuiltinConstant) {
 			// If the value is a builtin constant with type...
-			if (node.dataType && special.includes(node.dataType.name)) {
-				return this.implicitContentToNumericRaw(new Instruction([], node.name.replace(/\_/g, '-'), new Map([['disallowReplacement', true]])));	// Make a conversion
+			if (this.compiler.extraConfig.getAttribute('defaultNumeric') && node.dataType && special.includes(node.dataType.name)) {
+				return this.implicitContentToNumericRaw(new Instruction([], node.name.replace(/\_/g, '-'), new Map([['disallowReplacement', true], ['builtinConstant', true]])));	// Make a conversion
 			} else {
-				return new Instruction([], node.name.replace(/\_/g, '-'), new Map([['disallowReplacement', true]]));
+				return new Instruction([], node.name.replace(/\_/g, '-'), new Map([['disallowReplacement', true], ['builtinConstant', true]]));
 			}
 		}
+		/*
+		if (!this.compiler.extraConfig.getAttribute('defaultNumeric')) {
+			if (node.dataType && special.includes(node.dataType.name)) {
+				return this.implicitToContentRaw(this.generateSymbolRead(this.currentScope.lookup(node.name)), node.dataType.name);
+			}
+		}
+			*/
 		return this.generateSymbolRead(this.currentScope.lookup(node.name));	// Major change: now changed to false!!!
 	}
 
@@ -2285,12 +2318,12 @@ export class CodeGenerator extends ASTVisitor {
 			//tmpVar = memberResolution.instructionReturn;
 		}
 		result.concat(memberResolution);
-		tmpVar = this.getTempVariable();
+		//tmpVar = this.getTempVariable();
 		result.concat(this.operatesWith(
-			this.memory.outputPointerFetchOf('{opw}', tmpVar),
+			this.memory.outputPointerFetchOf('{opw}', tmpSymb.getAssemblySymbol()),
 			memberResolution
 		));
-		result.concat(this.generateSymbolWrite(tmpSymb, tmpVar));
+		//result.concat(this.generateSymbolWrite(tmpSymb, tmpVar));
 		result.set_returns(tmpSymb);
 		return result;
 	}
@@ -2321,6 +2354,7 @@ export class CodeGenerator extends ASTVisitor {
 				 * @remark The implicit convertor is actually hardly used!
 				 */
 				ast => {
+					/*
 					const converts = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
 					const referrer = typeName => typeName.slice(0, typeName.length - 2);
 					let fetcher;
@@ -2328,8 +2362,10 @@ export class CodeGenerator extends ASTVisitor {
 					if (ast.dataType && converts.includes(ast.dataType.name)) {
 						fetcher = this.convertInstructionForReading(this.implicitToContent(ast, referrer(ast.dataType.name)));
 					} else {
-						fetcher = this.visitAndRead(ast);
+						fetcher = this.visitForContent(ast);
 					}
+						*/
+					const fetcher = this.visitForContent(ast);
 					//varNames.push(fetcher.instructionReturn);
 					varNames.push(`{op_r${vid++}}`);
 					return fetcher;
@@ -2394,7 +2430,7 @@ export class CodeGenerator extends ASTVisitor {
 			print: ast => {
 				let result = new Instruction();
 				ast.arguments.forEach(arg => {
-					const printing = this.visitAndRead(arg);
+					const printing = this.visitForContent(arg);
 					result.concat(printing);
 					result.concat(InstructionBuilder.print(printing.instructionReturn));
 				});
@@ -2403,7 +2439,7 @@ export class CodeGenerator extends ASTVisitor {
 			printchar: ast => {
 				let result = new Instruction();
 				ast.arguments.forEach(arg => {
-					const printing = this.visitAndRead(arg);
+					const printing = this.visitForContent(arg);
 					result.concat(printing);
 					result.concat(InstructionBuilder.printchar(printing.instructionReturn));
 				});
@@ -2412,7 +2448,7 @@ export class CodeGenerator extends ASTVisitor {
 			format: ast => {
 				let result = new Instruction();
 				ast.arguments.forEach(arg => {
-					const printing = this.visitAndRead(arg);
+					const printing = this.visitForContent(arg);
 					result.concat(printing);
 					result.concat(InstructionBuilder.format(printing.instructionReturn));
 				});
@@ -2447,7 +2483,7 @@ export class CodeGenerator extends ASTVisitor {
 					let preConcat = "", subArg1, tailPosition = 1;
 					switch (ast.arguments[0].value) {
 						case 'ore':
-							subArg1 = this.visitAndRead(ast.arguments[1]);
+							subArg1 = this.visitForContent(ast.arguments[1]);
 							tailPosition = 2;
 							result.concat(subArg1);
 							preConcat = `ore core true ${subArg1.instructionReturn}`;
@@ -2458,7 +2494,7 @@ export class CodeGenerator extends ASTVisitor {
 								break;
 							}
 							tailPosition = 3;
-							subArg1 = this.visitAndRead(ast.arguments[2]);
+							subArg1 = this.visitForContent(ast.arguments[2]);
 							result.concat(subArg1);
 							preConcat = `building ${ast.arguments[1].value} ${subArg1.instructionReturn} @copper`;
 							break;
@@ -2470,14 +2506,15 @@ export class CodeGenerator extends ASTVisitor {
 							break;
 					}
 					for (let i = tailPosition; i < tailPosition + 4; i++) {
-						const argContent = this.visitAndRead(ast.arguments[i]);
+						const argContent = this.visitForContent(ast.arguments[i]);
 						if (argContent.getAttribute('fromCast') && ast.arguments[i].dataType.qualifiers
 							&& ast.arguments[i].dataType.qualifiers.includes('volatile')) {
 								preConcat += ` ${argContent.instructionReturn}`;
 						} else {
-							const tmpVar = this.getTempVariable();
-							preConcat += ` ${tmpVar}`;
-							postConcat.concat(InstructionBuilder.writes(tmpVar, `${argContent.instructionReturn}_block`, `${argContent.instructionReturn}_ptr`));
+							const tmpVar = this.getTempSymbol(); //this.getTempVariable();
+							preConcat += ` ${tmpVar.getAssemblySymbol()}`;
+							postConcat.concat(this.memory.outputPointerStorageOf(argContent.instructionReturn, tmpVar.getAssemblySymbol()));
+							// postConcat.concat(InstructionBuilder.writes(tmpVar, `${argContent.instructionReturn}_block`, `${argContent.instructionReturn}_ptr`));
 						}
 					}
 					result.concat(new SingleInstruction({
@@ -2599,6 +2636,9 @@ export class CodeGenerator extends ASTVisitor {
 			},
 			sqrt: ast => {
 				return opProcesser(`sqrt`, ast.arguments);
+			},
+			pow: ast => {
+				return opProcesser('pow', ast.arguments);
 			},
 			rand: ast => {
 				return opProcesser(`rand`, ast.arguments);

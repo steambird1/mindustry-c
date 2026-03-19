@@ -27,6 +27,16 @@ class ContinueException {
 	}
 }
 
+class ReturnRegistry {
+	constructor() {
+		this.counter = 0;
+	}
+
+	record() {
+		this.counter++;
+	}
+}
+
 export class Optimizer extends ASTVisitor {
     constructor(compiler = null) {
 		super(compiler);
@@ -439,7 +449,7 @@ export class Optimizer extends ASTVisitor {
 		}
 		if (node.children) {
 			node.children.forEach(child => this.analyzeNode(child, {
-				...info,
+				parentInfo: info,
 				disposeReturn: (node.type === 'ExpressionStatement' 
 					&& child != node.children[node.children.length - 1]
 				)
@@ -447,7 +457,7 @@ export class Optimizer extends ASTVisitor {
 		}
 		if (info && info.parentInfo) {
 			for (const att of inheritances) {
-				info.parentInfo[att] = info.parentInfo[att] || info[att];
+				info.parentInfo[att] = info[att] || info.parentInfo[att];
 			}
 		}
     }
@@ -465,7 +475,7 @@ export class Optimizer extends ASTVisitor {
 		}
 		if (node.statements) {
 			node.statements.forEach(child => this.analyzeNode(child, {
-				...info,
+				parentInfo: info,
 				disposeReturn: true
 			}));
 		}
@@ -603,7 +613,7 @@ export class Optimizer extends ASTVisitor {
 		
 		const funcInfo = {
 			inFunction: true,
-			returnCount: 0,
+			returnCount: new ReturnRegistry(),
 			parentInfo: info
 		};
 		
@@ -621,9 +631,9 @@ export class Optimizer extends ASTVisitor {
 		
 		if (analyzedBody) {
 			if (!this.functionInfo.get(funcName).isAddressed) {
-				if (funcInfo.returnCount > 1) {
+				if (funcInfo.returnCount.counter > 1) {
 					this.functionInfo.get(funcName).canInline = false;
-				} else if (funcInfo.returnCount == 1) {
+				} else if (funcInfo.returnCount.counter == 1) {
 					this.functionInfo.get(funcName).canInline = funcNode.body.statements[funcNode.body.statements.length - 1].type === 'ReturnStatement';
 				} else {
 					this.functionInfo.get(funcName).canInline = true;
@@ -2487,7 +2497,7 @@ export class Optimizer extends ASTVisitor {
 			}
 		}
 		if (info && info.inFunction) {
-			info.returnCount++;
+			info.returnCount.record();
 		}
 	}
 
@@ -4074,6 +4084,7 @@ export class Optimizer extends ASTVisitor {
 		if (funcNode.body.type !== 'CompoundStatement') {
 			return false;
 		}
+
 		const clonedBody = this.cloneAST(funcNode.body);
 		if (!clonedBody) return false;
 		
@@ -4416,10 +4427,13 @@ export class Optimizer extends ASTVisitor {
 		
 		let parentOfParent = parentNode.parent, result = true;
 		const directParent = parentNode;	// Not modified ver
+		const noInlining = ['ForStatement', 'WhileStatement'];
 		// Get first compound statement
+		if (noInlining.includes(parentNode.type)) return false;
 		while (parentOfParent && parentOfParent.type !== 'CompoundStatement') {
 			parentNode = parentOfParent;
 			parentOfParent = parentOfParent.parent;
+			if (noInlining.includes(parentNode.type)) return false;
 		}
 
 		// There should be only one call in the 'parent node'

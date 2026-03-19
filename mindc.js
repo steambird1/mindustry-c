@@ -362,6 +362,21 @@ export class Compiler {
 			parserConfig.setAttribute('extraTypes', exTypes);
 			parserConfig.setAttribute('extraFunctions', exFuncs);
 			parserConfig.setAttribute('extraHandler', new Map(extensions.flatMap(ext => [...ext.handlers])));
+			tokens.pragmas.forEach(
+				/**
+				 * 
+				 * @param {string} info 
+				 */
+				info => {
+					if (info.startsWith("comment(")) {
+						// #pragma comment(attribute,value)
+						const comment = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')'));
+						const config = comment.split(',').map(s => s.trim());
+						if (config.length < 2) return;
+						parserConfig.setAttribute(config[0], config[1]);
+					}
+			})
+
 			this.parser = new Parser(this.lexer, parserConfig);
 			this.extraConfig = parserConfig;
 			// Renew everything

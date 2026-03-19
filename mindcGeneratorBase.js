@@ -1,6 +1,5 @@
 
 import { AttributeClass } from "./mindcBase.js";
-
 import { SymbolEntry, TypeInfo } from "./mindcSemantic.js";
 
 export class InstructionReferrerException {
@@ -111,7 +110,7 @@ export class Instruction extends AttributeClass {
 		this.instructions.push(other);
 		this.instructionReturn = other.instructionReturn;
 		for (const retAttrib of ['isSymbolic', 'isPointer', 'isRValueMem', 'isPointerAccess', 'disallowReplacement',
-			'relevantSymbol', 'isNearPointer', 'isRegStruct'
+			'relevantSymbol', 'isNearPointer', 'isRegStruct', 'builtinConstant'
 		]) {
 			this.setAttribute(retAttrib, other.getAttribute(retAttrib));
 		}
@@ -1042,10 +1041,12 @@ export class BuildingLinker {
 	 * 
 	 * @param {string[]} blockOccupation
 	 * @param {FunctionRegisterer} functionManagement
+	 * @param {Compiler?} [compiler=null] 
 	 */
-	constructor(blockOccupation, functionManagement) {
+	constructor(blockOccupation, functionManagement, compiler = null) {
 		this.blockOccupation = blockOccupation;
 		this.functionManagement = functionManagement;
+		// this.config = compiler ? compiler.extraConfig : new AttributeClass();
 	}
 
 	// Very unfortunately, this function can't use any function!
@@ -1055,8 +1056,9 @@ export class BuildingLinker {
 		const inlineJumper = new Instruction([
 			InstructionBuilder.getlink("__building", "__linkscan"),
 			InstructionBuilder.sensor("__buildingtype", "__building", "@type"),
-			InstructionBuilder.jump("{0}", "strictEqual", "__buildingtype", "@memory-cell", [6]),
-			InstructionBuilder.jump("{0}", "strictEqual", "__buildingtype", "@memory-bank", [6]),
+			InstructionBuilder.jump("{0}", "strictEqual", "__buildingtype", "@memory-cell", [7]),
+			InstructionBuilder.jump("{0}", "strictEqual", "__buildingtype", "@memory-bank", [7]),
+			InstructionBuilder.jump("{0}", "strictEqual", "__buildingtype", "@world-cell", [7]),
 			InstructionBuilder.op("add", "__linkscan", "__linkscan", 1),
 			InstructionBuilder.jump("{0}", "always", null, null, [0]),
 			InstructionBuilder.set("@counter", "__linker_ret")
