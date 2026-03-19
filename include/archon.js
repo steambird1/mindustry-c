@@ -28,7 +28,7 @@ const singleArgPacker = (operName, len, hasReturn = null) => {
              */
             (cg, ast) => cg.operatesWrite(
                     cg.operatesReads(
-                        ast.arguments.map(arg => cg.visit(arg)),
+                        ast.arguments.map(arg => cg.implicitToContent(arg, null, true)),
                         new SingleInstruction(
                             {
                                 content: `${operName} {op_write} ${filler}`,
@@ -42,7 +42,7 @@ const singleArgPacker = (operName, len, hasReturn = null) => {
     } else {
         return (
             (cg, ast) => cg.operatesReads(
-                    ast.arguments.map(arg => cg.visit(arg)),
+                    ast.arguments.map(arg => cg.implicitToContent(arg, null, true)),
                     new SingleInstruction(
                         {
                             content: `${operName} ${filler}`,
@@ -79,7 +79,7 @@ const multiArgPacker = (funcName, operName, len, skipFirstArg) => {
         return cg.operatesReads(
             [
                 ...(skipFirstArg.includes(operation) ? [new Instruction([], 'x')] : []),
-                ...(ast.arguments.slice(1).map(arg => cg.visit(arg))),
+                ...(ast.arguments.slice(1).map(arg => cg.visitForContent(arg))),
                 ...(new Array(len).fill(new Instruction([], 'x')))
             ].slice(0, len),
             new SingleInstruction(
@@ -163,7 +163,7 @@ export const extension = new CompilerExtensionBase(
         ['arfetch', {
             name: 'arfetch',
             returnType: 'null_t',
-            parameters: ['char', 'content_t', 'int', 'content_t']
+            parameters: ['char', 'content_t', 'null_t', 'content_t']
         }],
         ['arsetprop', {
             name: 'arsetprop',
@@ -235,7 +235,7 @@ export const extension = new CompilerExtensionBase(
                     throw new InternalGenerationFailure('argetblock() requires string literal block type');
                 } else {
                     return cg.operatesReads(
-                        ast.arguments.slice(1).map(arg => cg.visit(arg)),
+                        ast.arguments.slice(1).map(arg => cg.implicitToContent(arg, null, true)),
                         new SingleInstruction(
                             {
                                 content: `setblock ${ast.arguments[0].value} {op_r0} {op_r1} {op_r2} {op_r3} {op_r4}`,
@@ -249,7 +249,7 @@ export const extension = new CompilerExtensionBase(
         ['arspawn',
             (cg, ast) => cg.operatesWrite(
                 cg.operatesReads(
-                    ast.arguments.map(arg => cg.visit(arg)),
+                    ast.arguments.map(arg => cg.implicitToContent(arg, null, true)),
                     new SingleInstruction(
                         {
                             content: `spawn {op_r0} {op_r1} {op_r2} {op_r3} {op_r4} {op_write}`,
@@ -268,7 +268,7 @@ export const extension = new CompilerExtensionBase(
                             throw new InternalGenerationFailure('Incorrect call format for arstatus()');
                         }
                         return cg.operatesReads(
-                            ast.arguments.slice(2).map(arg => cg.visit(arg)),
+                            ast.arguments.slice(2).map(arg => cg.implicitToContent(arg, null, true)),
                             new SingleInstruction(
                                 {
                                     content: `status false ${ast.arguments[1].value} {op_r0} {op_r1}`,
@@ -282,7 +282,7 @@ export const extension = new CompilerExtensionBase(
                             throw new InternalGenerationFailure('Incorrect call format for arstatus()');
                         }
                         return cg.operatesReads(
-                            ast.arguments.slice(2).map(arg => cg.visit(arg)),
+                            ast.arguments.slice(2).map(arg => cg.implicitToContent(arg, null, true)),
                             new SingleInstruction(
                                 {
                                     content: `status true ${ast.arguments[1].value} {op_r0}`,
@@ -319,7 +319,7 @@ export const extension = new CompilerExtensionBase(
                 }
                 return cg.operatesReads(
                     [
-                        ...ast.arguments.slice(1, 4).map(arg => cg.visit(arg)),
+                        ...ast.arguments.slice(1, 4).map(arg => cg.implicitToContent(arg, null, true)),
                         ...(
                             ast.arguments[4].type === 'StringLiteral' ? []
                                 : [cg.visit(ast.arguments[4])]
@@ -347,7 +347,7 @@ export const extension = new CompilerExtensionBase(
                 }
                 return cg.operatesWrite(
                     cg.operatesReads(
-                        ast.arguments.slice(1).map(arg => cg.visit(arg)),
+                        ast.arguments.slice(1).map(arg => cg.implicitToContent(arg, null, true)),
                         new SingleInstruction(
                             {
                                 content: `fetch ${ast.arguments[0].value} {op_write} {op_r0} {op_r1} {op_r2}`,
@@ -370,7 +370,7 @@ export const extension = new CompilerExtensionBase(
                             throw new InternalGenerationFailure('Incorrect call format for arplaysound()');
                         }
                         return cg.operatesReads(
-                            ast.arguments.slice(1).map(arg => cg.visit(arg)),
+                            ast.arguments.slice(1).map(arg => cg.implicitToContent(arg, null, true)),
                             new SingleInstruction(
                                 {
                                     content: `playsound false {op_r0} {op_r1} {op_r2} {op_r3} x x {op_r4}`,
@@ -384,7 +384,7 @@ export const extension = new CompilerExtensionBase(
                             throw new InternalGenerationFailure('Incorrect call format for arplaysound()');
                         }
                         return cg.operatesReads(
-                            ast.arguments.slice(1).map(arg => cg.visit(arg)),
+                            ast.arguments.slice(1).map(arg => cg.implicitToContent(arg, null, true)),
                             new SingleInstruction(
                                 {
                                     content: `playsound true {op_r0} {op_r1} {op_r2} x {op_r3} {op_r4} {op_r5}`,
