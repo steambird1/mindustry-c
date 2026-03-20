@@ -6,11 +6,11 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	ForStatementNode,
 	VariableDeclarationNode,
 	TypeSpecifierNode,
-	IdentifierNode
+	IdentifierNode, dynamicBuiltins
  } from "./mindcBase.js";
 import { InstructionBuilder } from "./mindcGeneratorBase.js";
 
-import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mindcSemantic.js";
+import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer, VariableLinker } from "./mindcSemantic.js";
 
 // Auxiliary type to handle break/continue
 class BreakException {
@@ -38,6 +38,23 @@ class ReturnRegistry {
 }
 
 export class Optimizer extends ASTVisitor {
+	/**
+		 * @typedef {{
+		 * 	calls: integer,
+		 *  hasSideEffects: boolean,
+		 *  isAddressed: boolean?,
+		 *  isDefinition: boolean,
+		 *  isInline: boolean?,
+		 *  canInline: boolean,
+		 *  node: FunctionDeclarationNode?,
+		 *  scope: Scope?,
+		 *  size: number?,
+		 *  writtenVars: SymbolEntry[]
+		 * }} functionInfoEntry
+		 * 
+		 * @typedef {number | string | VariableLinker | extBuiltinConstant} constantInfo
+		 * @typedef {{varName: string, scope: Scope, symbol: SymbolEntry?}} variableModification
+		 */
     constructor(compiler = null) {
 		super(compiler);
 		/**
@@ -51,27 +68,15 @@ export class Optimizer extends ASTVisitor {
         
         // 优化状态
         this.functionCallGraph = new Map();
-		/**
-		 * @typedef {{
-		 * 	calls: integer,
-		 *  hasSideEffects: boolean,
-		 *  isAddressed: boolean?,
-		 *  isDefinition: boolean,
-		 *  isInline: boolean?,
-		 *  canInline: boolean,
-		 *  node: FunctionDeclarationNode?,
-		 *  scope: Scope?,
-		 *  size: number?,
-		 *  writtenVars: SymbolEntry[]
-		 * }} functionInfoEntry
-		 */
+		
 		/**
 		 * @type {Map<string, functionInfoEntry>}
 		 */
         this.functionInfo = new Map();
         this.constants = new Map(); // 全局常量表
 		/**
-		 * @type {Map<string, *>}
+		 * 
+		 * @type {Map<string, Map<string, constantInfo>>}
 		 */
         this.localConstants = new Map(); // 局部常量表
 		/**
@@ -79,7 +84,7 @@ export class Optimizer extends ASTVisitor {
 		 */ 
         this.variableUses = new Map(); // 变量使用统计 {scopePath: Map<varName, {reads, writes}>}
 		//this.visitedSideEffects = false;
-        
+
         // 作用域分析
 		/**
 		 * @type {Scope}
@@ -144,12 +149,14 @@ export class Optimizer extends ASTVisitor {
     optimizationPass() {
         // 1. 收集全局信息（函数调用图等）
 		this.visitedFunction = new Set();
-		//this.localConstants.clear();
 		/**
 		 * 
 		 * @param {Scope} scope 
 		 */
 		const initializeScopes = scope => {
+			scope.symbols.forEach(child => {
+				child.isConstant = false;
+			})
 			scope.children.forEach(child => initializeScopes(child));
 			this.localConstants.set(scope.getPath(), new Map());
 			this.variableUses.set(scope.getPath(), new Map());
@@ -249,6 +256,7 @@ export class Optimizer extends ASTVisitor {
 	 * @param {string} varName 
 	 * @param {Scope} targetScope
 	 * @param {string} targetName 
+	 * @remarks Duplicating a variable does not mean duplicating its variable name reference.
 	 */
 	duplicateVariable(scope, varName, targetScope, targetName) {
 		let varRef = scope.lookupCurrent(varName);
@@ -257,6 +265,7 @@ export class Optimizer extends ASTVisitor {
 		}
 		varRef = varRef.duplicate();
 		varRef.name = targetName;
+		varRef.variableReferrer = new VariableLinker(targetName);
 		targetScope.addSymbol(varRef);
 		const scopePath = scope.getPath();
 		const targetPath = targetScope.getPath();
@@ -292,8 +301,10 @@ export class Optimizer extends ASTVisitor {
         if (!node) return;
 
 		const inheritances = ['hasBreak', 'hasContinue', 'returnCount'];	// Use OR-merge
-		const copies = ['isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop', 'cannotCascade', 'fromCallNodeAnalysis'];
-		const clarifications = ['hasBreak', 'hasContinue', 'isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop', 'cannotCascade', 'fromCallNodeAnalysis'];
+		const copies = ['isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop', 'cannotCascade', 'fromCallNodeAnalysis', 'strangeLoop', 'modifiedVars',
+				'atLoop', 'atUnsure', 'atFunction'	// at-components are about the scopes.
+		];
+		const clarifications = ['hasBreak', 'hasContinue', 'isLoop', 'isUnsure', 'firstLoopRun', 'inFunction', 'actualCalling', 'optimizingLoop', 'cannotCascade', 'fromCallNodeAnalysis', 'strangeLoop'];
         
 		if (info && info.parentInfo) {
 			for (const att of copies) {
@@ -315,8 +326,24 @@ export class Optimizer extends ASTVisitor {
 		}
 		
 		// Make replacements before analysis
-		if (this.shouldRunEvaluation(node, info) && !(info && info.optimizingLoop)) {
-			this.replaceConstantAtPresent(node);
+		const assessment = this.shouldRunEvaluation(node, info);
+		this.restrictiveVariables = null;
+		if (!(info && (info.optimizingLoop || info.strangeLoop))) {
+			if (assessment) {
+				this.replaceConstantAtPresent(node);
+			} else if (assessment === null) {
+				if (info.firstLoopRun) {
+					if (info.modifiedVars) {
+						this.replaceConstantAtPresent(node, false, info.modifiedVars);
+					} else {
+						this.replaceAliasAt(node);
+					}
+				} else {
+					this.replaceConstantAtPresent(node);
+				}
+			} else {
+				this.replaceAliasAt(node);
+			}
 		}
 
 		try {
@@ -535,15 +562,31 @@ export class Optimizer extends ASTVisitor {
 	 * 
 	 * @param {ASTNode} node 
 	 * @param {*} info 
+	 * @param {SymbolEntry?} [symbol=null] 
 	 * @returns {boolean?} `null` means 'do not make changes on variable states'.
 	 */
-	shouldRunEvaluation(node, info = null) {
+	shouldRunEvaluation(node, info = null, symbol = null) {
 		if (info) {
-			if (info.isUnsure) return false;
-			if (info.inFunction && !info.actualCalling) return false;	// i.e. uncertain calls
+			if (info.isUnsure) {
+				if (symbol && symbol.scope.isParent(info.atUnsure)) {
+					return true;
+				}
+				return false;
+			}
+			if (info.inFunction && !info.actualCalling) {
+				if (symbol && symbol.scope.isParent(info.atFunction)) {
+					return true;
+				}
+				return false;	// i.e. uncertain calls
+			}
 			if (info.optimizingLoop) return true;	// High proiority!
 			if (info.isLoop) {
-				if (info.firstLoopRun) return null;	// Priority relevantly lower
+				if (symbol && symbol.scope.isParent(info.atLoop)) {
+					return true;
+				}
+				if (info.firstLoopRun) {
+					return null;	// Priority relevantly lower
+				}
 				return false;
 			}
 		}
@@ -559,7 +602,7 @@ export class Optimizer extends ASTVisitor {
 				const scopePath = this.currentScope.lookupScopeOf(node.argument.name).getPath();
 				const localConstants = this.localConstants.get(scopePath);
 				let newConstant = localConstants.get(node.argument.name);
-				if (newConstant != null) {
+				if (this.canHaveConstantEval(newConstant)) {
 					// ! TODO: Only do this for: !
 					if (node.operator === '++') newConstant++;
 					if (node.operator === '--') newConstant--;
@@ -614,6 +657,7 @@ export class Optimizer extends ASTVisitor {
 		const funcInfo = {
 			inFunction: true,
 			returnCount: new ReturnRegistry(),
+			atFunction: funcNode.body.scope ?? funcNode.scope,
 			parentInfo: info
 		};
 		
@@ -669,7 +713,8 @@ export class Optimizer extends ASTVisitor {
 			const variableUses = this.variableUses.get(scopePath);
 			
 			const canOptimizeThis = !(symbol.isVolatile || symbol.isStatic || symbol.isExtern);
-            
+            symbol.variableReferrer.rejecting = !canOptimizeThis;
+
             // 初始化使用统计
             variableUses.set(declarator.name, {
                 reads: 0,
@@ -682,15 +727,25 @@ export class Optimizer extends ASTVisitor {
             // 检查常量初始化
             if (declarator.initializer) {
                 this.analyzeNode(declarator.initializer, info);
-                if (canOptimizeThis && this.shouldRunEvaluation(node, info)) {
+                if (canOptimizeThis && this.shouldRunEvaluation(node, info, symbol)) {
 					const constValue = this.evaluateConstantExpression(declarator.initializer);
 					if (constValue !== undefined) {
 						localConstants.set(declarator.name, constValue);
-						const shouldEval = this.shouldRunEvaluation(node, info);
+						const shouldEval = this.shouldRunEvaluation(node, info);	// For compatibility
 						this.addWrittenSymbol(symbol, constValue, shouldEval);
 						// 标记符号为常量
+						symbol.markAsConstant(constValue);
+
 						if (shouldEval) {
-							symbol.markAsConstant(constValue);
+							declarator.setAttribute('candidateRemoval', 1);
+						}
+						
+					} else if (declarator.initializer.type === 'Identifier' && !declarator.initializer.name.startsWith('@')) {
+						// Can't be builtin constant, or already optimized in the past component
+						const relevantSymbol = this.currentScope.lookup(declarator.initializer.name);
+						if (symbol.variableReferrer && relevantSymbol) {
+							symbol.variableReferrer.linkTo(relevantSymbol.variableReferrer);
+							symbol.variableReferrer.registerCandidate(declarator);
 						}
 					}
 				}
@@ -750,6 +805,7 @@ export class Optimizer extends ASTVisitor {
 			if (this.hasSideEffects(node.right)) {
 				this.addWriteForCurrentScope(node.left.name);
 			} else {
+				const symbol = this.currentScope.lookup(node.left.name);
 				const scopePath = this.currentScope.lookupScopeOf(node.left.name).getPath();
 				const localConstants = this.localConstants.get(scopePath);
 				const variableUses = this.variableUses.get(scopePath);
@@ -765,8 +821,18 @@ export class Optimizer extends ASTVisitor {
 					if (constValue !== undefined) {
 						//localConstants.set(node.left.name, constValue);
 						const symbol = this.currentScope.lookup(node.left.name);
-						if (symbol && this.shouldRunEvaluation(node, info)) {
+						if (symbol && this.shouldRunEvaluation(node, info, symbol)) {	// Not considering symbol currently!
 							symbol.markAsConstant(constValue);
+							if (this.shouldRunEvaluation(node, info))
+								node.setAttribute('candidateRemoval', 1);
+						}
+						
+					} else if (node.operator === '=' &&
+						this.shouldRunEvaluation(node, info, symbol) && node.right.type === 'Identifier' && !node.right.name.startsWith('@')) {
+						const relevantSymbol = this.currentScope.lookup(node.right.name);
+						if (relevantSymbol) {
+							symbol.variableReferrer.linkTo(relevantSymbol.variableReferrer);
+							symbol.variableReferrer.registerCandidate(node);
 						}
 					}
 					// Manually added
@@ -881,7 +947,10 @@ export class Optimizer extends ASTVisitor {
 				parentInfo: info
 			};
 			if (node.consequent) {
-				this.analyzeNode(node.consequent, ifInfo);
+				this.analyzeNode(node.consequent, {
+					...ifInfo,
+					atUnsure: node.consequent.scope ?? node.scope
+				});
 				
 				// 检查then分支是否有副作用
 				if (this.hasSideEffects(node.consequent)) {
@@ -891,7 +960,10 @@ export class Optimizer extends ASTVisitor {
 			
 			// 分析else分支
 			if (node.alternate) {
-				this.analyzeNode(node.alternate, ifInfo);
+				this.analyzeNode(node.alternate, {
+					...ifInfo,
+					atUnsure: node.alternate.scope ?? node.scope
+				});
 				
 				// 检查else分支是否有副作用
 				if (this.hasSideEffects(node.alternate)) {
@@ -955,7 +1027,12 @@ export class Optimizer extends ASTVisitor {
 				}
 
 				// 分析循环体
-				this.analyzeNode(node.body, loopInfo);
+				this.analyzeNode(node.body, {
+					...loopInfo,
+					atLoop: node.body.scope ?? node.scope,
+					strangeLoop: node.getAttribute('hasUnknownSideEffects'),
+					modifiedVars: this.collectModifiedVariablesInLoop(node)
+				});
 				// 检查循环体是否有副作用
 				
 				
@@ -1200,6 +1277,7 @@ export class Optimizer extends ASTVisitor {
 			};
 			initInfo.isLoop = false;				// Ensure initializer
 			this.analyzeNode(node.init, initInfo);
+			node.init.setAttribute('candidateRemoval', 0);	// Suppress potential removal
 			
 			// 检查初始化是否有副作用
 			node.setAttribute('initHasSideEffects', this.hasSideEffects(node.init));
@@ -1254,7 +1332,12 @@ export class Optimizer extends ASTVisitor {
 				node.setAttribute('bodyHasSideEffects', node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
 				
 				// 分析循环体
-				this.analyzeNode(node.body, loopInfo);// Don't do changes
+				this.analyzeNode(node.body, {
+					...loopInfo,
+					atLoop: node.body.scope ?? node.scope,
+					strangeLoop: node.getAttribute('hasUnknownSideEffects'),
+					modifiedVars: this.collectModifiedVariablesInLoop(node)
+				});// Don't do changes
 				
 				
 				// 记录是否有break/continue
@@ -1696,9 +1779,11 @@ export class Optimizer extends ASTVisitor {
 			currentLoopVarName: loopVarName,
 			grossIterationCount: iterationCount,
 			parentInfo: envInfo
+			// No atloop information
 		};
 		
 		// 初始化循环变量
+		loopVarSymbol.variableReferrer.modify();
 		localConstants.set(loopVarName, initValue);
 		loopNode.setAttribute('loopVarName', loopVarName);
 		
@@ -1856,9 +1941,11 @@ export class Optimizer extends ASTVisitor {
 
 	/**
 	 * 收集循环中可能被修改的变量
+	 * 
 	 * @param {ASTNode} loopNode - 循环节点
-	 * @returns {Set<{varName: string, scope: Scope}>} - 被修改的变量集合
-	 * @remark - Manually modified for side effect checkers
+	 * @returns {Set<variableModification>} - 被修改的变量集合
+	 * @remarks - Manually modified for side effect checkers
+	 * @remarks - Can't be directly bound to symbols somehow
 	 */
 	collectModifiedVariablesInLoop(loopNode) {
 		const modifiedVars = new Set();
@@ -1874,7 +1961,8 @@ export class Optimizer extends ASTVisitor {
 					if (node.left.type === 'Identifier') {
 						modifiedVars.add({
 							varName: node.left.name,
-							scope: node.scope
+							scope: node.scope,
+							symbol: node.left.symbol
 						});
 					} else {
 						// Unrecognized...
@@ -1888,7 +1976,8 @@ export class Optimizer extends ASTVisitor {
 						if (node.left.type === 'Identifier') {
 							modifiedVars.add({
 								varName: node.left.name,
-								scope: node.scope
+								scope: node.scope,
+								symbol: node.left.symbol
 							});
 						} else {
 							console.log('Internal Error: Unrecognized variable in loop optimizer',node.left);
@@ -1900,7 +1989,8 @@ export class Optimizer extends ASTVisitor {
 						if (node.argument.type === 'Identifier') {
 							modifiedVars.add({
 								varName: node.argument.name,
-								scope: node.scope
+								scope: node.scope,
+								symbol: node.argument.symbol
 							});
 						} else {
 							//console.log('Internal Error: Unrecognized variable in loop optimizer',node.left);
@@ -1913,7 +2003,8 @@ export class Optimizer extends ASTVisitor {
 						if (node.expression.type === 'Identifier') {
 							modifiedVars.add({
 								varName: node.expression.name,
-								scope: node.scope
+								scope: node.scope,
+								symbol: node.expression.symbol
 							});
 						} else {
 							collectFromNode(node.expression);
@@ -2527,7 +2618,7 @@ export class Optimizer extends ASTVisitor {
 	 * 
 	 * @param {SymbolEntry} varSymbol 
 	 * @param {*} value
-	 * @param {boolean} doUpdate 
+	 * @param {boolean} doUpdate null: Record write count only; true: Try no side effect value; false: Label as with side effect
 	 */
 	addWrittenSymbol(varSymbol, value, doUpdate = true) {
 		const isNoSideEffect = val => (val != null && val != undefined);
@@ -2579,6 +2670,7 @@ export class Optimizer extends ASTVisitor {
 				varSymbol.isConstant = true;
 				varSymbol.constantValue = noSideEffectValue;
 			}
+			varSymbol.variableReferrer.modify();
 		}
 		
 	}
@@ -2628,10 +2720,12 @@ export class Optimizer extends ASTVisitor {
 		} else {
 			varName = symbol.name;
 		}
-		// const varState = this.variableUses.get(symbol.scope.getPath()).get(varName);
-		//varState && (varState.reads == 0 && varState.writes <= 1) 
-		//&&
-		return  (!symbol.isVolatile) && (!symbol.isExtern) && (!symbol.isStatic) && (!symbol.isAddressed);
+		if ((!symbol) || (!symbol.scope)) {
+			return false;
+		}
+		const varState = this.variableUses.get(symbol.scope.getPath()).get(varName);
+		const varOk = varState && (varState.reads == 0 && varState.canOptimize);
+		return  (!symbol.isVolatile) && (!symbol.isExtern) && (!symbol.isStatic) && (!symbol.isAddressed) && varOk;
 	}
 
 	/**
@@ -2697,6 +2791,12 @@ export class Optimizer extends ASTVisitor {
 			const result = ASTBuilder.stringLiteral(value);
 			result.dataType = this.typeTable.get('char');
 			return result;
+		} else if (value == null) {
+			// Rarely used
+			console.log("Note: getting null literal");
+			const result = ASTBuilder.nullLiteral();
+			result.dataType = this.typeTable.get('null_t');
+			return result;
 		} else if (typeof value === 'object') {
 			if (value.isBuiltinConstant) {
 				const result = ASTBuilder.identifier(value.name);
@@ -2705,10 +2805,6 @@ export class Optimizer extends ASTVisitor {
 			} else {
 				return null;
 			}
-		} else if (value == null) {
-			const result = ASTBuilder.nullLiteral();
-			result.dataType = this.typeTable.get('null_t');
-			return result;
 		} else {
 			return null;
 		}
@@ -2727,30 +2823,78 @@ export class Optimizer extends ASTVisitor {
 	}
 
 	/**
+	 * @param {IdentifierNode} node
+	 * @returns {boolean}
+	 */
+	isLeftValueIdentifier(node) {
+		if (node.parent) {
+			if (node.parent.type === 'AssignmentExpression' && node.parent.left === node) return true;
+			if (node.parent.type === 'MemberExpression' && node.parent.children[0] === node) return true;
+			if (node.parent.type === 'VariableDeclarator' || node.parent.type === 'Declarator') {
+				if (node !== node.parent.initializer) return true;
+			}
+			if (node.parent.type === 'UnaryExpression' && node.parent.operator === '&') return true;
+		}
+		return false;
+	}
+
+	/**
+	 * 
+	 * @param {ASTNode} node 
+	 */
+	replaceAliasAt(node) {
+		switch (node.type) {
+			case 'Identifier':
+				if (this.isLeftValueIdentifier(node)) break;
+				const symbol = this.currentScope.lookup(node.name);
+				if (symbol && symbol.variableReferrer.parent) {
+					const target = symbol.variableReferrer.getName();
+					console.log(`Replaced identifier for shrunk expression as:`,target,`at:`,node);
+					node.setAttribute('originalName', node.name);
+					// node.setAttribute('performedReplacement', target);
+					node.name = target;
+					// node.setAttribute('candidateRemoval', 2);
+					// symbol.variableReferrer.registerCandidate(node);
+					this.modified = true;				// This creates only candidate removal
+					return true;
+				}
+		}
+		return false;
+	}
+
+	/**
 	 * 
 	 * @param {ASTNode} node 
 	 * @param {Map<string, any>} constants 
+	 * @param {Set<SymbolEntry>} restrictions
 	 * Currently not tracking whether the node self is deleted.
 	 */
-	replaceConstantsAt(node, constants) {
+	replaceConstantsAt(node, constants, restrictions = null) {
 		if (!node) return false;
         // Maybe not numeric?
 		let rightConstValue, modified = false;
         switch (node.type) {
             case 'Identifier':
-				if (node.parent) {
-					if (node.parent.type === 'AssignmentExpression' && node.parent.left === node) break;	// Don't optimize
+				if (this.isLeftValueIdentifier(node)) break;
+				/**
+				 * @type {SymbolEntry?}
+				 */
+				const symbol = node.symbol;
+				if (symbol && (!restrictions.has(symbol) || symbol.isConst)) {
+					const constValue = constants.get(node.name);
+					if (constValue !== undefined) {
+						// 替换为常量值
+						console.log(`Prepare to replaced identifier as:`,constValue,`at:`,node);
+						const replacement = this.getLiteral(constValue);
+						replacement.location = node.location;
+						replacement.dataType = node.dataType;
+						this.replaceNode(node, replacement);
+						modified = true;
+						break;
+					}
 				}
-                const constValue = constants.get(node.name);
-                if (constValue !== undefined) {
-                    // 替换为常量值
-					console.log(`Replaced identifier as:`,constValue,`at:`,node);
-                    const replacement = this.getLiteral(constValue);
-                    replacement.location = node.location;
-					replacement.dataType = node.dataType;
-                    this.replaceNode(node, replacement);
-                    modified = true;
-                }
+                // Still possible to match aliases
+				modified = modified || this.replaceAliasAt(node);
                 break;
                 
             case 'BinaryExpression':
@@ -2883,8 +3027,10 @@ export class Optimizer extends ASTVisitor {
 	/**
 	 * 
 	 * @param {ASTNode} node 
+	 * @param {boolean} [currentOnly=false] 
+	 * @param {Set<variableModification>?} [restriction] 
 	 */
-	replaceConstantAtPresent(node) {
+	replaceConstantAtPresent(node, currentOnly = false, restriction = new Set()) {
 		let constants = new Map();
 		let scope = this.currentScope;
 		while (scope) {
@@ -2894,9 +3040,15 @@ export class Optimizer extends ASTVisitor {
 					constants.set(symb.name, symb.constantValue);
 				}
 			});
+			if (currentOnly) break;
 			scope = scope.parent;
 		}
-		return this.replaceConstantsAt(node, constants);
+		/**
+		 * @type {Set<SymbolEntry?>}
+		 */
+		const restrictive = new Set([...restriction].map(val => val.symbol));
+		this.restrictiveVariables = restrictive;
+		return this.replaceConstantsAt(node, constants, restrictive);
 	}
 
 	/**
@@ -2931,14 +3083,14 @@ export class Optimizer extends ASTVisitor {
 		switch (node.type) {
 			case 'VariableDeclarator':
 			case 'Declarator':
-				if (constants.has(node.name) && this.variableCanBeRemoved(node.name)) {
+				if (this.variableCanBeRemoved(node.name)) {
 					console.log(`[ScopeOp Stage] Remove unused variable declarator:`,node);
 					tryReplacing(node, node.initializer);
 					replaced = true;
 				}
 				break;
 			case 'AssignmentExpression':
-				if (node.left.type === 'Identifier' && constants.has(node.left.name) && this.variableCanBeRemoved(node.left.name)) {
+				if (node.left.type === 'Identifier' && this.variableCanBeRemoved(node.left.name)) {
 					console.log(`[ScopeOp Stage] Remove unused assignment expression:`,node);
 					tryReplacing(node, node.right);
 					replaced = true;
@@ -2953,7 +3105,7 @@ export class Optimizer extends ASTVisitor {
 				break;
 		}
 		if (replaced) return;
-		this.replaceConstantsAt(node, constants);
+		// this.replaceConstantsAt(node, constants);
 		this.further(node, ast => this.traverseAndReplaceConstants(ast, constants));
     }
 
@@ -3123,8 +3275,7 @@ export class Optimizer extends ASTVisitor {
                 return node.value;
             case 'Identifier':
 				// Try evaluating in current environment
-				const scope = this.currentScope.lookupScopeOf(node.name);
-				if (node.name[0] === '@' && allowConstants) {
+				if (node.name[0] === '@' && !dynamicBuiltins.includes(node.name[0]) && allowConstants) {
 					// Regard this as a constant value...
 					return {
 						isBuiltinConstant: true,
@@ -3132,7 +3283,12 @@ export class Optimizer extends ASTVisitor {
 						name: node.name
 					};
 				}
+				const scope = this.currentScope.lookupScopeOf(node.name);
 				if (scope != null) {
+					const symbol = this.currentScope.lookup(node.name);
+					if (this.restrictiveVariables && this.restrictiveVariables.has(symbol)) {
+						return undefined;
+					}
 					const scopePath = scope.getPath();
 					const localConstantRef = this.localConstants.get(scopePath).get(node.name);
 					return localConstantRef ?? this.constants.get(node.name);
@@ -3904,7 +4060,8 @@ export class Optimizer extends ASTVisitor {
         if (!info || !info.node.body) return false;
 		if (!info.canInline) return false;
 		if (this.hasSideEffects(info.node.body, {
-			inFunction: true
+			inFunction: true,
+			atFunction: info.node
 		})) return false;
         
         // 检查递归调用
@@ -4017,6 +4174,7 @@ export class Optimizer extends ASTVisitor {
 	/**
 	 * Re-rooting scope to target as its parent.
 	 * Migrating all information (including VARIABLE USES and LOCAL CONSTANTS)
+	 * Re-rooting scope does not modify symbols in it.
 	 * @param {Scope} scope 
 	 * @param {Scope} target 
 	 * @param {boolean} [deleteOld=false] 
@@ -4112,6 +4270,9 @@ export class Optimizer extends ASTVisitor {
 			funcNode.parameters.forEach((param, index) => {
 				if (index < callNode.arguments.length && param.name) {
 					//const paramSymbol = funcNode.scope.lookup(param.name).duplicate();
+					/**
+					 * @type {TypeInfo}
+					 */
 					const currentType = callNode.arguments[index].dataType;
 					const symbolName = `${funcNode.name}:${param.name}:${this.inlinedScopeId}`;//funcNode.name + ':' + param.name;
 					const ident = ASTBuilder.identifier(symbolName);
@@ -4120,6 +4281,7 @@ export class Optimizer extends ASTVisitor {
 					const decler = ASTBuilder.variableDeclarator(symbolName);
 					decler.setAttribute('inliningAlias', param);
 					decler.initializer = value;
+					// decler.type.setAttribute('qualifiers', currentType.qualifiers);
 					value.parent = decler;
 					// Warning: not a type specifier now!!!
 					const decl = ASTBuilder.variableDeclaration(new TypeSpecifierNode(callNode.arguments[index].dataType), [decler]);
@@ -4145,7 +4307,7 @@ export class Optimizer extends ASTVisitor {
 			});
 			
 			// 替换参数
-			this.replaceParametersInAST(clonedBody, paramMap, funcNode);
+			this.replaceParametersInAST(clonedBody, paramMap, funcNode, ziel);
 			//clonedBody.statements.unshift(...unshifts);
 			target.statements.unshift(...unshifts);
 			return paramMap;
@@ -4173,7 +4335,8 @@ export class Optimizer extends ASTVisitor {
 					targetNode.statements.splice(index, 1);
 					// For returning, create a special symbol
 					returnerName = `${funcNode.name}:@:${this.inlinedScopeId}`;
-					tmpScope.addSymbol(new SymbolEntry(returnerName, callNode.dataType, tmpScope, 'variable', null, callNode.dataType.size ?? 1));
+					const returnerSymbol = new SymbolEntry(returnerName, callNode.dataType, tmpScope, 'variable', null, callNode.dataType.size ?? 1);
+					tmpScope.addSymbol(returnerSymbol);
 					/**
 					 * @todo Create an identifier for returning...
 					 */
@@ -4182,6 +4345,8 @@ export class Optimizer extends ASTVisitor {
 					returnerWrapper.declarators.push(returnerDecl);
 					returnerDecl.parent = returnerWrapper;
 					returnerIdent = ASTBuilder.identifier(returnerName);
+					returnerIdent.symbol = returnerSymbol;
+					returnerIdent.dataType = returnerSymbol.myType();
 					returnerIdent.parent = lvalOfReturn; // To be added somewhere!
 					newCompound.statements.push(returnerWrapper);
 					returnerWrapper.parent = newCompound;
@@ -4535,9 +4700,10 @@ export class Optimizer extends ASTVisitor {
 	 * @param {ASTNode} node 
 	 * @param {Map<string, ASTNode>} paramMap 
 	 * @param {FunctionDeclarationNode} funcNode 
+	 * @param {Scope} symbolMapper
 	 * @returns 
 	 */
-	replaceParametersInAST(node, paramMap, funcNode) {
+	replaceParametersInAST(node, paramMap, funcNode, symbolMapper) {
 		if (!node || !paramMap) return;
 		
 		switch (node.type) {
@@ -4547,6 +4713,7 @@ export class Optimizer extends ASTVisitor {
 					if (replacement) {
 						const clonedReplacement = this.cloneAST(replacement);
 						clonedReplacement.location = node.location;
+						clonedReplacement.symbol = symbolMapper.lookup(replacement.name);
 						this.replaceNode(node, clonedReplacement);
 					}
 				}
@@ -4555,7 +4722,7 @@ export class Optimizer extends ASTVisitor {
 		
 		// 递归处理子节点
 		if (node.children) {
-			node.children.forEach(child => this.replaceParametersInAST(child, paramMap));
+			node.children.forEach(child => this.replaceParametersInAST(child, paramMap, funcNode, symbolMapper));
 		}
 		
 		// 处理特定字段
@@ -4570,11 +4737,11 @@ export class Optimizer extends ASTVisitor {
 			if (Array.isArray(node[field])) {
 				node[field].forEach(item => {
 					if (item && typeof item === 'object') {
-						this.replaceParametersInAST(item, paramMap);
+						this.replaceParametersInAST(item, paramMap, funcNode, symbolMapper);
 					}
 				});
 			} else if (node[field] && typeof node[field] === 'object') {
-				this.replaceParametersInAST(node[field], paramMap);
+				this.replaceParametersInAST(node[field], paramMap, funcNode, symbolMapper);
 			}
 		}
 	}
@@ -5708,6 +5875,14 @@ export class Optimizer extends ASTVisitor {
 		}
 		
 		return modified;
+	}
+
+	/**
+	 * 
+	 * @param {constantInfo} object 
+	 */
+	canHaveConstantEval(object) {
+		return ['number', 'string'].includes(typeof object);
 	}
 
 }

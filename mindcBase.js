@@ -796,21 +796,23 @@ export class ConstantManager {
 	}
 }
 
+// Now exporting them as variables as they might be expanded
 /**
  * 
  * @param {string} s 
  */
 export const __convert = s => s.split(',').map(t => t.replace(/\-/g, '_').trim());
-export const objectList = __convert(
+export var objectList = __convert(
 	'@copper, @lead, @coal, @graphite, @scrap, @sand, @pyratite, @silicon, @spore-pod, @blast-compound, @titanium, @plastanium, @thorium, @phase-fabric, @surge-alloy, @beryllium, @tungsten, @oxide, @carbide'
 );
-export const liquidList = __convert(
+export var liquidList = __convert(
 	'@water, @slag, @oil, @cryofluid, @neoplasm, @gallium, @ozone, @hydrogen, @cyanogen, @nitrogen'
 );
-export const unitList = __convert(
+export var unitList = __convert(
 	'@Aegires, @Alpha, @Anthicus, @Antumbra, @Arkyid, @Atrax, @Avert, @Beta, @Bryde, @Cleroi, @Collaris, @Conquer, @Corvus, @Crawler, @Cyerce, @Dagger, @Disrupt, @Eclipse, @Elude, @Emanate, @Evoke, @Flare, @Fortress, @Gamma, @Guardian, @Horizon, @Incite, @Latum, @Locus, @Mace, @Manifold, @Mega, @Merui, @Minke, @Mono, @Navanax, @Nova, @Obviate, @Oct, @Omura, @Oxynoe, @Poly, @Precept, @Pulsar, @Quad, @Quasar, @Quell, @Reign, @Renale, @Retusa, @Risso, @Scepter, @Sei, @Spiroct, @Stell, @Tecta, @Toxopid, @Vanquish, @Vela, @Zenith'
 ).map(s => s.toLowerCase());
-export const buildingList = __convert(
+// This list is in fact incomplete
+export var buildingList = __convert(
 	[
 		'@core-shard, @core-foundation, @core-nucleus, @core-bastion, @core-acropolis',
 		'@mechanical-drill, @pneumatic-drill, @laser-drill, @blast-drill, @water-extractor, @cultivator, @oil-extractor',
@@ -830,3 +832,5 @@ export const buildingList = __convert(
 		'@oxidis'
 	].join(',')
 );
+
+export var dynamicBuiltins = ['@time', '@tick', '@second', '@minute', '@waveNumber', '@waveTime'];

@@ -4,6 +4,91 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	liquidList, unitList, buildingList
  } from "./mindcBase.js";
 
+export class VariableLinker {
+	/**
+	 * 
+	 * @param {string} variableName 
+	 */
+	constructor(variableName) {
+		/**
+		 * @type {VariableLinker[]}
+		 */
+		this.linked = [];
+		/**
+		 * @type {AttributeClass[]}
+		 * 
+		 * Nodes that prepare to delete something.
+		 */
+		this.prepared = [];
+		/**
+		 * @type {VariableLinker}
+		 */
+		this.parent = null;
+		/**
+		 * @type {string}
+		 */
+		this.name = variableName;
+		this.rejecting = false;
+	}
+
+	/**
+	 * 
+	 * @param {VariableLinker} linker 
+	 */
+	linkTo(linker) {
+		if (linker.rejecting) return;
+		linker.linked.push(this);
+		this.parent = linker;
+	}
+
+	invalidate() {
+		this.parent = null;
+		this.prepared.forEach(obj => void(obj.setAttribute('candidateRemoval', 0)));
+		this.prepared = [];
+	}
+
+	unlink() {
+		if (!this.parent) {
+			return;
+		}
+		const index = this.parent.linked.indexOf(this);
+		if (index != -1) {
+			this.parent.linked.splice(index);
+		}
+		this.invalidate();
+	}
+
+	modify() {
+		this.linked.forEach(obj => void(obj.invalidate()));
+		this.linked = [];
+		this.unlink();
+	}
+
+	/**
+	 * 
+	 * @returns {string}
+	 */
+	getName() {
+		if (!this.parent) {
+			return this.name;
+		}
+		return this.parent.getName();
+	}
+
+	/**
+	 * 
+	 * @param {AttributeClass} candidate 
+	 */
+	registerCandidate(candidate) {
+		if (this.parent) {
+			candidate.setAttribute('candidateRemoval', 2);
+		} else {
+			candidate.setAttribute('candidateRemoval', 0);
+		}
+		this.prepared.push(candidate);
+	}
+}
+
 // 修改SymbolEntry类以存储更详细的类型信息
 /**
  * @member {boolean} accessThroughPointer Indicating whether the variable should be accessed by a memory address (not necessarily be a pointer!)
@@ -34,7 +119,7 @@ export class SymbolEntry {
 		this.readCount = 0; // 读取次数
         this.writeCount = 0; // 写入次数
 		// Unused end
-
+	
         this.memoryLocation = null;
 		this.accessThroughPointer = false;	// In-memory variable, must be accessed through memory blocks
 											// THIS ALSO MEANS THAT: you can and should always dereference it to get the real value
@@ -44,20 +129,21 @@ export class SymbolEntry {
 											// instead of "ACCESS THROUGH POINTER"
 		this.needMemoryAllocation = false;
 
-		this.isAutoDevice = false;
+		this.isAutoDevice = false;	// Must be manually done!
 		this.isVirtualSymbol = false;
 		this.isRecursiveSymbol = false;
 		// (for struct, union, pointer and array)
 
+		// Following of these can be automatic sometimes
         this.isGlobal = false;
 		this.isRegister = false; // 标记是否为register变量
-		this.isStatic = false;
-		this.isExtern = false;
+		this.isStatic = (this.myType() instanceof TypeInfo) ? this.myType().isStatic() : false;
+		this.isExtern = (this.myType() instanceof TypeInfo) ? this.myType().isExtern() : false;
 		// Note: this is also available for functions:
 		// (for functions, once 'true', it can't be inlined !)
         this.isAddressed = false; // 标记是否被取地址
-		this.isConst = false;
-        this.isVolatile = false;
+		this.isConst = (this.myType() instanceof TypeInfo) ? this.myType().isConst() : false;
+        this.isVolatile = (this.myType() instanceof TypeInfo) ? this.myType().isVolatile() : false;
 		// 常量传播相关
         this.isConstant = false;
         this.constantValue = null;
@@ -68,6 +154,9 @@ export class SymbolEntry {
         // 优化标记 [Not really used right away]
         this.canBeEliminated = false;
         this.isDead = false;
+
+		// Optimizer tag used now
+		this.variableReferrer = new VariableLinker(name);
     }
 	
 	// 标记为常量
@@ -85,7 +174,7 @@ export class SymbolEntry {
 
 	/**
 	 * 
-	 * @returns {TypeInfo}
+	 * @returns {TypeInfo?}
 	 */
 	myType() {
 		if (!this.type) return null;
@@ -290,6 +379,18 @@ export class Scope {
 		scope.fullDuplicateIdent = (this.fullDuplicateIdent ?? 0) + 1;
 		return scope;
 	}
+
+	/**
+	 * 
+	 * @param {Scope} scope 
+	 * @returns {boolean} Returns whether the given scope is a parent of current scope.
+	 */
+	isParent(scope) {
+		if (!scope) return false;
+		if (scope === this) return true;
+		if (!this.parent) return false;
+		return this.parent.isParent(scope);
+	}
 }
 
 // 首先，添加一些辅助类
@@ -327,6 +428,10 @@ export class TypeInfo {
 
 	isExtern() {
 		return this.qualifiers.includes('extern');
+	}
+
+	isStatic() {
+		return this.qualifiers.includes('static');
 	}
 
 	isNear() {
