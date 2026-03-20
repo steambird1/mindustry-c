@@ -1386,6 +1386,21 @@ export class Parser {
         this.knownTypeNames.add(typeName);
     }
 
+    /**
+     * 
+     * @param {ASTNode} target 
+     */
+    wrapToCompound(target) {
+        if (target.type === 'CompoundStatement') {
+            return target;
+        } else {
+            let neu = ASTBuilder.compoundStatement();
+            neu.statements.push(target);
+            target.parent = neu;
+            return neu;
+        }
+    }
+
     parseIfStatement() {
         const ifToken = this.expectToken(TokenType.IF);
         if (!ifToken) return null;
@@ -1394,12 +1409,12 @@ export class Parser {
         const test = this.parseExpression();
         this.expectToken(TokenType.RIGHT_PAREN);
 
-        const consequent = this.parseStatement();
+        const consequent = this.wrapToCompound(this.parseStatement());
         let alternate = null;
 
         if (this.matchToken(TokenType.ELSE)) {
             this.consumeToken();
-            alternate = this.parseStatement();
+            alternate = this.wrapToCompound(this.parseStatement());
         }
 
         const ifStmt = ASTBuilder.ifStatement(test, consequent, alternate);
@@ -1418,7 +1433,7 @@ export class Parser {
         const test = this.parseExpression();
         this.expectToken(TokenType.RIGHT_PAREN);
 
-        const body = this.parseStatement();
+        const body = this.wrapToCompound(this.parseStatement());
 
         const whileStmt = ASTBuilder.whileStatement(test, body);
         whileStmt.location = whileToken.location;
@@ -1447,7 +1462,7 @@ export class Parser {
             : this.parseExpressionStatement(false, true);
         this.expectToken(TokenType.RIGHT_PAREN);
 
-        const body = this.parseStatement();
+        const body = this.wrapToCompound(this.parseStatement());
 
         const forStmt = ASTBuilder.forStatement(init, test, update, body);
         forStmt.location = forToken.location;
@@ -2188,7 +2203,7 @@ export class Parser {
 
     isBuiltinFunction(name) {
         const builtins = [
-			'draw', 'print', 'drawflush', 'printflush', 'getlink', 'ceil', 'floor', 'sqrt', 'rand', 'abs', 'memcpy',
+			'draw', 'print', 'drawflush', 'printflush', 'getlink', 'ceil', 'floor', 'sqrt', 'rand', 'abs', 'memcpy', 'pow',
 			'control', 'radar', 'sensor', 'set', 'op', 'lookup', 'ubind', 'ulocate', 'ucontrol', 'uradar', 'min', 'max',
 			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'adiff',
 			'memsp', 'printchar', 'format', ...(this.extraFunctions.map(func => func.name))

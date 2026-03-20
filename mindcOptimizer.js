@@ -49,6 +49,7 @@ export class Optimizer extends ASTVisitor {
 		 *  node: FunctionDeclarationNode?,
 		 *  scope: Scope?,
 		 *  size: number?,
+		 *  writtenVarsUnknown: boolean,
 		 *  writtenVars: SymbolEntry[]
 		 * }} functionInfoEntry
 		 * 
@@ -336,13 +337,13 @@ export class Optimizer extends ASTVisitor {
 					if (info.modifiedVars) {
 						this.replaceConstantAtPresent(node, false, info.modifiedVars);
 					} else {
-						this.replaceAliasAt(node);
+						this.replaceConstantAtPresent(node, true);
 					}
 				} else {
 					this.replaceConstantAtPresent(node);
 				}
 			} else {
-				this.replaceAliasAt(node);
+				this.replaceConstantAtPresent(node, true);
 			}
 		}
 
@@ -628,8 +629,12 @@ export class Optimizer extends ASTVisitor {
         //this.currentFunction = funcName;
 		this.enterFunction(funcName);
         // 记录函数信息
+		/**
+		 * @type {functionInfoEntry}
+		 */
+		let myFunc;
         if (!this.functionInfo.has(funcName)) {
-            this.functionInfo.set(funcName, {
+			myFunc = {
                 calls: 0,
                 hasSideEffects: false,
 				isAddressed: false,
@@ -638,13 +643,16 @@ export class Optimizer extends ASTVisitor {
 				canInline: true,
                 node: funcNode,
                 scope: funcNode.scope,
+				writtenVarsUnknown: true,
 				writtenVars: []
-            });
+            };
+            this.functionInfo.set(funcName, myFunc);
         } else {
-			const myFunc = this.functionInfo.get(funcName);
+			myFunc = this.functionInfo.get(funcName);
 			myFunc.isDefinition = true;
 			myFunc.node = funcNode;
 			myFunc.scope = funcNode.scope;
+			myFunc.writtenVarsUnknown = true;
 			myFunc.writtenVars = [];
 		}
         
@@ -683,6 +691,7 @@ export class Optimizer extends ASTVisitor {
 					this.functionInfo.get(funcName).canInline = true;
 				}
 			}
+			myFunc.writtenVarsUnknown = false;
 		}
 		
 		this.exitFunction();
@@ -882,6 +891,7 @@ export class Optimizer extends ASTVisitor {
 					isAddressed: false,
 					isDefinition: false,
 					canInline: true,
+					writtenVarsUnknown: true,
 					writtenVars: []
 				});	// Other information given as undefined
 				funinfo = this.functionInfo.get(funcName);
@@ -1026,12 +1036,18 @@ export class Optimizer extends ASTVisitor {
 					return;
 				}
 
+				const modifieds = this.collectModifiedVariablesInLoop(node);
+				let weird = false;
+				if (modifieds.has("unrecognized")) {
+					weird = true;
+					modifieds.delete("unrecognized");
+				}
 				// 分析循环体
 				this.analyzeNode(node.body, {
 					...loopInfo,
-					atLoop: node.body.scope ?? node.scope,
-					strangeLoop: node.getAttribute('hasUnknownSideEffects'),
-					modifiedVars: this.collectModifiedVariablesInLoop(node)
+					atLoop: weird ? null : (node.body.scope ?? node.scope),
+					strangeLoop: node.getAttribute('hasUnknownSideEffects') || weird,
+					modifiedVars: modifieds
 				});
 				// 检查循环体是否有副作用
 				
@@ -1332,12 +1348,19 @@ export class Optimizer extends ASTVisitor {
 				node.setAttribute('bodyHasSideEffects', node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
 				
 				// 分析循环体
+				const modifieds = this.collectModifiedVariablesInLoop(node);
+				let weird = false;
+				if (modifieds.has("unrecognized")) {
+					weird = true;
+					modifieds.delete("unrecognized");
+				}
+				// 分析循环体
 				this.analyzeNode(node.body, {
 					...loopInfo,
-					atLoop: node.body.scope ?? node.scope,
-					strangeLoop: node.getAttribute('hasUnknownSideEffects'),
-					modifiedVars: this.collectModifiedVariablesInLoop(node)
-				});// Don't do changes
+					atLoop: weird ? null : (node.body.scope ?? node.scope),
+					strangeLoop: node.getAttribute('hasUnknownSideEffects') || weird,
+					modifiedVars: modifieds
+				});
 				
 				
 				// 记录是否有break/continue
@@ -1895,6 +1918,7 @@ export class Optimizer extends ASTVisitor {
 		
 		// 标记这些变量为不可优化
 		modifiedVars.forEach(varInfo => {
+			if (varInfo === 'unrecognized') return;
 			const varName = varInfo.varName;
 			const varSymbol = varInfo.scope.lookup(varName);
 			const scopePath = ((
@@ -1943,7 +1967,7 @@ export class Optimizer extends ASTVisitor {
 	 * 收集循环中可能被修改的变量
 	 * 
 	 * @param {ASTNode} loopNode - 循环节点
-	 * @returns {Set<variableModification>} - 被修改的变量集合
+	 * @returns {Set<variableModification | "unrecognized">} - 被修改的变量集合
 	 * @remarks - Manually modified for side effect checkers
 	 * @remarks - Can't be directly bound to symbols somehow
 	 */
@@ -1957,16 +1981,19 @@ export class Optimizer extends ASTVisitor {
 			if (!node) return;
 			
 			switch (node.type) {
+				case 'Program':
+					return;
 				case 'AssignmentExpression':
 					if (node.left.type === 'Identifier') {
 						modifiedVars.add({
 							varName: node.left.name,
-							scope: node.scope,
+							scope: (node.left.symbol ? node.left.symbol.scope : null) ?? node.scope,
 							symbol: node.left.symbol
 						});
 					} else {
 						// Unrecognized...
 						console.log('Internal Error: Unrecognized variable in loop optimizer', node.left);
+						modifiedVars.add("unrecognized");
 					}
 					break;
 				
@@ -1976,11 +2003,12 @@ export class Optimizer extends ASTVisitor {
 						if (node.left.type === 'Identifier') {
 							modifiedVars.add({
 								varName: node.left.name,
-								scope: node.scope,
+								scope: (node.left.symbol ? node.left.symbol.scope : null) ?? node.scope,
 								symbol: node.left.symbol
 							});
 						} else {
 							console.log('Internal Error: Unrecognized variable in loop optimizer',node.left);
+							modifiedVars.add("unrecognized");
 						}
 					}
 					break;
@@ -1989,7 +2017,7 @@ export class Optimizer extends ASTVisitor {
 						if (node.argument.type === 'Identifier') {
 							modifiedVars.add({
 								varName: node.argument.name,
-								scope: node.scope,
+								scope: (node.argument.symbol ? node.argument.symbol.scope : null) ?? node.scope,
 								symbol: node.argument.symbol
 							});
 						} else {
@@ -2003,7 +2031,7 @@ export class Optimizer extends ASTVisitor {
 						if (node.expression.type === 'Identifier') {
 							modifiedVars.add({
 								varName: node.expression.name,
-								scope: node.scope,
+								scope: (node.expression.symbol ? node.expression.symbol.scope : null) ?? node.scope,
 								symbol: node.expression.symbol
 							});
 						} else {
@@ -2025,9 +2053,18 @@ export class Optimizer extends ASTVisitor {
 					const calleeInfo = this.functionInfo.get(callee);
 					if (this.hasSideEffects(node)) {
 						// 标记循环有副作用
-						if (calleeInfo) {
+						if (calleeInfo && !calleeInfo.writtenVarsUnknown) {
 							[...new Set(calleeInfo.writtenVars ?? [])]
-								.forEach(symb => this.addWrittenSymbol(symb));
+								.forEach(symb => {
+									this.addWrittenSymbol(symb);			// I don't know whether this is correct
+									modifiedVars.add({
+										varName: symb.name,
+										scope: symb.scope,
+										symbol: symb
+									});
+								});
+						} else if (calleeInfo) {
+							collectFromNode(calleeInfo.node);
 						} else {
 							loopNode.setAttribute('hasUnknownSideEffects', true);
 						}
@@ -2279,6 +2316,9 @@ export class Optimizer extends ASTVisitor {
 		// 检查所有修改的变量在循环结束后是否有确定的常量值
 		const varFinalValues = new Map();
 		for (const varInfo of modifiedVars) {
+			if (varInfo === 'unrecognized') {
+				throw "Unexpected 'unrecognized'!";
+			}
 			const varName = varInfo.varName;
 
 			const varSymbol = this.currentScope.lookup(varName);
@@ -2422,6 +2462,9 @@ export class Optimizer extends ASTVisitor {
 		if (firstSideEffect > 0) {
 			
 			modifiedVars.forEach(varInfo => {
+				if (varInfo === 'unrecognized') {
+					throw "Unexpected 'unrecognized' when partially unrolling loop!";
+				}
 				const varName = varInfo.varName;
 				const scopePath = (varInfo.scope ?? this.currentScope).lookupScopeOf(varName).getPath();
 				const localConstants = this.localConstants.get(scopePath);
@@ -2866,7 +2909,7 @@ export class Optimizer extends ASTVisitor {
 	 * 
 	 * @param {ASTNode} node 
 	 * @param {Map<string, any>} constants 
-	 * @param {Set<SymbolEntry>} restrictions
+	 * @param {Set<SymbolEntry> | "strict"} restrictions
 	 * Currently not tracking whether the node self is deleted.
 	 */
 	replaceConstantsAt(node, constants, restrictions = null) {
@@ -2880,7 +2923,8 @@ export class Optimizer extends ASTVisitor {
 				 * @type {SymbolEntry?}
 				 */
 				const symbol = node.symbol;
-				if (symbol && (!restrictions.has(symbol) || symbol.isConst)) {
+				if (symbol && ((!( restrictions && (restrictions === 'strict' || restrictions.has(symbol)) ))
+						 || symbol.isConst)) {
 					const constValue = constants.get(node.name);
 					if (constValue !== undefined) {
 						// 替换为常量值
@@ -3040,15 +3084,18 @@ export class Optimizer extends ASTVisitor {
 					constants.set(symb.name, symb.constantValue);
 				}
 			});
-			if (currentOnly) break;
+			// if (currentOnly) break;
 			scope = scope.parent;
 		}
 		/**
 		 * @type {Set<SymbolEntry?>}
 		 */
 		const restrictive = new Set([...restriction].map(val => val.symbol));
-		this.restrictiveVariables = restrictive;
-		return this.replaceConstantsAt(node, constants, restrictive);
+		/**
+		 * @type {Set<SymbolEntry?> | 'strict' | null}
+		 */
+		this.restrictiveVariables = currentOnly ? 'strict' : restrictive;
+		return this.replaceConstantsAt(node, constants, this.restrictiveVariables);
 	}
 
 	/**
@@ -3147,6 +3194,7 @@ export class Optimizer extends ASTVisitor {
                     node: funcNode,
                     scope: symbol.scope,
                     size: this.estimateFunctionSize(funcNode),
+					writtenVarsUnknown: true,
 					writtenVars: []
                 });
             }
@@ -3286,7 +3334,9 @@ export class Optimizer extends ASTVisitor {
 				const scope = this.currentScope.lookupScopeOf(node.name);
 				if (scope != null) {
 					const symbol = this.currentScope.lookup(node.name);
-					if (this.restrictiveVariables && this.restrictiveVariables.has(symbol)) {
+					if (this.restrictiveVariables && 
+						((this.restrictiveVariables === 'strict' && !symbol.isConst) 
+						|| (this.restrictiveVariables !== 'strict' && this.restrictiveVariables.has(symbol)))) {
 						return undefined;
 					}
 					const scopePath = scope.getPath();
