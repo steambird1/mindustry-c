@@ -44,7 +44,7 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
 
 - Most of C89 features
   - Yes, you'll have structs, pointers, unions, and `typedef`!
-  - But you won't have `#pragma` (**`#include` has been added**)
+  - But you won't have `#elif` and VA_ARGS macro (**`#include` and other preprocessor instructions has been added**)
   - Also, support for function pointers might be limited
 
 - Some C/C++ features:
@@ -74,17 +74,18 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
 
 ## Notice
 
-Following functions **rely on** memory allocation:
+1. Following functions **rely on** memory allocation:
 
 - Any `volatile` variable
 - Any variable that has address (`&var`)
-- Any `struct` or `union`
 - Any array (If you don't want to use memory but still want arrays, refer to *pseudo list's* documents to look for possible alternatives.)
 - Any recursive function
 
-If functions aren't called recursively, they does not take up memory space.
+2. If functions aren't called recursively, they does not take up memory space.
 
-A pointer takes up 2 units of spaces, respectively storing the memory cell and address of the element it points to.
+3. A pointer takes up 2 units of spaces, respectively storing the memory cell and address of the element it points to.
+
+4. A union type takes up **the same** space and time (when copying) if stored **in register**.
 
 Using heap memory might be costly. Avoid declaring memory-demanding variables (listed above) in non-main functions (place them in global scope instead). It is also **strongly** recommended to prevent using recursive functions. They are supported but unstable and costly as the compiler is unsure about every variable's state.
 
@@ -96,6 +97,7 @@ Arrays might also take up additional spaces to store its previous/next cell of s
 
 - `device` type is used to describe buildings/units in Mindustry while `content_t` is used to describe objects.
 - Use `auto device conveyor1;` to register a connected device (**`auto` is essential**).
+- Use `extern` to declare that this variable should be declared.
 - Use `(volatile int*)` (or similar) to force to transmit registry variables to some functions (for builtin calls, especially `ulocate`).
 - Function pointers must have a `typedef` to declare its type before being used.
 
