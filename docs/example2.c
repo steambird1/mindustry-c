@@ -68,7 +68,7 @@ void main() {
     }
     const int maxCapacity = 30;
     const float maxTimeout = 40 * 1000;
-    if (sensor(coreDevice, @copper) < sensor(coreDevice, @lead)) {
+    if ((long)sensor(coreDevice, @copper) < (long)sensor(coreDevice, @lead)) {
         mining(@copper, maxCapacity, maxTimeout);
     } else {
         mining(@lead, maxCapacity, maxTimeout);

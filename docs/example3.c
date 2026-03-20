@@ -22,7 +22,7 @@ void main() {
     int i;
     bool done = false;
     for (i = 0; i < osize; i++) {
-        if (proc(vault1, unloader1, lookup("item", objs[i]), thre[i])) {
+        if (proc(vault1, unloader1, objs[i], thre[i])) {
             done = true;
             break;
         }
