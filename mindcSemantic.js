@@ -756,7 +756,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'sqrt', returnType: 'float', parameters: ['float']},
 			{ name: 'pow', returnType: 'float', parameters: ['float', 'float']},
 			{ name: 'abs', returnType: 'float', parameters: ['float']},
-			{ name: 'rand', returnType: 'float', parameters: []},
+			{ name: 'rand', returnType: 'float', parameters: ['float']},
 			{ name: 'memcpy', returnType: 'void', parameters: ['void*', 'void*', 'unsigned']},
 			{ name: 'memsp', returnType: 'void*', parameters: ['device', 'int']},
 			...(this.extraConfig.getAttribute('extraFunctions') ?? [])
@@ -2189,7 +2189,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 	}
 
     // 修改类型兼容性检查以支持指针和结构体
-    isTypeCompatible(targetTypeRaw, sourceTypeRaw) {
+	/**
+	 * 
+	 * @param {TypeInfo | string} targetTypeRaw 
+	 * @param {TypeInfo | string} sourceTypeRaw 
+	 * @param {boolean} [strictCompatible=false] Whether allowing no cast
+	 * @returns 
+	 */
+    isTypeCompatible(targetTypeRaw, sourceTypeRaw, strictCompatible = false) {
 		
 		/**
 		 * @type {TypeInfo}
@@ -2225,45 +2232,60 @@ export class SemanticAnalyzer extends ASTVisitor {
         if (this.typeToString(targetType) === this.typeToString(sourceType)) {
             return true;
         }
-		if (specialContents.includes(targetType.name) && specialContents.includes(sourceType.name)) {
-			return true;
-		}
-		// Clear names for checker
-		if (targetType.kind === 'function' && sourceType.kind === 'function') {
-			const duplicateTarget = targetType.duplicate(), duplicateSource = sourceType.duplicate();
-			duplicateTarget.name = "";
-			duplicateSource.name = "";
-			return this.typeToString(duplicateTarget) === this.typeToString(duplicateSource);
+		if (!strictCompatible) {
+			if (specialContents.includes(targetType.name) && specialContents.includes(sourceType.name)) {
+				return true;
+			}
+			// Clear names for checker
+			if (targetType.kind === 'function' && sourceType.kind === 'function') {
+				const duplicateTarget = targetType.duplicate(), duplicateSource = sourceType.duplicate();
+				duplicateTarget.name = "";
+				duplicateSource.name = "";
+				return this.typeToString(duplicateTarget) === this.typeToString(duplicateSource);
+			}
 		}
         
         // void指针可以接受任何指针类型
         if (targetType.kind === 'pointer' && sourceType.kind === 'pointer') {
-            if (targetType.pointerTo && targetType.pointerTo.name === 'void') {
-                return true;
-            }
-            if (sourceType.pointerTo && sourceType.pointerTo.name === 'void') {
-                return true;
-            }
+            if (!strictCompatible) {
+				if (targetType.pointerTo && targetType.pointerTo.name === 'void') {
+					return true;
+				}
+				if (sourceType.pointerTo && sourceType.pointerTo.name === 'void') {
+					return true;
+				}
+			}
             // 指针类型兼容性检查
             return this.isTypeCompatible(targetType.pointerTo, sourceType.pointerTo);
         }
         
-        // 数组到指针的转换
-        if (targetType.kind === 'pointer' && sourceType.kind === 'array') {
-            return this.isTypeCompatible(targetType.pointerTo, sourceType.pointerTo);
-        }
+        if (!strictCompatible) {
+			// 数组到指针的转换
+			if (targetType.kind === 'pointer' && sourceType.kind === 'array') {
+				return this.isTypeCompatible(targetType.pointerTo, sourceType.pointerTo);
+			}
+			// 数值类型之间的兼容性
+			const numericTypes = ['int', 'short', 'long', 'float', 'double', 'signed', 'unsigned', 'bool'];
+			if (numericTypes.includes(targetType.name) && numericTypes.includes(sourceType.name)) {
+				return true;
+			}
+		} else {
+			const numericGroup = ['int', 'long', 'short', 'signed', 'unsigned'], decimalGroup = ['float', 'double'];
+			if (numericGroup.includes(targetType.name) && numericGroup.includes(sourceType.name)) {
+				return true;
+			}
+			if (decimalGroup.includes(targetType.name) && decimalGroup.includes(sourceType.name)) {
+				return true;
+			}
+		}
         
-        // 数值类型之间的兼容性
-        const numericTypes = ['int', 'char', 'short', 'long', 'float', 'double', 'signed', 'unsigned', 'bool'];
-        if (numericTypes.includes(targetType.name) && numericTypes.includes(sourceType.name)) {
-            return true;
-        }
-
 		// TODO: Let's regard this as a feature...
 		// null_t can be assigned to everything
-        if (sourceType.name === 'null_t') {
-            return true;
-        }
+		if (!strictCompatible) {
+			if (sourceType.name === 'null_t') {
+				return true;
+			}
+		}
         
         // 结构体/联合体类型兼容性
         if (targetType.kind === 'struct' || targetType.kind === 'union') {
@@ -2274,6 +2296,16 @@ export class SemanticAnalyzer extends ASTVisitor {
         
         return false;
     }
+
+	/**
+	 * 
+	 * @param {TypeInfo | string} targetType 
+	 * @param {(TypeInfo | string)[]} sourceTypes 
+	 * @param {boolean} [strictCompatible=false] 
+	 */
+	isTypeCompatibleForAny(targetType, sourceTypes, strictCompatible = false) {
+		return sourceTypes.some(type => this.isTypeCompatible(targetType, type, strictCompatible));
+	}
 
 	// ! Has manual content !
     isTypeCompatibleForOperator(operator, leftTypeRaw, rightTypeRaw) {

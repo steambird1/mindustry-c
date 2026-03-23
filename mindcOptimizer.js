@@ -2805,7 +2805,8 @@ export class Optimizer extends ASTVisitor {
                 if (astNode && astNode.parent) {
                     this.removeNodeFromParent(astNode);
                     this.modified = true;
-                    this.warnings.push(`Removed unused variable '${symbol.name}' in scope ${scope.getPath()}`);
+					if (this.extraConfig.getAttribute('warningAll'))
+                    	this.warnings.push(`Removed unused variable '${symbol.name}' in scope ${scope.getPath()}`);
                 }
             }
         });
@@ -3258,7 +3259,10 @@ export class Optimizer extends ASTVisitor {
 						// 从AST中删除函数定义
 						this.removeNodeFromParent(funcNode);
 						this.modified = true;
-						this.warnings.push(`Removed unused function '${funcName}'`);
+						if (this.extraConfig.getAttribute('warningAll')) {
+							this.warnings.push(`Removed unused function '${funcName}'`);
+						}
+						
 					}
 				}
                 
@@ -4956,7 +4960,7 @@ export class Optimizer extends ASTVisitor {
 				
 				if (!isTypeUsed && typeDef.type !== 'TypedefDeclaration') {
 					this.modified = true;
-					this.warnings.push(`Removed unused type definition '${typeName}'`);
+					// this.warnings.push(`Removed unused type definition '${typeName}'`);
 					return false;
 				}
 				
@@ -4975,7 +4979,8 @@ export class Optimizer extends ASTVisitor {
 				if (!func.body && func.name !== 'main') {
 					// 函数声明（不是定义），可以删除
 					this.modified = true;
-					this.warnings.push(`Removed unused function declaration '${func.name}'`);
+					if (this.extraConfig.getAttribute('warningAll'))
+						this.warnings.push(`Removed unused function declaration '${func.name}'`);
 					return false;
 				}
 				

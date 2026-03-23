@@ -1135,6 +1135,8 @@ export class CodeGenerator extends ASTVisitor {
 						evaluation = this.implicitToContentRaw(evaluation, referrer(node.initializer.dataType.name));
 					} else if (special.includes(symbol.myType().name) && !this.semantic.isSameType(symbol.type.type, node.initializer.dataType)) {
 						evaluation = this.implicitContentToNumericRaw(evaluation);
+					} else if (this.semantic.isTypeCompatible(symbol.myType(), 'int', true) && this.semantic.isTypeCompatible(node.initializer.dataType, 'float', true)) {
+						evaluation = this.implicitFloorRaw(evaluation);
 					}
 				}
 				
@@ -1301,6 +1303,20 @@ export class CodeGenerator extends ASTVisitor {
 
 	/**
 	 * 
+	 * @param {Instruction} inst 
+	 */
+	implicitFloorRaw(inst) {
+		const result = inst;
+		const temporary = this.getTempSymbol(this.semantic.getTypeInfo('int'));
+		result.concat_returns(this.operates(this.operatesWith(
+			InstructionBuilder.op('floor', '{op}', '{opw}'),
+			result
+		), temporary));
+		return result;
+	}
+
+	/**
+	 * 
 	 * @param {ASTNode} node 
 	 * @returns {Instruction} Return something with implicit conversion to int
 	 */
@@ -1323,13 +1339,7 @@ export class CodeGenerator extends ASTVisitor {
 					return result;
 					break;
 				case 'float': case 'double':
-					result = this.visitAndRead(node);
-					temporary = this.getTempSymbol(this.semantic.getTypeInfo('int'));
-					result.concat_returns(this.operates(this.operatesWith(
-						InstructionBuilder.op('floor', '{op}', '{opw}'),
-						result
-					), temporary));
-					return result;
+					return this.implicitFloorRaw(this.visitAndRead(node));
 					break;
 				case 'content_t':
 					return this.implicitContentToNumericRaw(this.visitAndRead(node));
@@ -1585,7 +1595,7 @@ export class CodeGenerator extends ASTVisitor {
 				}
 				// Still, transmission is necessary
 				//transmitToSymbol();
-			} else if (node.expression && node.expression.dataType) {
+			} else if (node.expression && node.expression.dataType && !this.semantic.isSameType(node.dataType, node.expression.dataType)) {
 				if (node.expression.dataType.kind === 'pointer' && node.dataType.name === 'int') {
 					casting = this.visitAndRead(node.expression);
 					const receiver = this.getTempVariable();
@@ -1594,22 +1604,23 @@ export class CodeGenerator extends ASTVisitor {
 					casting.concat(InstructionBuilder.set(receiver, '__builtin_return'));
 					casting.instructionReturn = receiver;
 					transmitToSymbol();
-				} else if (node.expression.dataType.name === 'int' && node.dataType.kind === 'pointer') {
+				} else if (this.semantic.isSameType(node.expression.dataType, this.semantic.getTypeInfo('int')) && node.dataType.kind === 'pointer') {
 					casting = this.visitAndRead(node.expression);
 					const receiver = this.getTempVariable();
 					const result = this.memory.outputPointerForwardCall(casting.instructionReturn, receiver, this.functionManagement, true);
 					casting.concat(result);
 					casting.instructionReturn = receiver;
 					transmitToSymbol();
-				} else if (node.expression.dataType.name === 'bool' && node.dataType.name !== 'bool') {
+				} else if (['float', 'double'].includes(node.expression.dataType.name)) {
 					casting = this.implicitToNumeric(node.expression);
-				} else if (node.dataType.name === 'bool' && node.expression.dataType.name !== 'bool') {
+				} else if (this.semantic.isSameType(node.dataType, this.semantic.getTypeInfo('bool'))) {
 					casting = this.implicitToBoolean(node.expression);
 				} else if (
-					['item_t', 'liquid_t', 'unit_t', 'block_t', 'content_t'].includes(node.expression.dataType.name)
-					 && ['item_t', 'liquid_t', 'unit_t', 'block_t', 'int'].includes(node.dataType.name)) {
+					this.semantic.isTypeCompatibleForAny(node.expression.dataType, ['item_t', 'liquid_t', 'unit_t', 'block_t', 'content_t'], true) //['item_t', 'liquid_t', 'unit_t', 'block_t', 'content_t'].includes(node.expression.dataType.name)
+					 && this.semantic.isTypeCompatibleForAny(node.dataType, ['item_t', 'liquid_t', 'unit_t', 'block_t', 'int'], true)) {
 					casting = this.implicitToNumeric(node.expression);
-				} else if (['item_t', 'liquid_t', 'unit_t', 'block_t', 'int'].includes(node.expression.dataType.name) && node.dataType.name === 'content_t') {
+				} else if (['item_t', 'liquid_t', 'unit_t', 'block_t', 'int'].includes(node.expression.dataType.name) 
+					&& this.semantic.isSameType(this.semantic.getTypeInfo('content_t'), node.dataType)) {
 					const referrer = typeName => typeName.slice(0, typeName.length - 2);
 					casting = this.implicitToContent(node.expression, referrer(node.expression.dataType.name));
 				}
@@ -1675,11 +1686,12 @@ export class CodeGenerator extends ASTVisitor {
 						structData.instructionReturn));
 				}
 				
-			} else if (node.left.dataType && node.right.dataType) {
+			} else if (node.left.dataType && node.right.dataType && !this.semantic.isSameType(node.left.dataType, node.right.dataType)) {
 				if (special.includes(node.right.dataType.name) && node.left.dataType.name === 'content_t') {
 					value = this.implicitToContent(node.right, referrer(node.right.dataType.name));
-				} else if (special.includes(node.left.dataType.name) 
-					&& !this.semantic.isSameType(node.left.dataType, node.right.dataType)) {
+				} else if (special.includes(node.left.dataType.name)) {
+					value = this.implicitToNumeric(node.right);
+				} else if (this.semantic.isTypeCompatibleForAny(node.right.dataType, ['float', 'double'])) {
 					value = this.implicitToNumeric(node.right);
 				}
 			}
