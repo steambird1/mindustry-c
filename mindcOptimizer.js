@@ -328,13 +328,14 @@ export class Optimizer extends ASTVisitor {
 		
 		// Make replacements before analysis
 		const assessment = this.shouldRunEvaluation(node, info);
+		// !!! TODO: Bugs here !!!
 		this.restrictiveVariables = null;
 		if (!(info && (info.optimizingLoop || info.strangeLoop))) {
 			if (assessment) {
 				this.replaceConstantAtPresent(node);
 			} else if (assessment === null) {
 				if (info.firstLoopRun) {
-					if (info.modifiedVars) {
+					if (info.modifiedVars && !info.modifiedVars.has("unrecognized")) {
 						this.replaceConstantAtPresent(node, false, info.modifiedVars);
 					} else {
 						this.replaceConstantAtPresent(node, true);
@@ -952,8 +953,10 @@ export class Optimizer extends ASTVisitor {
 			}
 		} else {
 			// 分析then分支
+			const hasNoCondit = conditionValue == null || conditionValue == undefined;
 			const ifInfo = {
-				isUnsure: conditionValue == null || conditionValue == undefined,
+				isUnsure: (hasNoCondit) && !(info && info.firstLoopRun),
+				hasNoCondit: hasNoCondit,
 				parentInfo: info
 			};
 			if (node.consequent) {
@@ -1036,7 +1039,7 @@ export class Optimizer extends ASTVisitor {
 					return;
 				}
 
-				const modifieds = this.collectModifiedVariablesInLoop(node);
+				const modifieds = (info ? info.modifiedVars : null) ?? this.collectModifiedVariablesInLoop(node);
 				let weird = false;
 				if (modifieds.has("unrecognized")) {
 					weird = true;
@@ -1348,7 +1351,7 @@ export class Optimizer extends ASTVisitor {
 				node.setAttribute('bodyHasSideEffects', node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
 				
 				// 分析循环体
-				const modifieds = this.collectModifiedVariablesInLoop(node);
+				const modifieds = (info ? info.modifiedVars : null) ?? this.collectModifiedVariablesInLoop(node);
 				let weird = false;
 				if (modifieds.has("unrecognized")) {
 					weird = true;
@@ -2321,8 +2324,8 @@ export class Optimizer extends ASTVisitor {
 			}
 			const varName = varInfo.varName;
 
-			const varSymbol = this.currentScope.lookup(varName);
-			const scopePath = this.currentScope.lookupScopeOf(varName).getPath();
+			const varSymbol = varInfo.symbol ?? this.currentScope.lookup(varName);
+			const scopePath = (varInfo.scope ?? this.currentScope.lookupScopeOf(varName)).getPath();
 			const localConstants = this.localConstants.get(scopePath);
 			const variableUses = this.variableUses.get(scopePath);
 			const finalValue = localConstants.get(varName);
