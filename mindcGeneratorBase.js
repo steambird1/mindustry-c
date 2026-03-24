@@ -128,7 +128,7 @@ export class Instruction extends AttributeClass {
 		this.setAttribute('isSymbolic', true);
 		this.setAttribute('relevantSymbol', symbol);
 		this.setAttribute('isNearPointer', symbol.isNearPointer);
-		this.setAttribute('isRegStruct', symbol.myType().isRegStruct());
+		this.setAttribute('isRegStruct', symbol.myType().isTypeInfo && symbol.myType().isRegStruct());
 		this.setAttribute('isStructRet', ['struct', 'union'].includes(symbol.myType().kind));
 		return this;
 	}

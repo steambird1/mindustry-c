@@ -833,4 +833,4 @@ export var buildingList = __convert(
 	].join(',')
 );
 
-export var dynamicBuiltins = ['@time', '@tick', '@second', '@minute', '@waveNumber', '@waveTime'];
+export var dynamicBuiltins = ['@this', '@thisx', '@thisy', '@links', '@ipt', '@pi', '@e', '@degToRad', '@radToDeg', '@time', '@tick', '@second', '@minute', '@waveNumber', '@waveTime', '@mapw', '@maph', '@server', '@client', '@clientLocale', '@clientName', '@clientTeam', '@clientUnit', '@clientMobile', '@blockCount', '@unitCount', '@itemCount', '@liquidCount'];

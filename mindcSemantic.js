@@ -416,6 +416,7 @@ export class TypeInfo {
 		// Probably we consider 'near' and 'far' as well
 		this.functionTo = null;	// Pointing to what function for function type
 		this.memberReference = null;
+		this.isTypeInfo = true;
     }
     
     isConst() {
@@ -543,6 +544,37 @@ export class SemanticAnalyzer extends ASTVisitor {
 		// 初始化内建类型
         this.initializeBuiltinTypes();
         this.initializeBuiltinFunctions();
+
+		this.specialTypes = {
+			'@this': this.typeTable.get('device'),
+			'@thisx': this.typeTable.get('int'),
+			'@thisy': this.typeTable.get('int'),
+			'@links': this.typeTable.get('int'),
+			'@ipt': this.typeTable.get('int'),
+			'@pi': this.typeTable.get('double'),
+			'@e': this.typeTable.get('double'),
+			'@degToRad': this.typeTable.get('double'),
+			'@radToDeg': this.typeTable.get('double'),
+			'@time': this.typeTable.get('double'),
+			'@tick': this.typeTable.get('double'),
+			'@second': this.typeTable.get('double'),
+			'@minute': this.typeTable.get('double'),
+			'@waveNumber': this.typeTable.get('int'),
+			'@waveTime': this.typeTable.get('double'),
+			'@mapw': this.typeTable.get('int'),
+			'@maph': this.typeTable.get('int'),
+			'@server': this.typeTable.get('bool'),
+			'@client': this.typeTable.get('bool'),
+			'@clientLocale': this.typeTable.get('char'),
+			'@clientName': this.typeTable.get('char'),
+			'@clientTeam': this.typeTable.get('char'),
+			'@clientUnit': this.typeTable.get('int'),
+			'@clientMobile': this.typeTable.get('bool'),
+			'@blockCount': this.typeTable.get('int'),
+			'@unitCount': this.typeTable.get('int'),
+			'@itemCount': this.typeTable.get('int'),
+			'@liquidCount': this.typeTable.get('int'),
+		};
 		
 		// 建立AST节点和作用域的关联
         this.linkScopesToAST(ast);
@@ -1408,10 +1440,14 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
     visitIdentifier(node) {
-
+		const specialTypes = this.specialTypes;
 		if (node.name.length && node.name[0] === '@') {
 			if (node.name === '@counter') {
 				this.addWarning(`Deprecated to use @counter inside program`, node.getAttribute('location'));
+			}
+			if (specialTypes[node.name]) {
+				node.dataType = specialTypes[node.name];
+				return;
 			}
 			/*
 			if (objectList.includes(node.name)) {
@@ -2270,7 +2306,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 				return true;
 			}
 		} else {
-			const numericGroup = ['int', 'long', 'short', 'signed', 'unsigned'], decimalGroup = ['float', 'double'];
+			const numericGroup = ['int', 'long', 'short', 'signed', 'unsigned', 'bool'], decimalGroup = ['float', 'double'];
 			if (numericGroup.includes(targetType.name) && numericGroup.includes(sourceType.name)) {
 				return true;
 			}

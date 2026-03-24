@@ -2766,7 +2766,7 @@ export class Optimizer extends ASTVisitor {
 		} else {
 			varName = symbol.name;
 		}
-		if ((!symbol) || (!symbol.scope)) {
+		if ((!symbol) || (!symbol.scope) || (symbol.myType().kind === 'function')) {
 			return false;
 		}
 		const varState = this.variableUses.get(symbol.scope.getPath()).get(varName);
@@ -2865,7 +2865,7 @@ export class Optimizer extends ASTVisitor {
 	isLiteralNode(node) {
 		const literalTypes = ['NumericLiteral', 'StringLiteral', 'NullLiteral'];
 		if (literalTypes.includes(node.type)) return true;
-		if (node.type === 'Identifier' && node.name[0] === '@') return true;
+		if (node.type === 'Identifier' && node.name[0] === '@' && !this.semantic.specialTypes[node.name]) return true;
 		return false;
 	}
 
@@ -3043,7 +3043,8 @@ export class Optimizer extends ASTVisitor {
 			case 'Declarator':
 				if (node.initializer) {
 					rightConstValue = this.evaluateConstantExpression(node.initializer);
-					if (!this.isLiteralNode(node.initializer) && rightConstValue != null) {
+					if (!this.isLiteralNode(node.initializer) && rightConstValue != null
+					&& !(typeof rightConstValue === 'object' && rightConstValue.isBuiltinConstant && rightConstValue.category === 'unknown')) {
 						// This is a constant, add it into constant set
 						console.log(`Optimzing assignment expression right`,node.initializer);
 						this.replaceNode(node.initializer, this.getLiteral(rightConstValue));
