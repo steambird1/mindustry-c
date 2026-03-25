@@ -783,8 +783,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'adiff', returnType: 'float', parameters: ['float', 'float'] },
 			{ name: 'min', returnType: 'float', parameters: ['float', 'float'] },
 			{ name: 'max', returnType: 'float', parameters: ['float', 'float'] },
-			{ name: 'ceil', returnType: 'float', parameters: ['float']},
-			{ name: 'floor', returnType: 'float', parameters: ['float']},
+			{ name: 'ceil', returnType: 'float', parameters: ['long']},
+			{ name: 'floor', returnType: 'float', parameters: ['long']},
 			{ name: 'sqrt', returnType: 'float', parameters: ['float']},
 			{ name: 'pow', returnType: 'float', parameters: ['float', 'float']},
 			{ name: 'abs', returnType: 'float', parameters: ['float']},
@@ -1219,6 +1219,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 		const storageClass = node.type.storageClass; // auto, register, static, extern
         
         // 获取基础类型信息
+		
         let baseType = this.getTypeInfo(baseTypeName);
         if (!baseType) {
             this.addError(`Unknown type '${baseTypeName}'`, node.type.location);
@@ -1227,7 +1228,8 @@ export class SemanticAnalyzer extends ASTVisitor {
         
         // 创建带有限定符的类型
         const varType = new TypeInfo(baseType.name, baseType.kind, baseType.size, [...baseType.members]);
-        varType.qualifiers = [... new Set([...baseType.qualifiers, ...qualifiers])];
+        varType.pointerTo = baseType.pointerTo;
+		varType.qualifiers = [... new Set([...baseType.qualifiers, ...qualifiers])];
 		
 		const warningTypes = ['device', 'content_t'];
 		const warningStorages = ['volatile'];

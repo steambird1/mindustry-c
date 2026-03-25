@@ -369,20 +369,20 @@ export class CodeGenerator extends ASTVisitor {
 				if (symbol.memoryLocation) {
 					return new Instruction([
 						this.memory.outputStorageOf(symbol.memoryLocation, hasTemplate ? `{${hasTemplate}_block_entry}` : `${data}_block`),
-						this.memory.outputStorageOf(symbol.memoryLocation.duplicate().forwarding(1), hasTemplate ? `{${hasTemplate}_pos_entry}` :`${data}_pos`)
+						this.memory.outputStorageOf(symbol.memoryLocation.duplicate().forwarding(1), hasTemplate ? `{${hasTemplate}_ptr_entry}` :`${data}_pos`)
 					]);
 				} else {
 					return new Instruction([
-						this.memory.outputPointerStorageOf(`${symbol.getAssemblySymbol()}.__pointer`, `${data}_block`),
+						this.memory.outputPointerStorageOf(`${symbol.getAssemblySymbol()}.__pointer`, hasTemplate ? `{${hasTemplate}_block_entry}` : `${data}_block`),
 						this.memory.outputSymbolForwardCall(1, symbol, this.functionManagement,
 							false, false),
-						this.memory.outputPointerStorageOf('__ptr', `${data}_pos`)
+						this.memory.outputPointerStorageOf('__ptr', hasTemplate ? `{${hasTemplate}_ptr_entry}` : `${data}_pos`)
 					]);
 				}
 			} else {
 				return new Instruction([
 					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_block`, hasTemplate ? `{${hasTemplate}_block_entry}` : `${data}_block`),
-					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_pos`, hasTemplate ? `{${hasTemplate}_pos_entry}` : `${data}_pos`)
+					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_pos`, hasTemplate ? `{${hasTemplate}_ptr_entry}` : `${data}_pos`)
 				]);
 			}
 		}
@@ -496,9 +496,10 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {Instruction} inst 
 	 * @param {boolean} [isPointerType=false] Whether the instruction returns a pointer type.
 	 * @returns {Instruction}
-	 * @deprecated
+	 * @deprecated It now does nothing and directly returns `inst`.
 	 */
 	convertInstructionForReading(inst, isPointerType = false) {
+		/*
 		if (inst.getAttribute('isPointerAccess')) {
 			// Afterwards, it won't be PointerAccess.
 			const temp = this.getTempVariable();
@@ -521,6 +522,8 @@ export class CodeGenerator extends ASTVisitor {
 		} else {
 			return inst;
 		}
+			*/
+		return inst;
 	}
 
 	/**
@@ -913,7 +916,7 @@ export class CodeGenerator extends ASTVisitor {
 		const test = this.visitAndRead(node.test);
 		result.concat(test);
 		const jumper = this.operatesWith(
-			InstructionBuilder.jump('{alt}', 'notEqual', '{opw}', 'true'),
+			InstructionBuilder.jump('{alt}', 'equal', '{opw}', 'false'),
 			test
 		);
 		result.concat(jumper);
@@ -1122,7 +1125,7 @@ export class CodeGenerator extends ASTVisitor {
 			let endJumper = null;
 			const endTag = `${symbol.getAssemblySymbol()}:_static_tag`;
 			if (symbol.isStatic) {
-				endJumper = InstructionBuilder.jump('{skip_init}', 'equal', endTag, 'true');
+				endJumper = InstructionBuilder.jump('{skip_init}', 'notEqual', endTag, 'false');
 				finalize.concat(endJumper);
 			}
 			// This is reserved
@@ -1142,7 +1145,7 @@ export class CodeGenerator extends ASTVisitor {
 				
 				// Oh no, this was wrong. YOU CAN'T ASSUME THAT THE RIGHT SIDE IS SIMILAR THING AS WELL!
 				// 'isStructRet' is used only for initializer list
-				if (evaluation.getAttribute('disallowReplacement')) {
+				if (symbol.accessThroughPointer || evaluation.getAttribute('disallowReplacement')) {
 					finalize.concat(evaluation);
 					if (node.initializer.dataType && (
 						node.initializer.dataType.kind === 'struct' || node.initializer.dataType.kind === 'union' || evaluation.getAttribute('isStructRet')
@@ -1329,7 +1332,7 @@ export class CodeGenerator extends ASTVisitor {
 					temporary = this.getTempSymbol(this.semantic.getTypeInfo('int'));//this.getTempVariable();
 					result.concat(this.generateSymbolWrite(temporary, 0));
 					let jumper = this.operatesWith(
-						InstructionBuilder.jump('{notequal_end}', 'notEqual', 'true', '{opw}'),
+						InstructionBuilder.jump('{notequal_end}', 'equal', 'false', '{opw}'),
 						result
 					);
 					result.concat(jumper);
@@ -1448,7 +1451,7 @@ export class CodeGenerator extends ASTVisitor {
 			}
 		}
 		let result = this.implicitToBoolean(node);
-		result.instructionReturn = `${requireOpposite ? 'notEqual' : 'equal'} ${result.instructionReturn} true`;
+		result.instructionReturn = `${requireOpposite ? 'equal' : 'notEqual'} ${result.instructionReturn} false`;
 		return result;
 	}
 
@@ -1935,7 +1938,7 @@ export class CodeGenerator extends ASTVisitor {
 							} else {
 								return new Instruction([this.generateSymbolWrite(identity, {
 									template: 'pointer'
-								})], null, new Map([['isAssignment', true]]));
+								})], null, new Map([['isAssignment', true], ['isPointer', true]]));
 							}
 						} else {
 							// It is a pointer, but unfortunately, you can't modify it through a pointer.
@@ -2035,6 +2038,9 @@ export class CodeGenerator extends ASTVisitor {
 						return precall;
 						//throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable already has memory address. Use '&' to avoid this problem.)`, left);
 					}
+					if (left.dataType && left.dataType.isPointerImpl()) {
+						isPointer = true;
+					}
 					break;
 				} else {
 					// This doesn't really make sense.
@@ -2095,7 +2101,7 @@ export class CodeGenerator extends ASTVisitor {
 		if (right.getAttribute('disallowReplacement') || !(left.symbol && !left.symbol.isPointer())) {
 			let lval = this.processLValGetter(left);
 			result.concat_returns(right);
-			if (lval.getAttribute('isPointer')) {
+			if (lval.getAttribute('isPointer') && lval.getAttribute('isAssignment')) {
 				result.concat(lval.raw_replace('pointer_block_entry', `${right.instructionReturn}_block`)
 				.raw_replace('pointer_ptr_entry', `${right.instructionReturn}_pos`));
 			} else {

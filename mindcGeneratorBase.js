@@ -528,8 +528,8 @@ export class FunctionRegisterer {
 		this.memoryObject = memoryObject;
 
 		if (this.memoryObject.memoryBlocks.length > 0) {
-			memoryObject.outputPointerForwardFunction(this, '__stackframe_forward', '__stackframe_');
-			memoryObject.outputPointerBackwardFunction(this, '__stackframe_backward', '__stackframe_');
+			memoryObject.outputPointerForwardFunction(this, '__stackframe_forward', '__stackframe_', false);
+			memoryObject.outputPointerBackwardFunction(this, '__stackframe_backward', '__stackframe_', false);
 		}
 	}
 	
@@ -1205,7 +1205,7 @@ export class MemoryManager {
 	// This is a function for pointer, satisfying cdecl standard.
 	// Tested to be OK
 	// These two functions directly modify the pointers, so we don't use a 'ret'.
-	outputPointerForwardFunction(funcReg, name = '__pointerForward', target = '__ptr') {
+	outputPointerForwardFunction(funcReg, name = '__pointerForward', target = '__ptr', removable = true) {
 		/*
 		Logic: First read the remaining number and compare current step and the previous pointer. Add if not exceeding, or jump to next page.
 		*/
@@ -1225,7 +1225,7 @@ export class MemoryManager {
 			InstructionBuilder.op('add', '__step', '__step', 1),							// 12
 			InstructionBuilder.set(`${target}pos`, this.reservedSize),							// 13
 			InstructionBuilder.jump('{0}', 'always', null, null, [0])						// 14
-		]), null, [], true, false, true);
+		]), null, [], true, false, removable);
 	}
 	
 	/**
@@ -1290,7 +1290,7 @@ export class MemoryManager {
 		}
 	}
 	
-	outputPointerBackwardFunction(funcReg, name = '__pointerBackward', target = '__ptr') {
+	outputPointerBackwardFunction(funcReg, name = '__pointerBackward', target = '__ptr', removable = true) {
 		funcReg.addFunction(name, new Instruction([
 			InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),			// 0
 			InstructionBuilder.end(),														// 1
@@ -1308,7 +1308,7 @@ export class MemoryManager {
 			InstructionBuilder.getlink('__curptrblock', `${target}block`),						// 11
 			InstructionBuilder.read(`${target}pos`, '__curptrblock', 4),						// 12
 			InstructionBuilder.jump('{0}', 'always', null, null, [0])						// 13
-		]), null, [], true, false, true);
+		]), null, [], true, false, removable);
 	}
 	
 	/**

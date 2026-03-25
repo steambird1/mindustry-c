@@ -2927,7 +2927,7 @@ export class Optimizer extends ASTVisitor {
 				 * @type {SymbolEntry?}
 				 */
 				const symbol = node.symbol;
-				if (symbol && ((!( restrictions && (restrictions === 'strict' || restrictions.has(symbol)) ))
+				if (symbol && ((!( symbol.isGlobal || (restrictions && (restrictions === 'strict' || restrictions.has(symbol))) ))
 						 || symbol.isConst)) {
 					const constValue = constants.get(node.name);
 					if (constValue !== undefined) {
@@ -3342,9 +3342,10 @@ export class Optimizer extends ASTVisitor {
 				const scope = this.currentScope.lookupScopeOf(node.name);
 				if (scope != null) {
 					const symbol = this.currentScope.lookup(node.name);
-					if (this.restrictiveVariables && 
-						((this.restrictiveVariables === 'strict' && !symbol.isConst) 
-						|| (this.restrictiveVariables !== 'strict' && this.restrictiveVariables.has(symbol)))) {
+					if (!symbol.isConst && 
+						(symbol.isGlobal ||
+						(this.restrictiveVariables && (this.restrictiveVariables === 'strict') 
+						|| (this.restrictiveVariables !== 'strict' && this.restrictiveVariables.has(symbol))))) {
 						return undefined;
 					}
 					const scopePath = scope.getPath();
