@@ -2173,7 +2173,7 @@ export class CodeGenerator extends ASTVisitor {
 	processAssignment(left, right) {
 		let result = new Instruction();
 		
-		if (right.getAttribute('disallowReplacement') || !(left.symbol.myType() && !left.symbol.myType().isPointerImpl())) {
+		if (right.getAttribute('disallowReplacement') || !(left.dataType && !left.dataType.isPointerImpl())) {
 			let lval = this.processLValGetter(left);
 			result.concat_returns(right);
 			if (lval.getAttribute('isPointer') && lval.getAttribute('isAssignment')) {

@@ -327,10 +327,10 @@ export class Optimizer extends ASTVisitor {
 		}
 		
 		// Make replacements before analysis
-		const assessment = this.shouldRunEvaluation(node, info);
+		const assessment = (info && info.strangeLoop) ? false : this.shouldRunEvaluation(node, info);
 		// !!! TODO: Bugs here !!!
 		this.restrictiveVariables = null;
-		if (!(info && (info.optimizingLoop || info.strangeLoop))) {
+		if (!(info && (info.optimizingLoop))) {
 			if (assessment) {
 				this.replaceConstantAtPresent(node);
 			} else if (assessment === null) {
@@ -3344,8 +3344,8 @@ export class Optimizer extends ASTVisitor {
 					const symbol = this.currentScope.lookup(node.name);
 					if (!symbol.isConst && 
 						(symbol.isGlobal ||
-						(this.restrictiveVariables && (this.restrictiveVariables === 'strict') 
-						|| (this.restrictiveVariables !== 'strict' && this.restrictiveVariables.has(symbol))))) {
+						(this.restrictiveVariables && ((this.restrictiveVariables === 'strict') 
+						|| (this.restrictiveVariables !== 'strict' && this.restrictiveVariables.has(symbol)))))) {
 						return undefined;
 					}
 					const scopePath = scope.getPath();
