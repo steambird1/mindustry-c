@@ -182,6 +182,8 @@ export class CodeGenerator extends ASTVisitor {
 						case 'union': 
 							break;
 						case 'device':
+						case 'null':
+							case 'null_t':
 							if (symbol.isAutoDevice) {
 								symbol.implementAsPointer = false;
 								//symbol.accessThroughPointer = false;
@@ -197,7 +199,6 @@ export class CodeGenerator extends ASTVisitor {
 							}
 							break;
 						case 'basic':
-						case 'null_t':
 							break;
 						case 'pointer':
 							symbol.size = 2;

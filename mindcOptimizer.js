@@ -3327,7 +3327,7 @@ export class Optimizer extends ASTVisitor {
         if (!node) return undefined;
         
         switch (node.type) {
-            case 'NumericLiteral':
+            case 'NumericLiteral': case 'StringLiteral':
                 return node.value;
             case 'Identifier':
 				// Try evaluating in current environment
