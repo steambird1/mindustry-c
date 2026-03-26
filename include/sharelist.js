@@ -129,8 +129,12 @@ export const extension = new CompilerExtensionBase(
                             InstructionBuilder.set('@counter', '__stackpos').content
                         );
                 funcManager.addFunction(writerName, writer, null, [], true);
-                // Create a local variable (but the problem is: how to get function info?):
                 
+                // Declare all relevant variables by setting them to null
+                for (let i = 0; i < arraySize; i++) {
+                    returnedObject.concat(InstructionBuilder.set(`_pu_${randomIdentifier}_${i}`, 'null'));
+                }
+
                 return returnedObject;
             }
         ],
