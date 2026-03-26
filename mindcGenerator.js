@@ -223,24 +223,30 @@ export class CodeGenerator extends ASTVisitor {
 			}
 			// Assign heap memory
 			if (symbol.accessThroughPointer || symbol.needMemoryAllocation) {
-				symbol.needMemoryAllocation = true;
-				if (!staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol) {
+
+				/**
+				 * 
+				 * @param {number} size
+				 * @param {boolean} requireNear
+				 * @param {string} name
+				 * @returns {{position: MemoryBlockInfo?; near: boolean; success: boolean}} 
+				 */
+				const allocator = (size, requireNear, name) => {
 					let allocated = false;
-					if (symbol.isNearPointer) {
-						// Already specified as near, try to assign continuous space
+					let location = null;
+					if (requireNear) {
 						let attempt = this.memory.currentState().duplicate(), skippedPage = 0;
-						while (!attempt.full && attempt.currentRemain() < symbol.size) {
+						while (!attempt.full && attempt.currentRemain() < size) {
 							attempt.skipToNextPage();
 							skippedPage++;
 						}
 						if (attempt.full) {
-							this.addWarning(`Cannot assign a complete block for ${symbol.name}`);
-							symbol.isNearPointer = false;
+							this.addWarning(`Cannot assign a complete block for ${name}`);
+							requireNear = false;
 						} else {
-							symbol.memoryLocation = attempt.duplicate();
+							location = attempt.duplicate();
 							this.memory.pushStack();
-							//let curState = this.memory.currentState();
-							this.memory.setState(attempt.forwarding(symbol.size));
+							this.memory.setState(attempt.forwarding(size));
 							if (skippedPage > 0) {
 								this.addWarning(`Skipping ${skippedPage} page(s) for near pointer assignment. This may cause memory insufficiency`);
 							}
@@ -248,12 +254,43 @@ export class CodeGenerator extends ASTVisitor {
 						}
 					}
 					if (!allocated) {
-						symbol.memoryLocation = this.memory.assign(symbol.getAssemblySymbol(), symbol.size);
+						location = this.memory.assign(name, size);
+						allocated = true;
 					}
-					const dupSymb = symbol.memoryLocation.duplicate();
-					if ((symbol.kind !== 'pointer')
-						&& dupSymb.forwarding(symbol.size).block === symbol.memoryLocation.block) {
-							symbol.isNearPointer = true;
+					const dupSymb = location.duplicate();
+					if (dupSymb.forwarding(size).block === location.block) {
+						requireNear = true;
+					}
+					return {
+						position: location,
+						near: requireNear,
+						success: allocated
+					}
+				};
+
+				symbol.needMemoryAllocation = true;
+				// The memory space is otherwise dynamically allocated
+				if (!staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol) {
+					// if () {
+					const result = allocator(symbol.size, symbol.isNearPointer, symbol.getAssemblySymbol());
+					if (!result.success) {	// This is actually unused
+						this.addError(`Cannot assign memory for symbol ${symbol.describe()}`);
+					}
+					if (!(symbol.myType() && symbol.myType().kind === 'pointer')) {
+						symbol.isNearPointer = result.near;
+					}
+					symbol.memoryLocation = result.position;
+					// }
+					if (symbol.requireExtraMemory()) {
+						// Additional space
+						// TODO: Configure corresponding components... (i.e. In declaration part, the pointer should be assigned memory location)
+						// Using this extra field (instead of assigning memoryLocation another meaning) is for the compatibility of initializer list
+						const additional = allocator(2, true, `${symbol.getAssemblySymbol()}.__pointer`);
+						if (!additional.success) {	// This is actually unused
+							this.addError(`Cannot assign essential additional memory for symbol ${symbol.describe()}`);
+						}
+						symbol.isExtraNear = additional.near;
+						symbol.extraMemoryLocation = additional.position;
 					}
 				}
 			}
@@ -304,9 +341,11 @@ export class CodeGenerator extends ASTVisitor {
 		if (symbol.implementAsPointer) {
 			const temporary = givenName ?? this.getTempVariable();
 			if (symbol.accessThroughPointer) {
-				if (symbol.memoryLocation) {
-					result = this.memory.outputFetchOf(symbol.memoryLocation, `${temporary}_block`);
-					result.concat(this.memory.outputFetchOf(symbol.memoryLocation.duplicate().forwarding(1), `${temporary}_pos`));
+				if (symbol.memoryRef()) {	// The original memory location is for the array itself.
+					result = this.memory.outputFetchOf(symbol.memoryRef(), `${temporary}_block`);
+					result.concat(this.memory.outputFetchOf(symbol.memoryRef().duplicate().forwarding(1), `${temporary}_pos`));
+					// result = this.memory.outputFetchOf(symbol.memoryLocation, `${temporary}_block`);
+					// result.concat(this.memory.outputFetchOf(symbol.memoryLocation.duplicate().forwarding(1), `${temporary}_pos`));
 				} else {
 					result = new Instruction([
 						InstructionBuilder.reads(`${temporary}_block`, `${symbol.getAssemblySymbol()}.__pointer_block`, `${symbol.getAssemblySymbol()}.__pointer_pos`),
@@ -366,10 +405,12 @@ export class CodeGenerator extends ASTVisitor {
 		if (symbol.implementAsPointer) {
 			//throw new InternalGenerationFailure(`Pointer can't be directly written: ${symbol.name}`);
 			if (symbol.accessThroughPointer) {
-				if (symbol.memoryLocation) {
+				if (symbol.memoryRef()) {
 					return new Instruction([
-						this.memory.outputStorageOf(symbol.memoryLocation, hasTemplate ? `{${hasTemplate}_block_entry}` : `${data}_block`),
-						this.memory.outputStorageOf(symbol.memoryLocation.duplicate().forwarding(1), hasTemplate ? `{${hasTemplate}_ptr_entry}` :`${data}_pos`)
+						this.memory.outputStorageOf(symbol.memoryRef(), hasTemplate ? `{${hasTemplate}_block_entry}` : `${data}_block`),
+						this.memory.outputStorageOf(symbol.memoryRef().duplicate().forwarding(1), hasTemplate ? `{${hasTemplate}_ptr_entry}` :`${data}_pos`)
+						// this.memory.outputStorageOf(symbol.memoryLocation, hasTemplate ? `{${hasTemplate}_block_entry}` : `${data}_block`),
+						// this.memory.outputStorageOf(symbol.memoryLocation.duplicate().forwarding(1), hasTemplate ? `{${hasTemplate}_ptr_entry}` :`${data}_pos`)
 					]);
 				} else {
 					return new Instruction([
@@ -939,6 +980,7 @@ export class CodeGenerator extends ASTVisitor {
 			returner.accessThroughPointer = true;
 			result.setAttribute('isPointer', true);
 		} else {
+			// What did I intend to write here?
 		}
 		result.concat(this.generateSymbolWrite(returner, alternate.instructionReturn));
 		result.concat(new InstructionReferrer(finalize, 'end', 0));
@@ -1119,7 +1161,21 @@ export class CodeGenerator extends ASTVisitor {
 		}
 		let finalize = new Instruction();
 		if (symbol.memoryLocation) {
-			finalize.concat(symbol.memoryLocation.getAssignmentInstruction(symbol.getAssemblySymbol()));
+			if (symbol.extraMemoryLocation) {
+				finalize.concat(this.memory.outputStorageOf(symbol.extraMemoryLocation, `${this.memory.memoryBlocks[symbol.memoryLocation.block].name}_id`));
+				finalize.concat(this.memory.outputStorageOf(symbol.extraMemoryLocation.duplicate().forwarding(1), symbol.memoryLocation.position));
+			} else {
+				if (symbol.accessThroughPointer) {
+					finalize.concat(symbol.memoryLocation.getAssignmentInstruction(`${symbol.getAssemblySymbol()}.__pointer`));
+				} else {
+					finalize.concat(symbol.memoryLocation.getAssignmentInstruction(symbol.getAssemblySymbol()));
+				}
+			}
+		}
+		if (symbol.extraMemoryLocation) {
+			// This is a little bit weird, I think
+			// Usually for those access-through-pointer but no memory location ones
+			finalize.concat(symbol.extraMemoryLocation.getAssignmentInstruction(`${symbol.getAssemblySymbol()}.__pointer`));
 		}
 		if (!symbol.memoryLocation || node.initializer) {
 			let endJumper = null;
@@ -2035,13 +2091,31 @@ export class CodeGenerator extends ASTVisitor {
 					// Not regarding as pointer!
 					pointer = precall.instructionReturn;
 					if (returnOnlyPointer) {
+						// This is about reading the data inside it ...
+						/**
+						 * @type {TypeInfo?}
+						 */
+						let insideType = null;
+						if (left.dataType && left.dataType.pointerTo) {
+							insideType = left.dataType.pointerTo;
+						} else {
+							this.addWarning(`Unknown reference`, left.location);
+						}
+						const insideReader = this.getTempSymbol(insideType, insideType ? insideType.kind : null);
+						precall.concat_returns(this.operatesWrite(
+							InstructionBuilder.reads('{op_write}', `${pointer}_block`, `${pointer}_pos`),
+							insideReader
+						));
 						return precall;
 						//throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable already has memory address. Use '&' to avoid this problem.)`, left);
 					}
+					// Writing into that pointer otherwise
 					if (left.dataType && left.dataType.isPointerImpl()) {
 						isPointer = true;
 					}
 					break;
+				} else if (left.prefix) {
+					return this.processLValGetter(left.argument, returnOnlyPointer, traditional);
 				} else {
 					// This doesn't really make sense.
 					this.addWarning(`Deprecated dereference`, left.location);
@@ -2098,7 +2172,7 @@ export class CodeGenerator extends ASTVisitor {
 	processAssignment(left, right) {
 		let result = new Instruction();
 		
-		if (right.getAttribute('disallowReplacement') || !(left.symbol && !left.symbol.isPointer())) {
+		if (right.getAttribute('disallowReplacement') || !(left.symbol.myType() && !left.symbol.myType().isPointerImpl())) {
 			let lval = this.processLValGetter(left);
 			result.concat_returns(right);
 			if (lval.getAttribute('isPointer') && lval.getAttribute('isAssignment')) {

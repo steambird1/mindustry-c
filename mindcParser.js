@@ -1469,6 +1469,7 @@ export class Parser {
 		if (init) init.parent = forStmt;
 		if (test) test.parent = forStmt;
 		if (update) update.parent = forStmt;
+        if (body) body.parent = forStmt;
         return forStmt;
     }
 

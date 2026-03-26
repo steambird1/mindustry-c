@@ -123,11 +123,14 @@ export class SymbolEntry {
         this.memoryLocation = null;
 		this.accessThroughPointer = false;	// In-memory variable, must be accessed through memory blocks
 											// THIS ALSO MEANS THAT: you can and should always dereference it to get the real value
-		this.implementAsPointer = (this.type && (this.type.kind === 'pointer' || this.type.kind === 'array'));
+		this.implementAsPointer = (this.myType() instanceof TypeInfo && (this.myType().kind === 'pointer' || this.myType().kind === 'array'));
 											// This is true will mean that when getting value, it will return a pointer
 											// ACCORDING TO THAT DEFINITION, struct SHOULD BE "IMPLEMENTED AS POINTER"
 											// instead of "ACCESS THROUGH POINTER"
 		this.needMemoryAllocation = false;
+
+		this.extraMemoryLocation = null;	// For variables having both access-through and implement-as, this will be the memory space where their value is placed.
+		this.isExtraNear = false;			// This should be written by and only by code generator
 
 		this.isAutoDevice = false;	// Must be manually done!
 		this.isVirtualSymbol = false;
@@ -174,7 +177,7 @@ export class SymbolEntry {
 
 	/**
 	 * 
-	 * @returns {TypeInfo?}
+	 * @returns {TypeInfo | null | {returnType: string; parameters: any[]}}
 	 */
 	myType() {
 		if (!this.type) return null;
@@ -194,6 +197,18 @@ export class SymbolEntry {
 
 	isPointer() {
 		return this.accessThroughPointer || this.implementAsPointer || this.needMemoryAllocation;
+	}
+
+	/**
+	 * 
+	 * @returns {boolean}
+	 */
+	requireExtraMemory() {
+		return this.accessThroughPointer && this.myType().isTypeInfo && ['array', 'struct', 'union'].includes(this.myType().kind);
+	}
+
+	memoryRef() {
+		return this.requireExtraMemory() ? this.extraMemoryLocation : this.memoryLocation;
 	}
 
 	/**
@@ -416,6 +431,9 @@ export class TypeInfo {
 		// Probably we consider 'near' and 'far' as well
 		this.functionTo = null;	// Pointing to what function for function type
 		this.memberReference = null;
+		/**
+		 * @type {true}
+		 */
 		this.isTypeInfo = true;
     }
     
@@ -439,12 +457,20 @@ export class TypeInfo {
 		return this.qualifiers.includes('near');
 	}
 
+	/**
+	 * 
+	 * @returns {boolean}
+	 */
 	isStrictPointerImpl() {
 		const pointerImplementation = ['pointer', 'array'];
 		return ((typeof this.kind === 'object') && this.kind.isStrictPointerImpl()) ||
 		 pointerImplementation.includes(this.kind);
 	}
 
+	/**
+	 * 
+	 * @returns {boolean}
+	 */
 	isPointerImpl() {
 		const pointerImplementation = ['pointer', 'array'];
 		if (this.kind === 'struct' || this.kind === 'union') {
