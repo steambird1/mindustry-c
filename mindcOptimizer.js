@@ -7,10 +7,10 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	VariableDeclarationNode,
 	TypeSpecifierNode,
 	IdentifierNode, dynamicBuiltins
- } from "/mindustry_c_compiler/mindcBase.js";
-import { InstructionBuilder } from "/mindustry_c_compiler/mindcGeneratorBase.js";
+ } from "./mindcBase.js";
+import { InstructionBuilder } from "./mindcGeneratorBase.js";
 
-import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer, VariableLinker } from "/mindustry_c_compiler/mindcSemantic.js";
+import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer, VariableLinker } from "./mindcSemantic.js";
 
 // Auxiliary type to handle break/continue
 class BreakException {

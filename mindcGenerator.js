@@ -10,15 +10,15 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	TypeQualifierNode, AsmStatementNode, PointerTypeNode, DeclaratorNode,
 	DeletedStatement, ASTBuilder, ASTVisitor, __convert, objectList,
 	liquidList, unitList, buildingList
- } from "/mindustry_c_compiler/mindcBase.js";
+ } from "./mindcBase.js";
 
-import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "/mindustry_c_compiler/mindcSemantic.js";
+import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mindcSemantic.js";
 
-import { Optimizer } from "/mindustry_c_compiler/mindcOptimizer.js";
+import { Optimizer } from "./mindcOptimizer.js";
 
 import { Instruction, InstructionBuilder, InstructionReferrer, MemoryBlock, MemoryBlockInfo,
     MemoryManager, FunctionRegisterer, BuildingLinker, SingleInstruction, EmptyInstruction
- } from "/mindustry_c_compiler/mindcGeneratorBase.js";
+ } from "./mindcGeneratorBase.js";
 
 export class InternalGenerationFailure {
 	constructor(message, node = null) {

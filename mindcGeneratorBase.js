@@ -1,6 +1,6 @@
 
-import { AttributeClass } from "/mindustry_c_compiler/mindcBase.js";
-import { SymbolEntry, TypeInfo } from "/mindustry_c_compiler/mindcSemantic.js";
+import { AttributeClass } from "./mindcBase.js";
+import { SymbolEntry, TypeInfo } from "./mindcSemantic.js";
 
 export class InstructionReferrerException {
 	constructor(obj, caller = null, info = "") {

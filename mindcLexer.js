@@ -1049,7 +1049,7 @@ export class Lexer {
 
         // 在实际实现中，这里应该：
         // 1. 解析文件名（去除引号或尖括号）
-        // 2. 使用 fetch(`/mindustry_c_compiler/include/${filename}`) 获取文件内容
+        // 2. 使用 fetch(`/include/${filename}`) 获取文件内容
         // 3. 递归调用词法分析器分析包含的文件内容
         // 4. 将得到的 tokens 插入到当前 tokens 流中的适当位置
         // 注意：这需要将 tokenize 方法改为异步，或在此处进行同步的 XMLHttpRequest（不推荐）。
@@ -1077,11 +1077,11 @@ export class Lexer {
                                                     .filter(code => !code.startsWith('import')).join('\n');
                     this.extraExtensions.push(eval(`${responseCode}; extension`));
                     */
-                    const module = await import(`/mindustry_c_compiler/include/${filename}`);
+                    const module = await import(`/include/${filename}`);
                     this.extraExtensions.push(module.extension);
                     // Errors will be thrown through!
                 } else {
-                    const responseTextRaw = await fetch(`/mindustry_c_compiler/include/${filename}`);
+                    const responseTextRaw = await fetch(`/include/${filename}`);
                     if (!responseTextRaw.ok) {
                         this.addError(`Cannot include file ${filename}`);
                         return;

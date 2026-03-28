@@ -2,7 +2,7 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	VariableDeclarationNode, CastExpression, ConditionalExpressionNode, NumericLiteralNode, StringLiteralNode,
 	CharacterLiteralNode, NullLiteralNode, ASTVisitor, __convert, objectList,
 	liquidList, unitList, buildingList
- } from "/mindustry_c_compiler/mindcBase.js";
+ } from "./mindcBase.js";
 
 export class VariableLinker {
 	/**
