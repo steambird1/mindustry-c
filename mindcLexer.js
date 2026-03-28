@@ -350,7 +350,7 @@ export class Lexer {
         this.suppressMacroExpansion = suppressMacroExpansion;
         
         // 预处理器状态
-        this.macros = {...macros}; // 存储宏定义 {name: value}
+        this.macros = {...macros, '__MINDUSTRY__': '1'}; // 存储宏定义 {name: value}
         this.macroParams = {...macroParams};
         this.conditionalStack = []; // 条件编译栈，存储是否跳过代码块的状态
         this.skipping = false; // 当前是否处于“跳过代码”状态
@@ -1030,9 +1030,10 @@ export class Lexer {
     
     // 处理 #pragma - 收集指令内容
     handlePragma(args, location) {
+        this.tokens.push(new Token(TokenType.PREPROCESSOR_PRAGMA, fullPragma, location));
+        if (this.skipping) return;
         const fullPragma = `#pragma ${args}`.trim();
         this.pragmas.push(fullPragma);
-        this.tokens.push(new Token(TokenType.PREPROCESSOR_PRAGMA, fullPragma, location));
     }
     
     // 处理 #include - 占位实现，实际需要异步网络请求
@@ -1044,10 +1045,11 @@ export class Lexer {
      */
     async handleInclude(args, location) {
         this.tokens.push(new Token(TokenType.PREPROCESSOR_INCLUDE, `#include ${args}`.trim(), location));
-        
+        if (this.skipping) return;
+
         // 在实际实现中，这里应该：
         // 1. 解析文件名（去除引号或尖括号）
-        // 2. 使用 fetch(`/include/${filename}`) 获取文件内容
+        // 2. 使用 fetch(`/mindustry_c_compiler/include/${filename}`) 获取文件内容
         // 3. 递归调用词法分析器分析包含的文件内容
         // 4. 将得到的 tokens 插入到当前 tokens 流中的适当位置
         // 注意：这需要将 tokenize 方法改为异步，或在此处进行同步的 XMLHttpRequest（不推荐）。
@@ -1075,11 +1077,11 @@ export class Lexer {
                                                     .filter(code => !code.startsWith('import')).join('\n');
                     this.extraExtensions.push(eval(`${responseCode}; extension`));
                     */
-                    const module = await import(`/include/${filename}`);
+                    const module = await import(`/mindustry_c_compiler/include/${filename}`);
                     this.extraExtensions.push(module.extension);
                     // Errors will be thrown through!
                 } else {
-                    const responseTextRaw = await fetch(`/include/${filename}`);
+                    const responseTextRaw = await fetch(`/mindustry_c_compiler/include/${filename}`);
                     if (!responseTextRaw.ok) {
                         this.addError(`Cannot include file ${filename}`);
                         return;

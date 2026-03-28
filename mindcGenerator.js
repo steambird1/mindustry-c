@@ -10,15 +10,15 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	TypeQualifierNode, AsmStatementNode, PointerTypeNode, DeclaratorNode,
 	DeletedStatement, ASTBuilder, ASTVisitor, __convert, objectList,
 	liquidList, unitList, buildingList
- } from "./mindcBase.js";
+ } from "/mindustry_c_compiler/mindcBase.js";
 
-import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mindcSemantic.js";
+import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "/mindustry_c_compiler/mindcSemantic.js";
 
-import { Optimizer } from "./mindcOptimizer.js";
+import { Optimizer } from "/mindustry_c_compiler/mindcOptimizer.js";
 
 import { Instruction, InstructionBuilder, InstructionReferrer, MemoryBlock, MemoryBlockInfo,
     MemoryManager, FunctionRegisterer, BuildingLinker, SingleInstruction, EmptyInstruction
- } from "./mindcGeneratorBase.js";
+ } from "/mindustry_c_compiler/mindcGeneratorBase.js";
 
 export class InternalGenerationFailure {
 	constructor(message, node = null) {
@@ -709,6 +709,10 @@ export class CodeGenerator extends ASTVisitor {
 			} else {
 				throw new InternalGenerationFailure(`Cannot generate copy from ${source} to ${target}`);
 			}
+		} else if (this.semantic.isTypeCompatibleForAny(actualType, ['int', 'long', 'signed', 'unsigned', 'bool']) && this.semantic.isTypeCompatibleForAny(finalSourceType, ['float', 'double'])) {
+			const implicitConv = this.implicitFloorRaw(new Instruction([], source, new Map([['disallowReplacement', true]])));
+			result.concat(implicitConv);
+			result.concat(InstructionBuilder.set(target, implicitConv.instructionReturn));
 		} else if (finalSourceType.name === 'content_t' && special.includes(actualType.name)) {
 			const implicitConv = this.implicitContentToNumericRaw(new Instruction([], source, new Map([['disallowReplacement', true]])));
 			result.concat(implicitConv);

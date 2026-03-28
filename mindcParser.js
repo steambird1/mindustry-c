@@ -2,9 +2,9 @@ import { AttributeClass, ASTNode,
     CastExpression, TypeSpecifierNode, 
     ASTBuilder, __convert, objectList,
 	liquidList, unitList, buildingList
- } from "./mindcBase.js";
+ } from "/mindustry_c_compiler/mindcBase.js";
 
-import { TokenType, Lexer } from "./mindcLexer.js";
+import { TokenType, Lexer } from "/mindustry_c_compiler/mindcLexer.js";
 
 export class Parser {
 	/**

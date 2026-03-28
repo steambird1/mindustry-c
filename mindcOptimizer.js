@@ -7,10 +7,10 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	VariableDeclarationNode,
 	TypeSpecifierNode,
 	IdentifierNode, dynamicBuiltins
- } from "./mindcBase.js";
-import { InstructionBuilder } from "./mindcGeneratorBase.js";
+ } from "/mindustry_c_compiler/mindcBase.js";
+import { InstructionBuilder } from "/mindustry_c_compiler/mindcGeneratorBase.js";
 
-import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer, VariableLinker } from "./mindcSemantic.js";
+import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer, VariableLinker } from "/mindustry_c_compiler/mindcSemantic.js";
 
 // Auxiliary type to handle break/continue
 class BreakException {
@@ -744,7 +744,7 @@ export class Optimizer extends ASTVisitor {
 						const shouldEval = this.shouldRunEvaluation(node, info);	// For compatibility
 						this.addWrittenSymbol(symbol, constValue, shouldEval);
 						// 标记符号为常量
-						symbol.markAsConstant(constValue);
+						// symbol.markAsConstant(constValue);
 
 						if (shouldEval) {
 							declarator.setAttribute('candidateRemoval', 1);
@@ -832,7 +832,8 @@ export class Optimizer extends ASTVisitor {
 						//localConstants.set(node.left.name, constValue);
 						const symbol = this.currentScope.lookup(node.left.name);
 						if (symbol && this.shouldRunEvaluation(node, info, symbol)) {	// Not considering symbol currently!
-							symbol.markAsConstant(constValue);
+							// symbol.markAsConstant(constValue);
+							this.addWrittenSymbol(symbol, constValue, true);
 							if (this.shouldRunEvaluation(node, info))
 								node.setAttribute('candidateRemoval', 1);
 						}
@@ -2712,9 +2713,17 @@ export class Optimizer extends ASTVisitor {
 				varSymbol.isConstant = false;
 				varSymbol.constantValue = null;
 			} else if (doUpdate) {	// This branch is probably a must-go (i.e. "else,") but I don't want to change it. Zauber!
+				const varType = varSymbol.myType();
+				if (this.semantic.isTypeCompatibleForAny(varType, ['int', 'long', 'unsigned', 'signed'])) {
+					if (typeof noSideEffectValue === 'number') {
+						noSideEffectValue = Math.floor(noSideEffectValue);
+					}
+				}
+				if (this.semantic.isSameType(varType, this.semantic.getTypeInfo('bool'))) {
+					noSideEffectValue = Boolean(noSideEffectValue);
+				}
 				localConstants.set(varName, noSideEffectValue);
-				varSymbol.isConstant = true;
-				varSymbol.constantValue = noSideEffectValue;
+				varSymbol.markAsConstant(noSideEffectValue);
 			}
 			varSymbol.variableReferrer.modify();
 		}
