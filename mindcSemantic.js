@@ -1873,11 +1873,12 @@ export class SemanticAnalyzer extends ASTVisitor {
         node.arguments.forEach(arg => this.visit(arg));
 
         // 检查函数是否存在
+		/*
         if (node.callee.type !== ASTNodeType.IDENTIFIER) {
             this.addError(`Function call target must be an identifier`, node.callee.location);
             return;
         }
-
+		*/
         const funcSymbol = this.currentScope.lookup(node.callee.name);
         if (!funcSymbol || (funcSymbol.kind !== 'function' && 
 			(!funcSymbol.type.type || funcSymbol.type.type.kind !== 'function'))) {

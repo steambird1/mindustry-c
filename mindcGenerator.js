@@ -663,6 +663,11 @@ export class CodeGenerator extends ASTVisitor {
 						new Map([['disallowReplacement', true]])
 					);
 					break;
+				case ":label":
+					return new Instruction([new SingleInstruction({
+						content: `${instructionSplit[1]}:`,
+						referrer: []
+					})], null, new Map([['noLineCount', true]]));
 			}
 		} 
 		return new SingleInstruction({
@@ -709,7 +714,7 @@ export class CodeGenerator extends ASTVisitor {
 			} else {
 				throw new InternalGenerationFailure(`Cannot generate copy from ${source} to ${target}`);
 			}
-		} else if (this.semantic.isTypeCompatibleForAny(actualType, ['int', 'long', 'signed', 'unsigned', 'bool']) && this.semantic.isTypeCompatibleForAny(finalSourceType, ['float', 'double'])) {
+		} else if (this.semantic.isTypeCompatibleForAny(actualType, ['int', 'long', 'signed', 'unsigned', 'bool'], true) && this.semantic.isTypeCompatibleForAny(finalSourceType, ['float', 'double'], true)) {
 			const implicitConv = this.implicitFloorRaw(new Instruction([], source, new Map([['disallowReplacement', true]])));
 			result.concat(implicitConv);
 			result.concat(InstructionBuilder.set(target, implicitConv.instructionReturn));
@@ -1755,7 +1760,7 @@ export class CodeGenerator extends ASTVisitor {
 					value = this.implicitToContent(node.right, referrer(node.right.dataType.name));
 				} else if (special.includes(node.left.dataType.name)) {
 					value = this.implicitToNumeric(node.right);
-				} else if (this.semantic.isTypeCompatibleForAny(node.right.dataType, ['float', 'double'])) {
+				} else if (this.semantic.isTypeCompatibleForAny(node.right.dataType, ['float', 'double'], true) && !this.semantic.isTypeCompatibleForAny(node.left.dataType, ['float', 'double'], true)) {
 					value = this.implicitToNumeric(node.right);
 				}
 			}
@@ -1909,10 +1914,17 @@ export class CodeGenerator extends ASTVisitor {
 			// Got correction ratio of array index
 			//finalResult.concat(InstructionBuilder.op('mul', index.instructionReturn, index.instructionReturn, ratio));
 			// Get multiplier
+			/**
+			 * @type {number | string}
+			 */
 			let resultIndex;
 			if (ratio > 1) {
-				resultIndex = this.getTempVariable();
-				finalResult.concat(InstructionBuilder.op('mul', resultIndex, index.instructionReturn, ratio));
+				if (node.children[1].type === 'NumericLiteral') {
+					resultIndex = ratio * node.children[1].value;
+				} else {
+					resultIndex = this.getTempVariable();
+					finalResult.concat(InstructionBuilder.op('mul', resultIndex, index.instructionReturn, ratio));
+				}
 			} else {
 				resultIndex = index.instructionReturn;
 			}
@@ -2084,7 +2096,12 @@ export class CodeGenerator extends ASTVisitor {
 					}
 					
 				} else {
-					finalResult.concat(resolution);
+					if (returnOnlyPointer) {
+						finalResult.concat_returns(resolution);
+					} else {
+						finalResult.concat(resolution);
+					}
+					
 				}
 				
 				pointer = resolution.instructionReturn;

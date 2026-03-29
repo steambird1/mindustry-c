@@ -153,7 +153,8 @@ export class Instruction extends AttributeClass {
 			if (stmt.isInstructionGroup) {
 				stmt.isDebug = this.isDebug;
 				const combination = stmt.raw_output(this.currentLength, correction);
-				this.currentLength += combination.length;
+				if (!stmt.getAttribute('noLineCount'))
+					this.currentLength += combination.length;
 				//currentIteration++;
 				//correction += combination.length - 1;
 				return combination;
@@ -188,7 +189,8 @@ export class Instruction extends AttributeClass {
 		this.currentLength = additionalLength;
 		this.instructions.forEach(stmt => {
 			if (stmt.isInstructionGroup) {
-				this.currentLength = stmt.raw_scan(this.currentLength);
+				if (!stmt.getAttribute('noLineCount'))
+					this.currentLength = stmt.raw_scan(this.currentLength);
 			} else if (stmt.isInstructionReferrer) {
 				stmt.register(this.currentLength);
 			} else {
