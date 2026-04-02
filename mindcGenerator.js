@@ -1629,6 +1629,9 @@ export class CodeGenerator extends ASTVisitor {
 			this.addWarning('Going to assignment through binary expression:', node);
 			result = this.visitAssignmentExpression(node);
 		}
+		if (node.operator === '/' && node.dataType && this.semantic.isTypeCompatibleForAny(node.dataType, ['int', 'long', 'signed', 'unsigned', 'bool'], true)) {
+			result = this.implicitFloorRaw(result);
+		}
 		return result;
 	}
 	
@@ -2194,7 +2197,8 @@ export class CodeGenerator extends ASTVisitor {
 	processAssignment(left, right) {
 		let result = new Instruction();
 		
-		if (right.getAttribute('disallowReplacement') || !(left.dataType && !left.dataType.isPointerImpl())) {
+		const leftIsPointer = !(left.dataType && !left.dataType.isPointerImpl());
+		if (right.getAttribute('disallowReplacement') || leftIsPointer) {
 			let lval = this.processLValGetter(left);
 			result.concat_returns(right);
 			if (lval.getAttribute('isPointer') && lval.getAttribute('isAssignment')) {
@@ -2207,8 +2211,14 @@ export class CodeGenerator extends ASTVisitor {
 			return result;
 		} else {
 			const lval = this.processLValGetter(left, true, true);
-			result.concat_returns(lval);
-			result.concat(right.replace_variable(lval.instructionReturn, right.instructionReturn));
+			if (lval.getAttribute('isPointer')) {
+				result.concat(lval);
+				result.concat_returns(right);
+				result.concat(this.memory.outputPointerStorageOf(lval.instructionReturn, right.instructionReturn));
+			} else {
+				result.concat_returns(lval);
+				result.concat(right.replace_variable(lval.instructionReturn, right.instructionReturn));
+			}
 			return result;
 		}
 	}
@@ -2756,6 +2766,12 @@ export class CodeGenerator extends ASTVisitor {
 			},
 			rand: ast => {
 				return opProcesser(`rand`, ast.arguments);
+			},
+			read: ast => {
+				return packer('read', ast.arguments, this.semantic.getTypeInfo('null_t'), 2);
+			},
+			write: ast => {
+				return packer('write', ast.arguments, null, 3);
 			},
 			asm: ast => {
 				if (ast.arguments.length <= 0 || ast.arguments[0].type !== 'StringLiteral') {

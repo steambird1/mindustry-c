@@ -1988,7 +1988,7 @@ export class Optimizer extends ASTVisitor {
 				case 'Program':
 					return;
 				case 'AssignmentExpression':
-					if (node.left.type === 'Identifier') {
+					if (node.left.type === 'Identifier' && !node.left.name.startsWith('@')) {
 						modifiedVars.add({
 							varName: node.left.name,
 							scope: (node.left.symbol ? node.left.symbol.scope : null) ?? node.scope,
@@ -2004,7 +2004,7 @@ export class Optimizer extends ASTVisitor {
 				case 'BinaryExpression':
 					if (node.operator.includes('=') && node.operator !== '==' && node.operator !== '!='
 					&& node.operator !== '>=' && node.operator !== '<=') {
-						if (node.left.type === 'Identifier') {
+						if (node.left.type === 'Identifier' && !node.left.name.startsWith('@')) {
 							modifiedVars.add({
 								varName: node.left.name,
 								scope: (node.left.symbol ? node.left.symbol.scope : null) ?? node.scope,
@@ -2018,7 +2018,7 @@ export class Optimizer extends ASTVisitor {
 					break;
 				case 'UnaryExpression':
 					if ((node.operator === '++' || node.operator === '--' || node.operator == '*' || node.operator == '&')) {
-						if (node.argument.type === 'Identifier') {
+						if (node.argument.type === 'Identifier' && !node.argument.name.startsWith('@')) {
 							modifiedVars.add({
 								varName: node.argument.name,
 								scope: (node.argument.symbol ? node.argument.symbol.scope : null) ?? node.scope,
@@ -2032,7 +2032,7 @@ export class Optimizer extends ASTVisitor {
 					break;
 				case 'CastExpression':
 					if (node.dataType && (node.dataType.isVolatile() || node.dataType.isPointerImpl())) {
-						if (node.expression.type === 'Identifier') {
+						if (node.expression.type === 'Identifier' && !node.expression.name.startsWith('@')) {
 							modifiedVars.add({
 								varName: node.expression.name,
 								scope: (node.expression.symbol ? node.expression.symbol.scope : null) ?? node.scope,
@@ -2714,7 +2714,7 @@ export class Optimizer extends ASTVisitor {
 				varSymbol.constantValue = null;
 			} else if (doUpdate) {	// This branch is probably a must-go (i.e. "else,") but I don't want to change it. Zauber!
 				const varType = varSymbol.myType();
-				if (this.semantic.isTypeCompatibleForAny(varType, ['int', 'long', 'unsigned', 'signed'])) {
+				if (this.semantic.isTypeCompatibleForAny(varType, ['int', 'long', 'unsigned', 'signed'], true)) {
 					if (typeof noSideEffectValue === 'number') {
 						noSideEffectValue = Math.floor(noSideEffectValue);
 					}
@@ -2969,7 +2969,7 @@ export class Optimizer extends ASTVisitor {
 				}
 				*/
                 if ((isAssignment || leftValue !== undefined) && rightValue !== undefined) {
-                    const result = this.evaluateBinaryOperation(node.operator, leftValue, rightValue);
+                    const result = this.evaluateBinaryOperation(node.operator, leftValue, rightValue, node.dataType);
                     if (result !== undefined) {
                         const replacement = this.getLiteral(result);
                         replacement.location = node.location;
@@ -3377,7 +3377,7 @@ export class Optimizer extends ASTVisitor {
                 const left = this.evaluateConstantExpression(node.left);
                 const right = this.evaluateConstantExpression(node.right);
                 if (left !== undefined && right !== undefined) {
-                    return this.evaluateBinaryOperation(node.operator, left, right);
+                    return this.evaluateBinaryOperation(node.operator, left, right, node.dataType);
                 }
                 return undefined;
             case 'UnaryExpression':
@@ -3402,7 +3402,15 @@ export class Optimizer extends ASTVisitor {
 
 	// ! Manually modified !
 	// Special compatibility for '+=' and '='
-    evaluateBinaryOperation(operator, left, right) {
+	/**
+	 * 
+	 * @param {string} operator 
+	 * @param {constantInfo} left 
+	 * @param {constantInfo} right 
+	 * @param {TypeInfo?} [typeDelim=null]
+	 * @returns 
+	 */
+    evaluateBinaryOperation(operator, left, right, typeDelim = null) {
 
 		let isEqual = (l, r) => {
 			if (typeof l === 'object' && typeof r === 'object' && l.isBuiltinConstant && r.isBuiltinConstant) {
@@ -3410,6 +3418,9 @@ export class Optimizer extends ASTVisitor {
 			}
 			return l === r;
 		};
+
+		const isInt = typeDelim && (this.semantic.isTypeCompatibleForAny(typeDelim, ['int', 'long', 'signed', 'unsigned'], true));
+		const isBool = typeDelim && (this.semantic.isTypeCompatibleForAny(typeDelim, ['bool'], true));
 
         switch (operator) {
 			case '=': return right;
@@ -3421,6 +3432,8 @@ export class Optimizer extends ASTVisitor {
 					this.errors.push('Explicit division by zero');
 					return undefined;
 				}
+				if (isInt) return Math.floor(left / right);
+				if (isBool) return Boolean(left / right);
 				return left / right;
             case '%': case '%=':
 				if (right === 0) {

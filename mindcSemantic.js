@@ -1953,6 +1953,11 @@ export class SemanticAnalyzer extends ASTVisitor {
 				break;
 				
 			case 'read':
+				if (node.arguments.length !== 2) {
+					this.addError(`'${node.functionName}' requires exactly 2 arguments`, node.location);
+				}
+				break;
+				
 			case 'write':
 				if (node.arguments.length !== 3) {
 					this.addError(`'${node.functionName}' requires exactly 3 arguments`, node.location);
