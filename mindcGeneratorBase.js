@@ -1241,6 +1241,15 @@ export class MemoryManager {
 		if (doReset) {
 			process.concat(InstructionBuilder.set(variable + '_pos', this.reservedSize));
 			process.concat(InstructionBuilder.set(variable + '_block', `${this.memoryBlocks[0].name}_id`));
+		} else if (step === 0) {
+			if (!doSet) {
+				return new Instruction([
+					InstructionBuilder.set('__ptrblock', variable + '_block'),
+					InstructionBuilder.set('__ptrpos', variable + '_pos')
+				]);
+			} else {
+				return new Instruction();
+			}
 		}
 		let caller;
 		if (isNear) {
@@ -1256,8 +1265,6 @@ export class MemoryManager {
 				caller.concat(InstructionBuilder.set(variable + '_block', "__ptrblock"));
 			}
 		}
-		// TODO: Special calls when step === 1
-		
 		process.concat(caller);
 		return process;
 	}

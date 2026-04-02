@@ -458,6 +458,18 @@ export class TypeInfo {
 	}
 
 	/**
+	 * Discard qualifiers.
+	 * @param {string[]} qualifiers 
+	 * @returns {TypeInfo}
+	 */
+	discardQualifier(qualifiers) {
+		let result = new TypeInfo(this.name, this.kind, this.size, this.members);
+		Object.assign(result, this);
+		result.qualifiers = result.qualifiers.filter(q => (!qualifiers.includes(q)));
+		return result;
+	}
+
+	/**
 	 * 
 	 * @returns {boolean}
 	 */
@@ -902,7 +914,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 	
 	processStructOrUnionDefinition(defNode) {
         const typeName = defNode.name || `anonymous_${defNode.type}_${Date.now()}`;
-        const isUnion = defNode.type === 'UnionDefinition';
+        const isUnion = defNode.type === 'union';
         const kind = isUnion ? 'union' : 'struct';
         
         // 创建结构体/联合体类型
@@ -1555,7 +1567,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 				}
 				
 				// 设置表达式结果类型
-				node.dataType = argType.pointerTo;
+				node.dataType = argType.pointerTo.discardQualifier(['volatile']);
 				break;
 				
 			case '&': // 取地址操作
@@ -1767,6 +1779,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         if (!objectType) return;
         
         // 数组下标访问 (Updated 8 Feb: also for strings now!)
+		// This should discard volatile qualifier
         if (computed) {
             if (objectType.kind !== 'array' && objectType.kind !== 'pointer') {
 				if (objectType.kind === 'basic' && objectType.name === 'char') {
@@ -1780,7 +1793,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 						 */
 						const dataType = objectType.duplicate();
 						dataType.qualifiers = [...new Set([...dataType.qualifiers, 'const'])];
-						node.dataType = dataType;
+						node.dataType = dataType.discardQualifier(['volatile']);
 					}
 					
 				} else {
@@ -1797,9 +1810,9 @@ export class SemanticAnalyzer extends ASTVisitor {
             }
             
             if (objectType.kind === 'array') {
-                node.dataType = objectType.pointerTo;
+                node.dataType = objectType.pointerTo.discardQualifier(['volatile']);
             } else if (objectType.kind === 'pointer') {
-                node.dataType = objectType.pointerTo;
+                node.dataType = objectType.pointerTo.discardQualifier(['volatile']);
             }
             return;
         }
@@ -1852,7 +1865,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 		}
 		
 		// 记录成员信息
-		node.dataType = memberInfo.type;
+		node.dataType = memberInfo.type;	// Reserve 'volatile' if necessary
 		node.memberInfo = memberInfo;
 		
 		// 设置节点属性，便于代码生成阶段使用

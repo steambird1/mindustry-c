@@ -553,7 +553,7 @@ export class CodeGenerator extends ASTVisitor {
 								InstructionBuilder.reads(`${temp}_block`, `${inst.instructionReturn}.__pointer_block`, `${inst.instructionReturn}.__pointer_pos`),
 								// ...
 								this.memory.outputPointerForwardCall(1, `${inst.instructionReturn}.__pointer`, this.functionManagement, false, false),
-								InstructionBuilder.reads(`${temp}_ptr`, `__ptrblock`, `__ptrpos`)
+								InstructionBuilder.reads(`${temp}_pos`, `__ptrblock`, `__ptrpos`)
 							], temp, new Map([['isPointer', true]]))
 						) : (
 							new Instruction([
@@ -1344,7 +1344,7 @@ export class CodeGenerator extends ASTVisitor {
 						// They are implemented as pointer...
 						result.concat(new Instruction([
 							this.memory.outputStorageOf(assignedSpace, `${valueFetch.instructionReturn}_block`),
-							this.memory.outputStorageOf(assignedSpace.duplicate().forwarding(1), `${valueFetch.instructionReturn}_ptr`)
+							this.memory.outputStorageOf(assignedSpace.duplicate().forwarding(1), `${valueFetch.instructionReturn}_pos`)
 						]));
 					} else {
 						result.concat(this.memory.outputStorageOf(assignedSpace, valueFetch.instructionReturn));
@@ -2358,7 +2358,7 @@ export class CodeGenerator extends ASTVisitor {
 					result.concat(this.memory.outputMemcpyCall(result.instructionReturn, '__return', returnTypeContent.size, this.functionManagement));
 				} else {
 					result.concat(new Instruction([
-						InstructionBuilder.set(`${result.instructionReturn}_ptr`, '__return_ptr'),
+						InstructionBuilder.set(`${result.instructionReturn}_pos`, '__return_pos'),
 						InstructionBuilder.set(`${result.instructionReturn}_block`, '__return_block')
 					]))
 				}
@@ -2638,7 +2638,7 @@ export class CodeGenerator extends ASTVisitor {
 							const tmpVar = this.getTempSymbol(); //this.getTempVariable();
 							preConcat += ` ${tmpVar.getAssemblySymbol()}`;
 							postConcat.concat(this.memory.outputPointerStorageOf(argContent.instructionReturn, tmpVar.getAssemblySymbol()));
-							// postConcat.concat(InstructionBuilder.writes(tmpVar, `${argContent.instructionReturn}_block`, `${argContent.instructionReturn}_ptr`));
+							// postConcat.concat(InstructionBuilder.writes(tmpVar, `${argContent.instructionReturn}_block`, `${argContent.instructionReturn}_pos`));
 						}
 					}
 					result.concat(new SingleInstruction({
