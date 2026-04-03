@@ -130,6 +130,7 @@ export class Instruction extends AttributeClass {
 		this.setAttribute('isNearPointer', symbol.isNearPointer);
 		this.setAttribute('isRegStruct', symbol.myType().isTypeInfo && symbol.myType().isRegStruct());
 		this.setAttribute('isStructRet', ['struct', 'union'].includes(symbol.myType().kind));
+		this.setAttribute('isTemporary', symbol.isVirtualSymbol);
 		return this;
 	}
 	

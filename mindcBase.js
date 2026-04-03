@@ -153,6 +153,9 @@ export class CompilationPhase {
 	 */
     constructor(compiler) {
         this.compiler = compiler;
+        /**
+         * @type {AttributeClass}
+         */
 		this.extraConfig = compiler ? compiler.extraConfig : new AttributeClass();
         this.errors = [];
         this.warnings = [];
@@ -543,6 +546,10 @@ export class TypeQualifierNode extends ASTNode {
 }
 
 export class AsmStatementNode extends ASTNode {
+    /**
+     * 
+     * @param {string} code 
+     */
     constructor(code) {
         super(ASTNodeType.ASM_STATEMENT);
         this.code = code;

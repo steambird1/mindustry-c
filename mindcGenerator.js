@@ -668,12 +668,45 @@ export class CodeGenerator extends ASTVisitor {
 						content: `${instructionSplit[1]}:`,
 						referrer: []
 					})], null, new Map([['noLineCount', true]]));
+				case ":copyObject":
+				case ":copyObjectCp":
+					const param = node.code.substring(node.code.indexOf(' ') + 1).split(',');
+					if (param.length < 2) {
+						throw new InternalGenerationFailure(`Incorrect format of :copyObject`);
+					}
+					const dest = param[0].split(':').map(s => s.trim()), src = param[1].split(':').map(s => s.trim());
+					return this.copyObject(dest[0], src[0], 
+						this.semantic.getTypeInfo(dest[1]), src.length > 1 ? this.semantic.getTypeInfo(src[1]) : null,
+					instructionSplit[0] === ':copyObjectCp');
 			}
-		} 
+		}
+		let finalCode = node.code;
+		if (!this.extraConfig.getAttribute('noEnhancedAsm')) {
+			let fetchers = new Instruction();
+			finalCode = finalCode.replace(
+				/\$\{.*?\}/g,
+				(match, offset, string) => {
+					const expr = match.substring(match.indexOf('{') + 1, match.lastIndexOf('}'));
+					// This will simply put expression inside
+					// !!! TODO !!!
+					const symbol = this.currentScope.lookup(expr);
+					if (!symbol) {
+						throw new InternalGenerationFailure(`Symbol does not exist`);
+					}
+					const result = this.generateSymbolRead(symbol, false);
+					fetchers.concat(result);
+					return result.instructionReturn;
+				}
+			);
+			return fetchers.concat(new SingleInstruction({
+				content: finalCode,
+				referrer: []
+			}));
+		}
 		return new SingleInstruction({
-			content: node.code,
-			referrer: []
-		});
+				content: finalCode,
+				referrer: []
+			});
 		
 	}
 
@@ -884,18 +917,22 @@ export class CodeGenerator extends ASTVisitor {
 	visitReturnStatement(node) {
 		const result = node.argument ? this.visitAndRead(node.argument) : new Instruction();
 		let stmt = new Instruction();
-		stmt.concat(result);
 		if (node.argument) {
 			// Copying should be done in callers, not callees
 			if (node.dataType && node.dataType.isPointerImpl()) {
+				stmt.concat(result);
 				stmt.setAttribute('isPointer', true);
 				stmt.concat([
 					InstructionBuilder.set(`__return_block`, `${result.instructionReturn}_block`),
 					InstructionBuilder.set(`__return_pos`, `${result.instructionReturn}_pos`)
 				])
 			} else if (result.getAttribute('isPointer')) {
+				stmt.concat(result);
 				stmt.concat(this.memory.outputPointerFetchOf(result.instructionReturn, "__return"));
+			} else if (result.getAttribute('isTemporary')) {
+				stmt.concat(result.replace_variable('__return', result.instructionReturn));
 			} else {
+				stmt.concat(result);
 				stmt.concat(this.copyObject('__return', result.instructionReturn, node.dataType, node.argument.dataType, true));
 				//stmt.concat(InstructionBuilder.set('__return', result.instructionReturn));
 			}
@@ -1288,7 +1325,7 @@ export class CodeGenerator extends ASTVisitor {
 		}
 		knownType = knownType ?? node.dataType;
 		let tmpVar = this.getTempSymbol(knownType ?? node.dataType);
-
+		result.setAttribute('isTemporary', true);
 		if (knownType && knownType.isRegStruct()) {
 			// Structure demands special processor
 			let result = new Instruction();
@@ -1309,6 +1346,7 @@ export class CodeGenerator extends ASTVisitor {
 			}
 			result.set_returns(tmpVar);
 			result.setAttribute('isStructRet', true);
+			result.setAttribute('isTemporary', true);
 			return result;
 		} else {
 			//let currentPointer = 0;
@@ -2260,7 +2298,7 @@ export class CodeGenerator extends ASTVisitor {
 		 * @param {TypeInfo | null} [paramType=null]
 		 */
 		const tackleWithParam = (actualType, paramName, param, paramType = null) => 
-			new Instruction([
+			param.getAttribute('isTemporary') ? param.replace_variable(paramName, param.instructionReturn) : new Instruction([
 //				param,
 				this.copyObject(paramName, param.instructionReturn, actualType, paramType)
 			]);
@@ -2278,7 +2316,10 @@ export class CodeGenerator extends ASTVisitor {
 			const param = this.compiler.semanticAnalyzer.isSameType(actualType, this.compiler.semanticAnalyzer.getTypeInfo('content_t'))
 				? this.implicitToContent(node.arguments[i], null, true) 
 				: this.visitAndRead(node.arguments[i]);
-			result.concat(param);
+			if (!param.getAttribute('isTemporary')) {
+				result.concat(param);
+			}
+			
 			/*
 			result.concat(this.generateSymbolWrite(
 				relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name),

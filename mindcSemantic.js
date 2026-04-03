@@ -1,7 +1,8 @@
 import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	VariableDeclarationNode, CastExpression, ConditionalExpressionNode, NumericLiteralNode, StringLiteralNode,
 	CharacterLiteralNode, NullLiteralNode, ASTVisitor, __convert, objectList,
-	liquidList, unitList, buildingList
+	liquidList, unitList, buildingList,
+	InitializerListNode
  } from "./mindcBase.js";
 
 export class VariableLinker {
@@ -1385,7 +1386,10 @@ export class SemanticAnalyzer extends ASTVisitor {
 
             // 检查初始化表达式
             if (declarator.initializer) {
-                this.visit(declarator.initializer);
+                this.visit(declarator.initializer, {
+					givenSymbol: varSymbol,
+					givenType: declarator.dataType
+				});
                 
                 // 类型检查初始化表达式
                 const initType = this.getExpressionType(declarator.initializer);
@@ -1523,8 +1527,10 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * @param {CastExpression} node 
 	 */
 	visitCastExpression(node) {
-		this.visit(node.expression);
 		node.dataType = this.getExpressionType(node);
+		this.visit(node.expression, {
+			givenType: node.dataType
+		});
 	}
 
     visitBinaryExpression(node) {
@@ -1691,7 +1697,10 @@ export class SemanticAnalyzer extends ASTVisitor {
 
     visitAssignmentExpression(node) {
         this.visit(node.left);
-        this.visit(node.right);
+        this.visit(node.right, {
+			givenType: node.left.dataType,
+			givenTypeUnsure: true
+		});
 
         const leftType = this.getExpressionType(node.left);
         let rightType = this.getExpressionType(node.right);
@@ -1883,26 +1892,22 @@ export class SemanticAnalyzer extends ASTVisitor {
         this.visit(node.callee);
 
         // 检查参数
-        node.arguments.forEach(arg => this.visit(arg));
-
-        // 检查函数是否存在
-		/*
-        if (node.callee.type !== ASTNodeType.IDENTIFIER) {
-            this.addError(`Function call target must be an identifier`, node.callee.location);
-            return;
-        }
-		*/
-        const funcSymbol = this.currentScope.lookup(node.callee.name);
+		const funcSymbol = this.currentScope.lookup(node.callee.name);
+		let expectedParams = funcSymbol.type.parameters || [], isFunctionPointer = false;
         if (!funcSymbol || (funcSymbol.kind !== 'function' && 
 			(!funcSymbol.type.type || funcSymbol.type.type.kind !== 'function'))) {
             this.addError(`Undeclared function '${node.callee.name}'`, node.callee.location);
             return;
         }
-		let expectedParams = funcSymbol.type.parameters || [], isFunctionPointer = false;
+		
 		if (funcSymbol.kind !== 'function' && funcSymbol.type.type.kind === 'function') {
 			expectedParams = funcSymbol.type.type.functionTo.type.parameters;
 			isFunctionPointer = true;
 		}
+        node.arguments.forEach((arg, index) => this.visit(arg, {
+			givenType: this.getTypeInfo(expectedParams[index].type),
+			givenTypeUnsure: true
+		}));
 
         // 检查参数数量
        
@@ -2067,9 +2072,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 
     visitReturnStatement(node) {
         if (node.argument) {
-            this.visit(node.argument);
-            
-            if (this.currentFunction) {
+			if (this.currentFunction) {
                 const returnType = this.currentFunction.type.returnType;
                 const argType = this.getExpressionType(node.argument);
                 
@@ -2082,6 +2085,11 @@ export class SemanticAnalyzer extends ASTVisitor {
 
 				node.dataType = this.getTypeInfo(returnType);
             }
+
+            this.visit(node.argument, {
+				givenType: node.dataType
+			});
+            
         } else if (this.currentFunction && this.currentFunction.type.returnType !== 'void') {
             this.addError(`Function must return a value`, node.location);
         } else {
@@ -2105,7 +2113,12 @@ export class SemanticAnalyzer extends ASTVisitor {
         this.currentScope = this.currentScope.parent;
     }
 
-	visitInitializerList(node) {
+	/**
+	 * 
+	 * @param {InitializerListNode} node 
+	 * @param {{ givenSymbol: SymbolEntry?, givenType: TypeInfo }?} param 
+	 */
+	visitInitializerList(node, param) {
 		const declaratorTypes = ['VariableDeclarator', 'Declarator'];
 		node.dataType = this.typeTable.get('null_t').duplicate();	// size might be modified
 		node.dataType.size = 0;
@@ -2114,19 +2127,27 @@ export class SemanticAnalyzer extends ASTVisitor {
 			node.dataType.size += child.dataType ? child.dataType.size : 0;
 		});
 		// Assign a virtual symbol for it
-		if (!node.parent || (node.parent.type !== 'InitializerList'
-			 && (!declaratorTypes.includes(node.parent.type) || !node.parent.symbol))) {
+		// if (!node.parent || (node.parent.type !== 'InitializerList'
+			//  && (!declaratorTypes.includes(node.parent.type) || !node.parent.symbol))) {
+		let requireMemory = true;
+		if (param && param.givenType) {
+			node.dataType = param.givenType;
+			requireMemory = param.givenType.isPointerImpl();
+		}
+		if (!(param && param.givenSymbol)) {
 			const virtualSymbol = new SymbolEntry(
-				`__initializer_${this.virtualCounter++}`, node.dataType, this.currentScope, 'array', null, node.dataType.size);
+			`__initializer_${this.virtualCounter++}`, node.dataType, this.currentScope, requireMemory ? 'array' : 'struct', null, node.dataType.size);
 			virtualSymbol.isConst = true;
-			virtualSymbol.isVolatile = true;
+			virtualSymbol.isVolatile = requireMemory;
 			//virtualSymbol.accessThroughPointer = true;
-			virtualSymbol.implementAsPointer = true;
-			virtualSymbol.needMemoryAllocation = true;
+			virtualSymbol.implementAsPointer = requireMemory;
+			virtualSymbol.needMemoryAllocation = requireMemory;
 			virtualSymbol.isVirtualSymbol = true;
 			virtualSymbol.isStatic = true;
 			node.symbol = virtualSymbol;
 			this.currentScope.addSymbol(virtualSymbol);
+		} else {
+			node.symbol = param.givenSymbol;
 		}
 	}
 
@@ -2213,6 +2234,16 @@ export class SemanticAnalyzer extends ASTVisitor {
                     }
                 }
                 
+				if (node.operator === '/') {
+					if (this.isNumericType(leftType) && this.isNumericType(rightType)) {
+						return this.getTypeInfo('double');
+					}
+				}
+
+				if (['||', '&&', '>=', '<=', '>', '<', '==', '!='].includes(node.operator)) {
+					return this.getTypeInfo('bool');
+				}
+
                 // 默认返回左操作数类型
                 return leftType;
 				
@@ -2297,6 +2328,9 @@ export class SemanticAnalyzer extends ASTVisitor {
 			sourceType = this.getTypeInfo(sourceType);
 		}
 
+		targetType.qualifiers = [...new Set(targetType.qualifiers)];
+		sourceType.qualifiers = [...new Set(sourceType.qualifiers)];
+
 		targetType = targetType.duplicate();
 		sourceType = sourceType.duplicate();
 		
@@ -2329,7 +2363,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 		}
         
         // void指针可以接受任何指针类型
-        if (targetType.kind === 'pointer' && sourceType.kind === 'pointer') {
+        if (['pointer', 'array'].includes(targetType.kind) && ['pointer', 'array'].includes(sourceType.kind)) {
             if (!strictCompatible) {
 				if (targetType.pointerTo && targetType.pointerTo.name === 'void') {
 					return true;
