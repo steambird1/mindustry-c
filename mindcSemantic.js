@@ -521,13 +521,36 @@ export class TypeInfo {
     }
 
 	/**
+	 * Return the result of single-layer dereference (through * or [])
+	 * @returns {TypeInfo}
+	 */
+	extractSingle() {
+		if (this.kind === 'array') {
+			if (!this.pointerTo) return null;
+			/**
+			 * @type {TypeInfo}
+			 */
+			const tmpl = this.duplicate();
+			if (this.arraySize.length > 1) {
+				tmpl.size = tmpl.size / this.arraySize[0];
+				tmpl.arraySize = this.arraySize.slice(1);
+				return tmpl;
+			} else {
+				return this.pointerTo;
+			}
+		} else {
+			return this.pointerTo;
+		}
+	}
+
+	/**
 	 * @remark Shallow copy for members and comprehensive copy for qualifiers.
 	 * @returns {TypeInfo}
 	 */
 	duplicate() {
 		let result = new TypeInfo(this.name, this.kind, this.size);
 		Object.assign(result, this);
-		result.qualifiers = [...this.qualifiers];
+		result.qualifiers = [...new Set(this.qualifiers)];
 		return result;
 	}
 }
@@ -613,6 +636,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			'@unitCount': this.typeTable.get('int'),
 			'@itemCount': this.typeTable.get('int'),
 			'@liquidCount': this.typeTable.get('int'),
+			'@unit': this.typeTable.get('device')
 		};
 		
 		// 建立AST节点和作用域的关联
@@ -1083,45 +1107,77 @@ export class SemanticAnalyzer extends ASTVisitor {
 		}
 		
 		let typeName = typeNameRaw;
+		/*
 		const ptrLocate = typeName.indexOf('*');
 		const ptrSize = (ptrLocate < 0) ? 0 : typeName.length - ptrLocate;
 		if (ptrLocate != -1) {
 			typeName = typeName.slice(0, ptrLocate);
 		}
+			*/
+			/**
+			 * @type {TypeInfo?}
+			 */
 		let result = null;
 
 		// Get qualifiers from typeNameRaw string:
-		const checkQualifiers = ['const', 'volatile'];
-		let existQualifiers = [];
-		const splitResult = typeName.split(' ');
+		const checkQualifiers = ['const', 'volatile', 'near', 'extern', 'auto', 'static'];
+		let existQualifiers = [], relevantPointers = [];
+		const splitResult = typeName.split(' ').map((value, index) => {
+			let result = 0, noPtr = '';
+			for (const chr of value) {
+				if (chr === '*') result++;
+				else noPtr += chr;
+			}
+			relevantPointers[index] = result;
+			return noPtr;
+		});
 		if (splitResult.length <= 0) {
 			return null;
 		}
-		for (const qualifier of checkQualifiers) {
-			if (splitResult.includes(qualifier)) {
-				existQualifiers.push(qualifier);
+
+		for (let currIndex = 0; currIndex < splitResult.length; currIndex++) {
+			const splitter = splitResult[currIndex];
+			if (splitter.indexOf('[') != -1) {
+				if (!result) {
+					console.log(`Internal error: read incorrect type msg ${typeNameRaw}`);
+					return null;
+				}
+				const matches = str => {
+					let match, result = [];
+					let matchReg = /\[[0-9]*\]/g;
+					while (match = matchReg.exec(str)) {
+						result.push(match[0]);
+					}
+					return result;
+				};
+				const arraySize = matches(splitter).map(s => parseInt(s.substring(s.indexOf('[') + 1, s.lastIndexOf(']'))));
+				let totalSize = 1;
+				arraySize.forEach(sz => void(totalSize *= sz));
+				const newResult = new TypeInfo('', 'array', totalSize);
+				newResult.arraySize = arraySize;
+				newResult.pointerTo = result;
+				result = newResult;
+			} else if (!checkQualifiers.includes(splitter)) {
+				typeName = splitter;
+				if (this.typeTable.has(typeName)) {
+					result = this.typeTable.get(typeName).duplicate();
+				} else if (this.structTable.has(typeName)) {
+					result = this.structTable.get(typeName).duplicate();
+				} else {
+					return null;	// Unable to fetch information
+				}
+				for (let i = 0; i < relevantPointers[currIndex]; i++) {
+					const ptrType = new TypeInfo('', 'pointer', 2);
+					ptrType.pointerTo = result;
+					result = ptrType;
+				}
+				result.qualifiers = existQualifiers;
+				existQualifiers = [];
+			} else {
+				existQualifiers.push(splitter);
 			}
 		}
 
-		typeName = splitResult[splitResult.length - 1];
-		
-        // 从类型表获取类型信息
-        if (this.typeTable.has(typeName)) {
-            result = this.typeTable.get(typeName).duplicate();
-        } else if (this.structTable.has(typeName)) {
-            result = this.structTable.get(typeName).duplicate();
-        } else {
-			return null;	// Unable to fetch information
-		}
-		
-		for (let i = 0; i < ptrSize; i++) {
-			const ptrType = new TypeInfo('', 'pointer', 2);
-			ptrType.pointerTo = result;
-			result = ptrType;
-		}
-
-		result.qualifiers = existQualifiers;
-        
         return result;
     }
 	
@@ -1196,7 +1252,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                 returnType: this.typeToString(this.getTypeNameFromTypeNode(node.returnType)),
                 parameters: node.parameters.map(param => ({
                     name: param.name,
-                    type: this.getTypeNameFromTypeNode(param.pointerDepth ? param : param.type) /*param.type.typeName*/
+                    type: this.getTypeNameFromTypeNode(param) /*param.type.typeName*/
 					/* Modified in 5th conversation. Whether this is correct remains to be seen! */
                 }))
             },
@@ -1219,8 +1275,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 
         // 添加参数到作用域
         node.parameters.forEach(param => {
-			const gotType = this.getTypeInfo(this.getTypeNameFromTypeNode(param.pointerDepth ? param : param.type));
-            const paramSymbol = new SymbolEntry(
+			const gotType = this.getTypeInfo(this.getTypeNameFromTypeNode(param));
+			const paramSymbol = new SymbolEntry(
                 param.name,
                 { type: gotType },
                 this.currentScope,
@@ -1308,6 +1364,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 				// TODO: Check array support for typedef
 				if (baseType.arrayDimensions && baseType.arrayDimensions.length > 0) {
 					// baseType seems immutable so far
+					// array kind already inherited!
 					finalType.arraySize = baseType.arraySize;
 					finalType.arrayDimensions = baseType.arrayDimensions;
 				}
@@ -1452,7 +1509,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         if (!typeNode) return null;
         
 		let prefix = "";
-		const ptrSuffix = "*".repeat(typeNode.pointerDepth);
+		let ptrSuffix = "*".repeat(typeNode.pointerDepth);
 		
 		if (typeNode.type === 'TypeSpecifier' && typeNode.getAttribute('qualifiers')) {
 			const attributes = typeNode.getAttribute('qualifiers');
@@ -1466,6 +1523,10 @@ export class SemanticAnalyzer extends ASTVisitor {
             const structName = typeNode.getAttribute('structOrUnionName');
             return prefix + (structName || typeNode.typeName) + ptrSuffix;
         }
+
+		if (typeNode.arrayDimensions && typeNode.arrayDimensions.length) {
+			ptrSuffix += ' ' + typeNode.arrayDimensions.map(dim => `[${dim.value}]`).join('');
+		}
 		
         // 如果是TypeSpecifier节点
         if (typeNode.typeName && typeof typeNode.typeName === 'string') {
@@ -1818,12 +1879,8 @@ export class SemanticAnalyzer extends ASTVisitor {
                 this.addWarning(`Array index should be of type 'int'`, member.location);
             }
             
-            if (objectType.kind === 'array') {
-                node.dataType = objectType.pointerTo.discardQualifier(['volatile']);
-            } else if (objectType.kind === 'pointer') {
-                node.dataType = objectType.pointerTo.discardQualifier(['volatile']);
-            }
-            return;
+            node.dataType = objectType.extractSingle();
+			return;
         }
         
 		// 结构体/联合体成员访问
@@ -1881,6 +1938,15 @@ export class SemanticAnalyzer extends ASTVisitor {
 		node.setAttribute('memberOffset', memberInfo.offset);
 		node.setAttribute('memberName', memberName);
 		
+		if (object.type === 'MemberExpression') {
+			this.visit(object);
+			if (typeof object.getAttribute('totalMemberOffset') === 'number') {
+				node.setAttribute('totalMemberOffset', object.getAttribute('totalMemberOffset') + memberInfo.offset);
+			}
+		} else {
+			node.setAttribute('totalMemberOffset', memberInfo.offset);
+		}
+
 		// 如果是通过指针访问，记录解引用信息
 		if (operator === '->') {
 			node.setAttribute('dereferenced', true);
@@ -2126,6 +2192,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			this.visit(child);
 			node.dataType.size += child.dataType ? child.dataType.size : 0;
 		});
+		node.setAttribute('requiredSize', node.dataType.size);
 		// Assign a virtual symbol for it
 		// if (!node.parent || (node.parent.type !== 'InitializerList'
 			//  && (!declaratorTypes.includes(node.parent.type) || !node.parent.symbol))) {
@@ -2373,13 +2440,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 				}
 			}
             // 指针类型兼容性检查
-            return this.isTypeCompatible(targetType.pointerTo, sourceType.pointerTo);
+            return this.isTypeCompatible(targetType.extractSingle(), sourceType.extractSingle());
         }
         
         if (!strictCompatible) {
 			// 数组到指针的转换
 			if (targetType.kind === 'pointer' && sourceType.kind === 'array') {
-				return this.isTypeCompatible(targetType.pointerTo, sourceType.pointerTo);
+				return this.isTypeCompatible(targetType.extractSingle(), sourceType.extractSingle());
 			}
 			// 数值类型之间的兼容性
 			const numericTypes = ['int', 'short', 'long', 'float', 'double', 'signed', 'unsigned', 'bool'];

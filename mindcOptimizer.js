@@ -452,7 +452,7 @@ export class Optimizer extends ASTVisitor {
 					
 				case 'MemberExpression':
 					// Don't further analyze them!!!
-					this.analyzeNode(node.children[0]);
+					this.analyzeNode(node.children[0], info);
 					if (node.getAttribute('computed')) {
 						this.analyzeNode(node.children[1], info);
 					}
@@ -705,7 +705,7 @@ export class Optimizer extends ASTVisitor {
 	 */
     analyzeVariableDeclaration(node, info = null) {
         // Must be in current scope, so it's correct
-		if (this.shouldRunEvaluation(node, info)) {
+		if (this.shouldRunEvaluation(node, info) && !(info && info.optimizingLoop)) {
 			// Copy to prevent deletion
 			[...node.declarators].forEach(declarator => {
 				this.replaceConstantAtPresent(declarator);
@@ -3476,7 +3476,7 @@ export class Optimizer extends ASTVisitor {
 	 * @param {ASTNode} node 
 	 * @param {*?} special 
 	 * @param {Scope?} selectedScope 
-	 * @returns 
+	 * @returns {boolean}
 	 */
     hasSideEffects(node, special = null, selectedScope = null) {
         if (!node) return false;
@@ -3511,10 +3511,13 @@ export class Optimizer extends ASTVisitor {
 				// TODO: Double-check logic here
 				break;
 			//case 'InitializerList':	// Depending on its children
-			case 'FunctionCall':		// Consider all function calls to be with side effects...
 			case 'AsmStatement':
 				// There won't be cross-function optimizing
 				return true;
+				break;
+			case 'FunctionCall':		// Consider all function calls to be with side effects...
+				if (!inFunction) return true;
+				return node.arguments.some(param => this.hasSideEffects(param, special, selectedScope));
 				break;
 			case 'BuiltinCall':
 				// Exclusion of some

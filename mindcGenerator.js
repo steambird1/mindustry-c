@@ -626,7 +626,7 @@ export class CodeGenerator extends ASTVisitor {
 		const allSymbols = this.semantic.globalScope.recursivelyGetAllSymbols();
 		let staticProcessor = new Instruction();
 		allSymbols.forEach(symbol => {
-			if (symbol.isStatic) {
+			if (symbol.isStatic && !symbol.isGlobal) {
 				const endTag = `${symbol.getAssemblySymbol()}:_static_tag`;
 				staticProcessor.concat(InstructionBuilder.set(endTag, 'false'));
 			}
@@ -1355,7 +1355,7 @@ export class CodeGenerator extends ASTVisitor {
 			 * @param {ASTNode} obj 
 			 * @param {TypeInfo} typeLayer
 			 */
-			assignedSpace = assignedSpace ?? this.memory.assign(this.getTempSpace(), node.dataType.size);
+			assignedSpace = assignedSpace ?? this.memory.assign(this.getTempSpace(), Math.max(node.dataType.size, node.getAttribute('requiredSize') ?? 0));
 			result.concat(assignedSpace.getAssignmentInstruction(tmpVar.getAssemblySymbol()));
 			result.instructionReturn = tmpVar.getAssemblySymbol();
 			result.setAttribute('isPointer', true);
