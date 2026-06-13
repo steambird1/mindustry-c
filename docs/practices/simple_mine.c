@@ -1,8 +1,9 @@
 // Example 2: Let poly tirelessly collect copper or lead (depends on which you lacks)
+#include "mindc.h"
 auto device container1;
 
 const long mySymbol = ((long)@thisx * 1000) + (long)@thisy;
-const content_t ctrlUnit = @poly;
+const content_t ctrlUnit = @mono;
 
 int coreX, coreY;
 const device coreDevice = container1;
@@ -82,6 +83,6 @@ void main() {
     const float maxTimeout = 10 * 1000;
     while (true) {
         ensureAlive();
-        mining(@coal, maxCapacity, maxTimeout);
+        mining(@scrap, maxCapacity, maxTimeout);
     }
 }
