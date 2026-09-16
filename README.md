@@ -46,9 +46,15 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   - Yes, you'll have structs, pointers, unions, and `typedef`!
   - But you won't have `#elif` and VA_ARGS macro (**`#include` and other preprocessor instructions has been added**)
   - Also, support for function pointers might be limited
+ 
+- Some C99 features
+  - `//` comments (introduced in C99)
+  - `bool` type as well as `true` and `false`
+  - `inline` keyword
 
-- Some C/C++ features:
+- Some C++-like features:
   - Partial support for `const` and `auto` (used to describe automatically-connected devices)
+  - Direct use of struct/union name as type name
 
 - Adding special types for Mindustry:
   - `device` for device (conveyors, scatters, etc.)
