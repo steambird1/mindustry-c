@@ -42,6 +42,6 @@ def copyfrom(dirname):
         elif os.path.isdir(path):
             if file not in EXCLUSION and (not (file == '' or file[0] == '.')):
                 createdir(ziel)
-                copyfrom(file)
+                copyfrom(os.path.join(dirname, file))
 
 copyfrom('')

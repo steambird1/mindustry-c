@@ -440,6 +440,14 @@ export class Parser {
 	// (Major manual change: support for pointer -- the former ones are really awful !!!)
     parseTypeSpecifier() {
         // 解析类型限定符（const, volatile）
+
+        // [Manually added: inline, 19 Aug]
+        let isInline = false;
+        if (this.matchToken(TokenType.INLINE)) {
+            this.consumeToken();
+            isInline = true;
+        }
+
         const qualifiers = this.parseTypeQualifiers();
         /*
         // 检查基本类型
@@ -543,6 +551,8 @@ export class Parser {
             typeNode.setAttribute('qualifiers', qualifiers);
             typeNode.setAttribute('isTypedef', true);
 			typeNode.setAttribute('isCustomType', true);
+            // typeNode.setAttribute('isInline', isInline);
+            typeNode.isInline = isInline;
 			typeNode.storageClass = storageClass;
             this.consumeToken();
 			doneTypeFetch = true;
@@ -574,7 +584,9 @@ export class Parser {
         const declarator = this.parseDeclarator(true);
         if (declarator) decName = declarator.name;	// Function declaration / function pointer has no name
         
-        return {
+        let ast = new ASTNode('Parameter');
+
+        ast = {...ast,
             type: paramType,
             name: decName,
             pointerDepth: declarator.pointerDepth,
@@ -582,6 +594,8 @@ export class Parser {
             arrayDimensions: declarator.arrayDimensions,
             location: declarator.location || paramType.location
         };
+
+        return ast;
     }
 
 	parseDeclarator(isFunctionParam = false) {
@@ -609,16 +623,19 @@ export class Parser {
         } else {
             // 解析标识符
             const nameToken = this.getCurrentToken();
-			if (!isFunctionParam) this.expectToken(TokenType.IDENTIFIER);
+			// this.expectToken(TokenType.IDENTIFIER);
             if (nameToken.type != TokenType.IDENTIFIER) {
                 // 如果是函数参数且没有名称（如：void func(int))
                 if (isFunctionParam) {
-                    return ASTBuilder.declarator(null);
+                    declarator = ASTBuilder.declarator(null);   // Possible that there are follow-up pointer info
+                    //return ASTBuilder.declarator(null);
+                } else {
+                    return null;
                 }
-                return null;
+            } else {
+                declarator = ASTBuilder.declarator(nameToken.value);
+                this.consumeToken();
             }
-            
-            declarator = ASTBuilder.declarator(nameToken.value);
             declarator.location = nameToken.location;
         }
         
@@ -643,8 +660,8 @@ export class Parser {
                         const param = this.parseParameter();
                         if (param) {
                             params.push(param);
-							if (this.matchToken(TokenType.IDENTIFIER))
-								this.consumeToken();	// Last parameter identifier is to be consumed !!!
+							// if (this.matchToken(TokenType.IDENTIFIER))
+								// this.consumeToken();	// Last parameter identifier is to be consumed !!!
                         }
 						
                     } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
@@ -791,6 +808,8 @@ export class Parser {
 		// (手动编写)
 		// 注意：如果最后一个是 Identifier，是函数名！
 		let endedAsIdentifier = false;
+
+        if (this.matchTokenTypeAt(currentIndex, [TokenType.INLINE])) currentIndex++;
 
         // 跳过类型说明符
         while (this.matchTokenTypeAt(currentIndex, [
@@ -2193,6 +2212,11 @@ export class Parser {
                 const expression = this.parseExpression();
                 this.expectToken(TokenType.RIGHT_PAREN);
                 return expression;
+            }
+
+            case TokenType.LEFT_BRACE: {
+                const inits = this.parseInitializerList();
+                return inits;
             }
             
             default:

@@ -66,6 +66,7 @@ export class Optimizer extends ASTVisitor {
         this.errors = [];
         this.warnings = [];
 		this.inlinedScopeId = 0;
+		this.inlineCounter = 0;
         
         // 优化状态
         this.functionCallGraph = new Map();
@@ -266,7 +267,7 @@ export class Optimizer extends ASTVisitor {
 		}
 		varRef = varRef.duplicate();
 		varRef.name = targetName;
-		varRef.variableReferrer = new VariableLinker(targetName);
+		varRef.variableReferrer = new VariableLinker(targetName, varRef);
 		targetScope.addSymbol(varRef);
 		const scopePath = scope.getPath();
 		const targetPath = targetScope.getPath();
@@ -930,10 +931,10 @@ export class Optimizer extends ASTVisitor {
 					if (!(info && info.optimizingLoop)) {
 						if (conditionValue) {
 							// 条件总是为真，可以标记then分支总是执行
-							this.warnings.push(`Condition always true in if statement`, node.test.location);
+							this.addWarning(`Condition always true in if statement`, node.test.location);
 						} else {
 							// 条件总是为假，可以标记else分支总是执行（如果有）
-							this.warnings.push(`Condition always false in if statement`, node.test.location);
+							this.addWarning(`Condition always false in if statement`, node.test.location);
 						}
 					}			
 					
@@ -1018,7 +1019,7 @@ export class Optimizer extends ASTVisitor {
 				if (conditionValue == 0) {
 					// 条件总是为假，循环永远不会执行
 					node.setAttribute('neverExecuted', true);
-					this.warnings.push(`Loop never executed (while(false))`, node.test.location);
+					this.addWarning(`Loop never executed (while(false))`, node.test.location);
 				}
 			}
 			
@@ -1083,7 +1084,7 @@ export class Optimizer extends ASTVisitor {
 			}
 			
 			if (node.getAttribute('infiniteLoop')) {
-				this.warnings.push(`Infinite loop detected (while(true))`, node.test.location);
+				this.addWarning(`Infinite loop detected (while(true))`, node.test.location);
 			}
 		} else {
 			if (!node.getAttribute('iteration')) {
@@ -1325,7 +1326,7 @@ export class Optimizer extends ASTVisitor {
 				} else {
 					// 条件总是为假，循环永远不会执行
 					node.setAttribute('neverExecuted', true);
-					this.warnings.push(`Loop never executed (for with constant false condition)`, node.test.location);
+					this.addWarning(`Loop never executed (for with constant false condition)`, node.test.location);
 				}
 			}
 			
@@ -1397,7 +1398,7 @@ export class Optimizer extends ASTVisitor {
 			}
 			// Warning for infinite for loop
 			if (node.getAttribute('infiniteLoop')) {
-				this.warnings.push(`Infinite loop detected (for with constant true condition)`, node.location);
+				this.addWarning(`Infinite loop detected (for with constant true condition)`, node.location);
 			}
 		} else {
 			if (!node.getAttribute('iteration')) {
@@ -2233,7 +2234,7 @@ export class Optimizer extends ASTVisitor {
 		
 		// 替换循环
 		this.replaceNode(forNode, replacementNode);
-		this.warnings.push(`Replaced never-executed loop with initialization only`);
+		this.addWarning(`Replaced never-executed loop with initialization only`);
 		return true;
 	}
 
@@ -2334,7 +2335,10 @@ export class Optimizer extends ASTVisitor {
 				// 变量没有确定的最终值，不能完全优化
 				return false;
 			}
-			varFinalValues.set(varName, finalValue);
+			if (scopePath == loopNode.scope.getPath()) {
+				// Inside variables are ignored
+				varFinalValues.set(varName, finalValue);
+			}
 			
 			// 检查变量的使用情况
 			const usage = variableUses.get(varName);
@@ -2387,7 +2391,7 @@ export class Optimizer extends ASTVisitor {
 		// 替换循环节点
 		this.replaceNode(loopNode, replacementNode);
 		
-		this.warnings.push(`Optimized deterministic loop with ${iterationCount} iterations to direct assignments`);
+		this.addWarning(`Optimized deterministic loop with ${iterationCount} iterations to direct assignments`);
 		return true;
 	}
 
@@ -2495,7 +2499,7 @@ export class Optimizer extends ASTVisitor {
 				replacementStatements.push(exprStmt);
 			}
 			*/
-			this.warnings.push(`Partially unrolled loop: ${firstSideEffect} side-effect-free iterations converted to direct assignments`);
+			this.addWarning(`Partially unrolled loop: ${firstSideEffect} side-effect-free iterations converted to direct assignments`);
 		}
 		
 		// 修改原循环，减少迭代次数
@@ -2815,7 +2819,7 @@ export class Optimizer extends ASTVisitor {
                     this.removeNodeFromParent(astNode);
                     this.modified = true;
 					if (this.extraConfig.getAttribute('warningAll'))
-                    	this.warnings.push(`Removed unused variable '${symbol.name}' in scope ${scope.getPath()}`);
+                    	this.addWarning(`Removed unused variable '${symbol.name}' in scope ${scope.getPath()}`);
                 }
             }
         });
@@ -2907,8 +2911,10 @@ export class Optimizer extends ASTVisitor {
 					const target = symbol.variableReferrer.getName();
 					console.log(`Replaced identifier for shrunk expression as:`,target,`at:`,node);
 					node.setAttribute('originalName', node.name);
+					node.setAttribute('originalSymbol', symbol);
 					// node.setAttribute('performedReplacement', target);
 					node.name = target;
+					node.symbol = symbol.variableReferrer.parent.entry ?? node.symbol;
 					// node.setAttribute('candidateRemoval', 2);
 					// symbol.variableReferrer.registerCandidate(node);
 					this.modified = true;				// This creates only candidate removal
@@ -2937,7 +2943,7 @@ export class Optimizer extends ASTVisitor {
 				 */
 				const symbol = node.symbol;
 				if (symbol && ((!( symbol.isGlobal || (restrictions && (restrictions === 'strict' || restrictions.has(symbol))) ))
-						 || symbol.isConst)) {
+						 || (symbol.isConst && symbol.type !== 'parameter'))) {
 					const constValue = constants.get(node.name);
 					if (constValue !== undefined) {
 						// 替换为常量值
@@ -3207,10 +3213,10 @@ export class Optimizer extends ASTVisitor {
 					canInline: funcNode.body !== null,
                     node: funcNode,
                     scope: symbol.scope,
-                    size: this.estimateFunctionSize(funcNode),
 					writtenVarsUnknown: true,
-					writtenVars: []
-                });
+					writtenVars: [],
+					...this.estimateFunctionSize(funcNode)
+                });	
             }
         });
         
@@ -3270,7 +3276,7 @@ export class Optimizer extends ASTVisitor {
 						this.removeNodeFromParent(funcNode);
 						this.modified = true;
 						if (this.extraConfig.getAttribute('warningAll')) {
-							this.warnings.push(`Removed unused function '${funcName}'`);
+							this.addWarning(`Removed unused function '${funcName}'`);
 						}
 						
 					}
@@ -3292,7 +3298,9 @@ export class Optimizer extends ASTVisitor {
 			const inlineEstimate = (info.calls + paraSize) * info.size;
 			const noInlineEstimate = (info.size + paraSize + 4 + (4 + paraSize) * info.calls);
             if (info.calls === 1 || info.isInline || inlineEstimate <= noInlineEstimate) {
-                inlineCandidates.push(funcName);
+				const bad = ((info.size > (this.compiler.config.getAttribute('maxInlineSize') ?? 25) && (!info.isInline)) 
+					|| (info.maxDepth > (this.compiler.config.getAttribute('maxInlineDepth') ?? 5)));
+                if (!bad) inlineCandidates.push(funcName);
             }
         });
         
@@ -3412,8 +3420,10 @@ export class Optimizer extends ASTVisitor {
 	 */
     evaluateBinaryOperation(operator, left, right, typeDelim = null) {
 
+		const isBuiltinConstant = x => typeof x === 'object' && x.isBuiltinConstant;
+
 		let isEqual = (l, r) => {
-			if (typeof l === 'object' && typeof r === 'object' && l.isBuiltinConstant && r.isBuiltinConstant) {
+			if (isBuiltinConstant(l) && isBuiltinConstant(r)) {
 				return l.name === r.name;
 			}
 			return l === r;
@@ -3422,6 +3432,10 @@ export class Optimizer extends ASTVisitor {
 		const isInt = typeDelim && (this.semantic.isTypeCompatibleForAny(typeDelim, ['int', 'long', 'signed', 'unsigned'], true));
 		const isBool = typeDelim && (this.semantic.isTypeCompatibleForAny(typeDelim, ['bool'], true));
 
+		if (!(['==', '!='].includes(operator)) && (isBuiltinConstant(left) || isBuiltinConstant(right))) {
+			return undefined;
+		}
+
         switch (operator) {
 			case '=': return right;
             case '+': case '+=': return left + right;
@@ -3429,7 +3443,7 @@ export class Optimizer extends ASTVisitor {
             case '*': case '*=': return left * right;
             case '/': case '/=':
 				if (right === 0) {
-					this.errors.push('Explicit division by zero');
+					this.addError('Explicit division by zero');
 					return undefined;
 				}
 				if (isInt) return Math.floor(left / right);
@@ -3437,7 +3451,7 @@ export class Optimizer extends ASTVisitor {
 				return left / right;
             case '%': case '%=':
 				if (right === 0) {
-					this.errors.push('Explicit modulo by zero');
+					this.addError('Explicit modulo by zero');
 					return undefined;
 				}
 				return left % right;
@@ -3481,6 +3495,9 @@ export class Optimizer extends ASTVisitor {
     hasSideEffects(node, special = null, selectedScope = null) {
         if (!node) return false;
 		selectedScope = node.scope ?? (selectedScope ?? this.currentScope);
+		/**
+		 * @type {boolean}
+		 */
 		const inFunction = special && special.inFunction;
 
 		const functionBuiltin = ['set', 'op', 'jump', 'asm'];
@@ -3582,7 +3599,7 @@ export class Optimizer extends ASTVisitor {
 				const variableUses = this.variableUses.get(scopePath);
 				const variableState = variableUses.get(node.name);
 				if (variableState && (!variableState.canOptimize)) {
-					return true;
+					if (!inFunction) return true;
 				}
 				break;
         }
@@ -4095,9 +4112,10 @@ export class Optimizer extends ASTVisitor {
     estimateFunctionSize(funcNode) {
         if (!funcNode.body) return 0;
         
-        let size = 0;
-        const countStatements = (node) => {
+        let size = 0, maxDepth = 0;
+        const countStatements = (node, depth = 0) => {
             if (!node) return;
+			if (depth > maxDepth) maxDepth = depth;
             
             switch (node.type) {
                 case 'ExpressionStatement':
@@ -4114,7 +4132,7 @@ export class Optimizer extends ASTVisitor {
             }
             
             if (node.children) {
-                node.children.forEach(child => countStatements(child));
+                node.children.forEach(child => countStatements(child, depth + 1));
             }
 
 			const fieldsToCheck = [
@@ -4126,16 +4144,16 @@ export class Optimizer extends ASTVisitor {
 
 			for (const field of fieldsToCheck) {
 				if (Array.isArray(node[field])) {
-					node[field].forEach(item => countStatements(item));
+					node[field].forEach(item => countStatements(item), depth + 1);
 				} else if (node[field] && typeof node[field] === 'object') {
-					countStatements(node[field]);
+					countStatements(node[field], depth + 1);
 				}
 			}
 
         };
         
         countStatements(funcNode.body);
-        return size;
+        return { size, maxDepth };
     }
 
     shouldInlineFunction(funcName) {
@@ -4192,7 +4210,7 @@ export class Optimizer extends ASTVisitor {
 		if (funcInfo.calls === 0) {
 			this.globalScope.removeSymbol(funcName);	// Manually added
 			this.removeNodeFromParent(funcInfo.node);
-			this.warnings.push(`Removed unused function '${funcName}' after inlining`);
+			this.addWarning(`Removed unused function '${funcName}' after inlining`);
 		}
 	}
 
@@ -4418,9 +4436,9 @@ export class Optimizer extends ASTVisitor {
 					// To prepare for returning, the corresponding content must be put elsewhere
 					targetNode.statements.splice(index, 1);
 					// For returning, create a special symbol
-					returnerName = `${funcNode.name}:@:${this.inlinedScopeId}`;
+					returnerName = `${funcNode.name}:@${this.inlineCounter++}:${this.inlinedScopeId}`;
 					const returnerSymbol = new SymbolEntry(returnerName, callNode.dataType, tmpScope, 'variable', null, callNode.dataType.size ?? 1);
-					tmpScope.addSymbol(returnerSymbol);
+					tmpScope.parent.addSymbol(returnerSymbol);	// So that the code block can have access
 					/**
 					 * @todo Create an identifier for returning...
 					 */
@@ -4537,6 +4555,10 @@ export class Optimizer extends ASTVisitor {
 								const returnAssigner = ASTBuilder.assignmentExpression('=', returnAssignerIdent, stmt.argument);
 								stmt.argument.parent = returnAssigner;
 								returnAssignerIdent.parent = returnAssigner;
+								returnAssignerIdent.symbol = returnerIdent.symbol;
+								returnAssignerIdent.dataType = returnerIdent.symbol.extractType();
+								returnAssigner.symbol = returnerIdent.symbol;
+								returnAssigner.dataType = returnerIdent.symbol.extractType();
 								actualStmt = returnAssigner;
 								
 								// Not that easy. In fact, you have to migrate the whole 'parentNode'...
@@ -4751,13 +4773,15 @@ export class Optimizer extends ASTVisitor {
 		}
 		
 		this.modified = true;
-		this.warnings.push(`Inlined function '${funcNode.name}'`);
+		this.addWarning(`Inlined function '${funcNode.name}'`);
 		return true;
 	}
 
 	/**
 	 * 检查函数是否适合内联
 	 * @remark This function is probably not needed
+	 * @param {FunctionDeclarationNode} funcNode 
+	 * @param {FunctionCallNode} callNode 
 	 */
 	isSuitableForInlining(funcNode, callNode, context) {
 		// 检查参数数量
@@ -4769,12 +4793,7 @@ export class Optimizer extends ASTVisitor {
 		if (context.currentFunction === funcNode.name) {
 			return false; // 递归调用不内联
 		}
-		
-		// 检查函数体大小
-		const functionSize = this.estimateFunctionSize(funcNode);
-		if (functionSize > 25) { // 阈值，可根据需要调整
-			return false;
-		}
+		// Size is checked elsewhere
 		
 		return true;
 	}
@@ -4932,7 +4951,7 @@ export class Optimizer extends ASTVisitor {
 				// 检查声明符
 				if (!decl.declarators || decl.declarators.length === 0) {
 					this.modified = true;
-					this.warnings.push('Removed empty global variable declaration');
+					this.addWarning('Removed empty global variable declaration');
 					return false;
 				}
 				
@@ -4958,7 +4977,7 @@ export class Optimizer extends ASTVisitor {
 				
 				if (usefulDeclarators.length === 0) {
 					this.modified = true;
-					this.warnings.push(`Removed global variable declaration with no used variables`);
+					this.addWarning(`Removed global variable declaration with no used variables`);
 					return false;
 				}
 				
@@ -4987,7 +5006,7 @@ export class Optimizer extends ASTVisitor {
 				
 				if (!isTypeUsed && typeDef.type !== 'TypedefDeclaration') {
 					this.modified = true;
-					// this.warnings.push(`Removed unused type definition '${typeName}'`);
+					// this.addWarning(`Removed unused type definition '${typeName}'`);
 					return false;
 				}
 				
@@ -5007,7 +5026,7 @@ export class Optimizer extends ASTVisitor {
 					// 函数声明（不是定义），可以删除
 					this.modified = true;
 					if (this.extraConfig.getAttribute('warningAll'))
-						this.warnings.push(`Removed unused function declaration '${func.name}'`);
+						this.addWarning(`Removed unused function declaration '${func.name}'`);
 					return false;
 				}
 				
@@ -5084,6 +5103,7 @@ export class Optimizer extends ASTVisitor {
 	 */
 	cloneAST(node) {
 		if (!node) return null;
+		// console.log("Now cloning AST",node);	// debug ...
 		
 		// 创建新节点
 		const clone = new ASTNode(node.type, node.location);
@@ -5099,28 +5119,21 @@ export class Optimizer extends ASTVisitor {
 		// 复制特定字段
 		switch (node.type) {
 			case 'Program':
-				if (node.functions) clone.functions = [];
-				if (node.globalDeclarations) clone.globalDeclarations = [];
-				if (node.typeDefinitions) clone.typeDefinitions = [];
 				break;
 				
 			case 'FunctionDeclaration':
 				clone.name = node.name;
-				clone.returnType = node.returnType ? this.cloneAST(node.returnType) : null;
-				clone.parameters = node.parameters ? node.parameters.map(p => this.cloneAST(p)) : [];
 				clone.isInline = node.isInline || false;
 				break;
 				
 			case 'VariableDeclaration':
 				clone.type = node.type ? this.cloneAST(node.type) : null;
-				clone.declarators = node.declarators ? node.declarators.map(d => this.cloneAST(d)) : [];
 				clone.storageClass = node.storageClass;
 				break;
 				
 			case 'VariableDeclarator':
 			case 'Declarator':
 				clone.name = node.name;
-				if (node.initializer) clone.initializer = this.cloneAST(node.initializer);
 				break;
 				
 			case 'Identifier':
@@ -5140,61 +5153,40 @@ export class Optimizer extends ASTVisitor {
 			case 'AssignmentExpression':
 			case 'BinaryExpression':
 				clone.operator = node.operator;
-				clone.left = node.left ? this.cloneAST(node.left) : null;
-				clone.right = node.right ? this.cloneAST(node.right) : null;
 				break;
 				
 			case 'UnaryExpression':
 				clone.operator = node.operator;
-				clone.argument = node.argument ? this.cloneAST(node.argument) : null;
 				clone.prefix = node.prefix !== undefined ? node.prefix : true;
 				break;
 				
 			case 'IfStatement':
-				clone.test = node.test ? this.cloneAST(node.test) : null;
-				clone.consequent = node.consequent ? this.cloneAST(node.consequent) : null;
-				clone.alternate = node.alternate ? this.cloneAST(node.alternate) : null;
 				break;
 				
 			case 'WhileStatement':
-				clone.test = node.test ? this.cloneAST(node.test) : null;
-				clone.body = node.body ? this.cloneAST(node.body) : null;
 				break;
 				
 			case 'ForStatement':
-				clone.init = node.init ? this.cloneAST(node.init) : null;
-				clone.test = node.test ? this.cloneAST(node.test) : null;
-				clone.update = node.update ? this.cloneAST(node.update) : null;
-				clone.body = node.body ? this.cloneAST(node.body) : null;
 				break;
 				
 			case 'ReturnStatement':
-				clone.argument = node.argument ? this.cloneAST(node.argument) : null;
 				break;
 				
 			case 'CompoundStatement':
-				clone.statements = node.statements ? node.statements.map(s => this.cloneAST(s)) : [];
 				break;
 				
 			case 'ExpressionStatement':
-				clone.expression = node.expression ? this.cloneAST(node.expression) : null;
 				break;
 				
 			case 'FunctionCall':
-				clone.callee = node.callee ? this.cloneAST(node.callee) : null;
-				clone.arguments = node.arguments ? node.arguments.map(a => this.cloneAST(a)) : [];
 				break;
 				
 			case 'BuiltinCall':
 				clone.functionName = node.functionName;
-				clone.arguments = node.arguments ? node.arguments.map(a => this.cloneAST(a)) : [];
 				break;
 				
 			case 'MemberExpression':
-				if (node.getChild(0)) clone.addChild(this.cloneAST(node.getChild(0)));
-				if (node.getChild(1)) clone.addChild(this.cloneAST(node.getChild(1)));
 				clone.setAttribute('computed', node.getAttribute('computed') || false);
-				clone.setAttribute('operator', node.getAttribute('operator'));
 				break;
 				
 			default:
@@ -5207,8 +5199,8 @@ export class Optimizer extends ASTVisitor {
 		}
 		
 		const fieldsToCheck = [
-				'functions', 'globalDeclarations', 'typeDefinitions',
-				'statements', 'expression', 'test', 'consequent', 'alternate',
+				'functions', 'globalDeclarations', 'typeDefinitions', 'returnType',
+				'statements', 'expression', 'test', 'consequent', 'alternate', 'parameters',
 				'body', 'init', 'update', 'argument', 'left', 'right',
 				'declarators', 'arguments', 'callee', 'initializer'
 			];
@@ -5402,7 +5394,7 @@ export class Optimizer extends ASTVisitor {
 			if (hasUnconditionalControlFlow) {
 				// 标记为已修改
 				modified = true;
-				this.warnings.push(`Removed dead code after unconditional control flow in compound statement`);
+				this.addWarning(`Removed dead code after unconditional control flow in compound statement`);
 				continue;
 			}
 			
@@ -5467,18 +5459,18 @@ export class Optimizer extends ASTVisitor {
 					// 删除else分支
 					ifStmt.alternate = null;
 					modified = true;
-					this.warnings.push(`Removed else branch from always-true if statement`);
+					this.addWarning(`Removed else branch from always-true if statement`);
 				}
 			} else {
 				// 条件为假，只保留else分支（如果有）
 				if (ifStmt.alternate) {
 					// 用else分支替换整个if语句
 					// 注意：这里我们只标记修改，实际替换在调用者中处理
-					this.warnings.push(`If statement with always-false condition can be replaced with else branch`);
+					this.addWarning(`If statement with always-false condition can be replaced with else branch`);
 				} else {
 					// 没有else分支，整个if语句都可以删除
 					// 注意：这里我们只标记修改，实际删除在调用者中处理
-					this.warnings.push(`If statement with always-false condition and no else branch can be removed`);
+					this.addWarning(`If statement with always-false condition and no else branch can be removed`);
 				}
 			}
 		}
@@ -5495,7 +5487,7 @@ export class Optimizer extends ASTVisitor {
 				// 条件总是为真
 				if (ifStmt.alternate) {
 					// 有else分支，可以删除else分支
-					this.warnings.push(`Removing else branch from always-true if statement`);
+					this.addWarning(`Removing else branch from always-true if statement`);
 					
 					// 检查else分支是否有副作用
 					const elseHasSideEffects = ifStmt.getAttribute('alternateHasSideEffects');
@@ -5514,7 +5506,7 @@ export class Optimizer extends ASTVisitor {
 				// 条件总是为假
 				if (ifStmt.consequent) {
 					// 有then分支，可以删除then分支
-					this.warnings.push(`Removing then branch from always-false if statement`);
+					this.addWarning(`Removing then branch from always-false if statement`);
 					
 					// 检查then分支是否有副作用
 					const thenHasSideEffects = ifStmt.getAttribute('consequentHasSideEffects');
@@ -5648,7 +5640,7 @@ export class Optimizer extends ASTVisitor {
 		
 		if (neverExecuted) {
 			// 循环永远不会执行
-			this.warnings.push(`Removing never-executed loop`);
+			this.addWarning(`Removing never-executed loop`);
 			
 			// 检查初始化部分是否有副作用
 			// 对于while循环，没有独立的初始化部分，但条件可能有副作用
@@ -5706,7 +5698,7 @@ export class Optimizer extends ASTVisitor {
 		
 		if (neverExecuted) {
 			// 循环永远不会执行
-			this.warnings.push(`Removing never-executed for loop`);
+			this.addWarning(`Removing never-executed for loop`);
 			
 			// 检查初始化和条件是否有副作用
 			const initHasSideEffects = forStmt.getAttribute('initHasSideEffects');
@@ -5744,7 +5736,7 @@ export class Optimizer extends ASTVisitor {
 		if (wasOptimized && iterationCount !== undefined) {
 			if (iterationCount === 1) {
 				// 只有一次迭代，可以展开
-				this.warnings.push(`Unrolling single-iteration for loop`);
+				this.addWarning(`Unrolling single-iteration for loop`);
 				
 				// 创建复合语句代替循环
 				const compoundStmt = ASTBuilder.compoundStatement();
@@ -5921,7 +5913,7 @@ export class Optimizer extends ASTVisitor {
 					
 					if (node.statements.length !== originalLength) {
 						modified = true;
-						this.warnings.push(`Removed empty statements from compound statement`);
+						this.addWarning(`Removed empty statements from compound statement`);
 					}
 					
 					// 递归清理每个语句

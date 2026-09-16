@@ -83,9 +83,16 @@ export class CodeGenerator extends ASTVisitor {
 			if (this.memory.memoryBlocks.length == 0) {
 				noMemory = true;
 			}
-			this.recuriveInfo = this.findRecursiveFunctions(this.functionCallGraph);
+			this.recursiveInfo = this.findRecursiveFunctions(this.functionCallGraph);
 			this.currentScope = this.semantic.globalScope;
-			if (ast.scope) this.processHeapMemory(ast.scope);
+			/**
+			 * @type {SymbolEntry[]}
+			 */
+			let globalRegs = [];
+			if (ast.scope) {
+				globalRegs = this.processHeapMemory(ast.scope);
+				// Configure these global ones by writing into results
+			}
 			else this.addWarning('Program has no global scope');
 			/*
 			this.semantic.typeTable.forEach(elem => {
@@ -112,6 +119,15 @@ export class CodeGenerator extends ASTVisitor {
 				this.memory.forwarding(this.RValueMax);
 				result.concat(this.functionManagement.getSystemInitializer(this.memory));
 			}
+			
+			globalRegs.forEach(symbol => {
+				symbol.memberHandler.stackSymbols.forEach(tmps => {
+					const tmpAssembly = tmps.getAssemblySymbol();
+					const ref = symbol.memberHandler.regStructMem.get(tmpAssembly);
+					result.concat(tmps.memoryLocation.getAssignmentInstruction(ref));
+				});
+			});
+
 			if (mainSymbol) {
 				result.concat(this.functionManagement.getFunctionCall('main', new Map(), this.memory, true));
 			} else {
@@ -141,21 +157,30 @@ export class CodeGenerator extends ASTVisitor {
 	 * accessThroughPointer - This value is stored in heap memory area (e.g. volatile int)
 	 * implementAsPointer - This value is a pointer
 	 * (These can be used simultaneously)
+	 * 
+	 * @returns {SymbolEntry[]}
 	 */
-	processHeapMemory(scope, staticAllocOnly = false, mustAlloc = false, insideFunctionName = "") {
+	 processHeapMemory(scope, staticAllocOnly = false, mustAlloc = false, insideFunctionName = "") {
 		
 		if (scope.astNode && scope.astNode.type === 'FunctionDeclaration') {
-			if (this.recuriveInfo.has(scope.astNode.name)) {
+			if (this.recursiveInfo.has(scope.astNode.name)) {
 				mustAlloc = true;
 			}
 		}
-			
-		scope.getAllSymbols().forEach(
-			/**
+		/**
+		 * @type {SymbolEntry[]}
+		 */
+		let regStructHandling = [];
+		
+		// let extraCommand = new Instruction([]);
+		const handler = /**
 			 * 
 			 * @param {SymbolEntry} symbol 
 			 */
 			symbol => {
+
+			const doImmediateAlloc = !staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol;
+
 			// Update symbol size information
 			if ((mustAlloc || symbol.isAddressed || symbol.isVolatile) && symbol.kind !== 'function') {
 				/*
@@ -175,11 +200,27 @@ export class CodeGenerator extends ASTVisitor {
 				//case 'struct':	// Not allocating memory space for structures for now
 				case 'parameter':
 				//case 'union':
+					if (symbol.kind === 'parameter') {
+						const funcRegion = symbol.getFunctionRegion();
+						if (!this.recursiveInfo.has(funcRegion)) {
+							break;	// Not necessary!
+						}
+					}
 					const symbolType = symbol.myType();
 					symbol.size = symbolType.size;
 					switch (symbolType.kind) {
 						case 'struct':
 						case 'union': 
+							// Notice: configuring them as virtual symbols right away causes errors!
+							const { stackSymbols, singular, regStructMem } = this.handleStructExtra([symbol], scope, false);
+							stackSymbols.forEach(symb => {
+								// Assign memory space for these symbols first (as long as it is necessary)
+								handler(symb);
+							});
+							if (doImmediateAlloc) symbol.memberHandler = { stackSymbols, regStructMem };
+							// Otherwise the allocation is NOT handled until reaching the top of the function call.
+
+							regStructHandling.push(symbol);
 							break;
 						case 'device':
 						case 'null':
@@ -271,7 +312,7 @@ export class CodeGenerator extends ASTVisitor {
 
 				symbol.needMemoryAllocation = true;
 				// The memory space is otherwise dynamically allocated
-				if (!staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol) {
+				if (doImmediateAlloc) {
 					// if () {
 					const result = allocator(symbol.size, symbol.isNearPointer, symbol.getAssemblySymbol());
 					if (!result.success) {	// This is actually unused
@@ -295,10 +336,13 @@ export class CodeGenerator extends ASTVisitor {
 					}
 				}
 			}
-		});
+		};
+		scope.getAllSymbols().forEach(symb => void(handler(symb)));
 		scope.children.forEach(child => {
 			this.processHeapMemory(child, true, mustAlloc);
 		});
+
+		return regStructHandling;
 	}
 
 	requireRValueMemory(size) {
@@ -503,7 +547,6 @@ export class CodeGenerator extends ASTVisitor {
 	operatesRead(instruction, returner) {
 		return this.operatesWith(instruction.raw_replace_all('op_read', '{opw}'), returner);
 	}
-
 	/**
 	 * Do **NOT** use this with `visitAndRead()` or it will return unexpected results.
 	 * This function perform re-reading of return results to ensure correctness for operations
@@ -595,6 +638,70 @@ export class CodeGenerator extends ASTVisitor {
 
 	/**
 	 * 
+	 * @param {SymbolEntry[]} symbols 
+	 * @param {Scope} scope
+	 * @param {boolean} [setVirtual=true] 
+	 */
+	handleStructExtra(symbols, scope, setVirtual = true) {
+		/**
+		 * @type {SymbolEntry[]}
+		 */
+		let stackSymbols = [];
+		/**
+		 * @type {Map<string, string>}
+		 */
+		let regStructMem = new Map();
+		let tempSymbolId = 0;
+
+		const recWork =
+			/**
+			 * 
+			 * @param {TypeInfo} symType 
+			 * @param {string} startName 
+			 */ 
+			(symType, startName) => {
+				if (symType && symType.isTypeInfo && symType.isRegStruct()) {
+					symType.members.forEach(
+						/**
+						 * 
+						 * @param {MemberInfo} member 
+						 */
+						member => {
+							if (member.type.isPointerImpl()) {
+								const tmpSymbol = new SymbolEntry(`__rsstack_${tempSymbolId++}`, member.type, scope, 'variable', null, member.type.size);
+								tmpSymbol.isVirtualSymbol = setVirtual;
+
+								regStructMem.set(tmpSymbol.getAssemblySymbol(), `${startName}.${member.name}`);
+								stackSymbols.push(tmpSymbol);
+							} else if (member.type.isRegStruct()) {
+								recWork(member.type, `${startName}.${member.name}`);
+							}
+						}
+					)
+				}
+		};
+
+		symbols.forEach(/**
+				 * 
+				 * @param {SymbolEntry} symbol 
+				 */
+				symbol => {
+				// Symbol values
+					const symType = symbol.myType();
+					if (symType.isTypeInfo) recWork(symType, symbol.getAssemblySymbol());
+			});
+		const singular = new Instruction([]);
+		regStructMem.forEach((value, key) => {
+			singular.concat(new Instruction([
+				InstructionBuilder.set(`${value}_block`, `${key}_block`),
+				InstructionBuilder.set(`${value}_pos`, `${key}_pos`)
+			]))
+		});
+		return { stackSymbols, singular, regStructMem };
+	}
+
+	/**
+	 * 
 	 * @param {ProgramNode} node 
 	 * @returns {Instruction}
 	 */
@@ -609,16 +716,30 @@ export class CodeGenerator extends ASTVisitor {
 				mainSymbol = funcSymbol;
 			}
 			let stackSymbols = [];
-			funcSymbol.owningScope.recursivelyGetAllSymbols().forEach(symbol => {
+			const currentSymbols = funcSymbol.owningScope.recursivelyGetAllSymbols();
+			currentSymbols.forEach(
+				/**
+				 * 
+				 * @param {SymbolEntry} symbol 
+				 */
+				symbol => {
 				// Symbol values
-				if ((symbol.accessThroughPointer || symbol.needMemoryAllocation) && !(symbol.isStatic)) {
-					stackSymbols.push(symbol);
-				}
+					const symType = symbol.myType();
+					if ((symbol.accessThroughPointer || symbol.needMemoryAllocation) && !(symbol.isStatic)) {
+						stackSymbols.push(symbol);
+					}
 			});
-			this.functionManagement.addFunction(func.name, new Instruction(), funcSymbol.owningScope, stackSymbols, func.name === 'main', this.recuriveInfo.has(func.name));
+			const { stackSymbols: extraSymbols, singular, regStructMem } = this.handleStructExtra(currentSymbols);
+			stackSymbols = [...stackSymbols, ...extraSymbols];
+			this.functionManagement.addFunction(func.name, new Instruction(), funcSymbol.owningScope, stackSymbols, func.name === 'main', this.recursiveInfo.has(func.name));
+			/**
+			 * @type {Instruction}
+			 */
 			const funcBody = this.visit(func);	// Note: visit comes first
-			this.functionManagement.functionCollection.get(func.name).body = funcBody;
-			
+			const actualBody = new Instruction([]);
+			actualBody.concat(singular);
+			actualBody.concat(funcBody);
+			this.functionManagement.functionCollection.get(func.name).body = actualBody;
 		});
 		/**
 		 * @type {SymbolEntry[]}
@@ -854,7 +975,7 @@ export class CodeGenerator extends ASTVisitor {
 	 * @remark This function doesn't do registration itself. It simply calls for body information.
 	 */
 	visitFunctionDeclaration(node) {
-		const recursive = this.recuriveInfo.has(node.name);
+		const recursive = this.recursiveInfo.has(node.name);
 		let pushedScope = null;
 		if (node.scope) {
 			pushedScope = this.currentScope;
@@ -1364,8 +1485,16 @@ export class CodeGenerator extends ASTVisitor {
 				const warnedTypes = ['device', 'null_t'];
 				typeLayer = typeLayer ?? obj.dataType;
 				
+				const step = (typeLayer && (typeLayer.size != null)) ? typeLayer.size 
+					: (obj.dataType.size ?? 0);
+				let processed = 0;
+
 				if (obj.type === 'InitializerList') {
-					obj.children.forEach(child => initializerProcessor(child, typeLayer ? typeLayer.pointerTo : null));
+					obj.children.forEach(child => {
+						processed += initializerProcessor(child, typeLayer ? typeLayer.pointerTo : null);
+					});
+					// Might be sth greater:
+					if (processed < step) assignedSpace.forwarding(step - processed);
 				} else {
 					if (obj.dataType && warnedTypes.includes(obj.dataType.name)) {
 						this.addWarning(`Initializing object of type ${obj.dataType.toString()} in initializer list is an undefined behavior`, node.location);
@@ -1387,10 +1516,10 @@ export class CodeGenerator extends ASTVisitor {
 					} else {
 						result.concat(this.memory.outputStorageOf(assignedSpace, valueFetch.instructionReturn));
 					}
-					assignedSpace.forwarding(
-						(typeLayer && (typeLayer.size != null)) ? typeLayer.size 
-						: (obj.dataType.size ?? 0));
+					processed = step;
+					assignedSpace.forwarding(step);
 				}
+				return processed;
 			};
 			initializerProcessor(node, knownType);
 		}
@@ -1632,9 +1761,36 @@ export class CodeGenerator extends ASTVisitor {
 					varResult
 				));
 				*/
+
+				const referrer = typeName => typeName.slice(0, typeName.length - 2);
+				const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
+				const categorize = single => {
+					if (single.dataType) {
+						if (this.semantic.isTypeCompatibleForAny(single.dataType, special, true)) {
+							return 1;
+						} else if (this.semantic.isTypeCompatible(single.dataType, 'content_t', true)) {
+							return 2;
+						}
+					}
+					return 0;
+				};
+				const extra = new Instruction();
+				let lret = '{op_r0}', rret = '{op_r1}';
+				const lcat = categorize(left), rcat = categorize(right);
+				const setExtra = single => {
+					const tmpVar = this.getTempVariable();
+					extra.concat(InstructionBuilder.lookup(referrer(left.dataType.name), tmpVar, single));
+					return tmpVar;
+				};
+				if (lcat != rcat) {
+					if (lcat == 1) lret = setExtra(lret);
+					if (rcat == 1) rret = setExtra(rret);
+				}
+
 				result.concat_returns(this.operates(
 					this.operatesReads([left, right], new Instruction([
-						InstructionBuilder.op(operatorTranslation.get(node.operator), '{op}', '{op_r0}', '{op_r1}')
+						extra,
+						InstructionBuilder.op(operatorTranslation.get(node.operator), '{op}', lret, rret)
 					])),
 					varResult
 				));
@@ -1764,23 +1920,7 @@ export class CodeGenerator extends ASTVisitor {
 		} else {
 			// struct will be copied through memcpy.
 			// Note that arrays or pointers are "byref".
-			if (node.right.type === 'InitializerList') {
-				// Pre-evaluated pointer with initializer list, perform something like memcpy
-				let result = new Instruction();
-				const leftPointer = this.processLValGetter(node.left, true, true);	// Because we want the array information
-				node.setAttribute('generatedLVal', leftPointer);
-				const listData = this.visitAndRead(node.right, {
-					assignmentTarget: leftPointer.instructionReturn
-				});
-				result.concat(leftPointer);
-				result.concat(listData);
-				result.concat(this.memory.outputMemcpyCall(leftPointer.instructionReturn, listData.instructionReturn,
-					node.right.dataType.size ?? 0, this.functionManagement
-				));
-				result.setAttribute('isPointer', true);	// Must be a pointer...
-				result.instructionReturn = leftPointer.instructionReturn;
-				return result;
-			} else if (node.right.dataType && (node.right.dataType.kind === 'struct' || node.right.dataType.kind === 'union')) {
+			if (node.right.dataType && (node.right.dataType.kind === 'struct' || node.right.dataType.kind === 'union')) {
 				const leftPointer = this.processLValGetter(node.left, true, true);
 				const structData = this.visitAndRead(node.right, {
 					assignmentTarget: leftPointer.instructionReturn
@@ -1796,6 +1936,30 @@ export class CodeGenerator extends ASTVisitor {
 						structData.instructionReturn));
 				}
 				
+			} else if (node.right.type === 'InitializerList') {
+				// Pre-evaluated pointer with initializer list, perform something like memcpy
+				let result = new Instruction();
+				const leftPointer = this.processLValGetter(node.left, true, true);	// Because we want the array information
+				node.setAttribute('generatedLVal', leftPointer);
+				const listData = this.visitAndRead(node.right, {
+					assignmentTarget: leftPointer.instructionReturn
+				});
+				result.concat(leftPointer);
+				result.concat(listData);
+				if (node.left.dataType && node.left.dataType.kind === 'pointer') {
+					const lret = leftPointer.instructionReturn, rret = listData.instructionReturn;
+					result.concat(new Instruction([
+						InstructionBuilder.set(`${lret}_block`, `${rret}_block`),
+						InstructionBuilder.set(`${lret}_pos`, `${rret}_pos`)
+					]));
+				} else {
+					result.concat(this.memory.outputMemcpyCall(leftPointer.instructionReturn, listData.instructionReturn,
+						node.right.dataType.size ?? 0, this.functionManagement
+					));
+				}
+				result.setAttribute('isPointer', true);	// Must be a pointer...
+				result.instructionReturn = leftPointer.instructionReturn;
+				return result;
 			} else if (node.left.dataType && node.right.dataType && !this.semantic.isSameType(node.left.dataType, node.right.dataType)) {
 				if (special.includes(node.right.dataType.name) && node.left.dataType.name === 'content_t') {
 					value = this.implicitToContent(node.right, referrer(node.right.dataType.name));
@@ -1918,21 +2082,36 @@ export class CodeGenerator extends ASTVisitor {
 			);
 		}
 		
+		let objectRoot = node.children[0];	// Will be altered if there's total offset
+
 		// TODO: WHAT IF IT IS A 'AccessThroughPointer'?
-		const leftsideOrigin = this.processLValGetter(node.children[0], true, true); // Thus it returns a duplicated version of address
+		let leftsideOrigin = this.processLValGetter(objectRoot, true, true); // Thus it returns a duplicated version of address
 		const isNearPointerHere = leftsideOrigin.getAttribute('isNearPointer') ? true : false;
 		const isRegStructHere = leftsideOrigin.getAttribute('isRegStruct') ? true : false;
-		finalResult.concat(leftsideOrigin);
-		if (node.getAttribute('computed')) {
-			index = this.visitAndRead(node.children[1]);	// Simple calculation
-			finalResult.concat(index);				// Make such visit first!!
-		}
 		if (isRegStructHere) {
+			/**
+			 * @type {TypeInfo?}
+			 */
+			const nodeType = node.dataType;
+
+			finalResult.concat(leftsideOrigin);
 			finalResult.instructionReturn = `${leftsideOrigin.instructionReturn}.${node.children[1].name}`;
 			finalResult.setAttribute('isNearPointer', isNearPointerHere); // inherit the feature
 			finalResult.setAttribute('isRegStruct', isRegStructHere);
-			return finalResult;
+			return finalResult.set_returns_type(nodeType);
 		} 
+		// Memory access, from then on
+		let knownTotalOffset = null;
+		if (node.hasAttribute('totalSource') && node.hasAttribute('totalMemberOffset')) {
+			objectRoot = node.getAttribute('totalSource');
+			leftsideOrigin = this.processLValGetter(objectRoot, true, true);
+			knownTotalOffset = node.getAttribute('totalMemberOffset');
+		} else if (node.getAttribute('computed')) {
+			index = this.visitAndRead(node.children[1]);	// Simple calculation
+			finalResult.concat(index);				// Make such visit first!!
+		}
+		finalResult.concat(leftsideOrigin);	// Deferred evaluation
+
 		const finalSymbol = this.getTempSymbol(this.semantic.getTypeInfo('null_t*'));
 		let leftsideDuplicate;	// Then perform setter
 		if (this.guaranteeTemporarySymbolReg) {
@@ -1959,7 +2138,9 @@ export class CodeGenerator extends ASTVisitor {
 			 * @type {number | string}
 			 */
 			let resultIndex;
-			if (ratio > 1) {
+			if (knownTotalOffset) {
+				resultIndex = knownTotalOffset;
+			} else if (ratio > 1) {
 				if (node.children[1].type === 'NumericLiteral') {
 					resultIndex = ratio * node.children[1].value;
 				} else {
@@ -1975,7 +2156,8 @@ export class CodeGenerator extends ASTVisitor {
 			// Struct/union: seek member inside it. Already calculated by SEM.
 			// Also it is guaranteed that this is a member
 			
-			finalResult.concat(this.memory.outputPointerForwardCall(node.getAttribute('memberOffset'), leftsideDuplicate, this.functionManagement, false, true, isNearPointerHere));
+			finalResult.concat(this.memory.outputPointerForwardCall(knownTotalOffset ?? node.getAttribute('memberOffset'), 
+				leftsideDuplicate, this.functionManagement, false, true, isNearPointerHere));
 			finalResult.instructionReturn = leftsideDuplicate;
 			
 		}
@@ -2161,6 +2343,8 @@ export class CodeGenerator extends ASTVisitor {
 						let insideType = null;
 						if (left.dataType && left.dataType.pointerTo) {
 							insideType = left.dataType.pointerTo;
+						} else if (traditional) {
+							return precall.setAttribute('isPointer', true).setAttribute('isPointerAccess', true);
 						} else {
 							this.addWarning(`Unknown reference`, left.location);
 						}
@@ -2271,20 +2455,42 @@ export class CodeGenerator extends ASTVisitor {
 	visitFunctionCall(node) {
 		const referrer = typeName => typeName.slice(0, typeName.length - 2);
 		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
-		const recursive = this.recuriveInfo.has(this.currentFunction);
+		let recursive = this.recursiveInfo.has(this.currentFunction);
 		let result = new Instruction();
 		// Prepare for all parameters
-		let relevantFunction = node.callee ? node.callee.symbol : null, isFunctionPointer = false;
+		/**
+		 * @type {SymbolEntry?}
+		 */
+		let relevantFunction = node.callee ? node.callee.symbol : null;
+		let isFunctionPointer = true;
+		/**
+		 * @deprecated
+		 */
 		let detFunctionSymbol = null;
-		if (relevantFunction.kind !== 'function') {
-			relevantFunction = relevantFunction.type.type.functionTo;
-			isFunctionPointer = true;
-		} else {
-			detFunctionSymbol = relevantFunction;
-		}
+		/**
+		 * @type {TypeInfo?}
+		 */
+		let relevantFunctionType = null;
 		if (!relevantFunction) {
-			throw new InternalGenerationFailure(`Unknown function ${node.callee ? node.callee.name : '<error-function>'}`);
+			if (node.callee.dataType && node.callee.dataType.functionTo) {
+				relevantFunctionType = node.callee.dataType.functionTo.type;
+			}
+			// Otherwise, be ready for failure
+		} else if (relevantFunction.kind !== 'function') {
+			relevantFunction = relevantFunction.type.type.functionTo;
+			relevantFunctionType = relevantFunction.myType();
+			if (relevantFunction.isAuto) {
+				recursive = true;
+			}
+		} else {
+			detFunctionSymbol = relevantFunction;	// ?
+			relevantFunctionType = relevantFunction.type;
+			isFunctionPointer = false;
 		}
+		if (!relevantFunctionType) {
+			throw new InternalGenerationFailure(`Unknown function ${node.callee ? (node.callee.name ?? '<unknown-function>') : '<error-function>'}`);
+		}
+		// Warning: function pointer does NOT care about this
 		if (recursive) {
 			result.concat(this.functionManagement.getPreservationCall(this.currentFunction));
 		}
@@ -2303,15 +2509,15 @@ export class CodeGenerator extends ASTVisitor {
 				this.copyObject(paramName, param.instructionReturn, actualType, paramType)
 			]);
 
-		for (let i = 0; i < relevantFunction.type.parameters.length && i < node.arguments.length; i++) {
+		for (let i = 0; i < relevantFunctionType.parameters.length && i < node.arguments.length; i++) {
 			/**
 			 * @type {TypeInfo}
 			 */
 			let actualType;
 			if (isFunctionPointer) {
-				actualType = this.compiler.semanticAnalyzer.getTypeInfo(relevantFunction.type.parameters[i].type);
+				actualType = this.compiler.semanticAnalyzer.getTypeInfo(relevantFunctionType.parameters[i].type);
 			} else {
-				actualType = relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name).type.type;
+				actualType = relevantFunction.owningScope.lookupCurrent(relevantFunctionType.parameters[i].name).type.type;
 			}
 			const param = this.compiler.semanticAnalyzer.isSameType(actualType, this.compiler.semanticAnalyzer.getTypeInfo('content_t'))
 				? this.implicitToContent(node.arguments[i], null, true) 
@@ -2319,13 +2525,6 @@ export class CodeGenerator extends ASTVisitor {
 			if (!param.getAttribute('isTemporary')) {
 				result.concat(param);
 			}
-			
-			/*
-			result.concat(this.generateSymbolWrite(
-				relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name),
-				param.instructionReturn
-			));
-			*/
 			
 			// This is so-called "post-processing"
 			
@@ -2344,7 +2543,9 @@ export class CodeGenerator extends ASTVisitor {
 		// Pre-call ended.
 		// Calling
 		if (isFunctionPointer) {
-			result.concat(this.functionManagement.getRawFunctionCall(node.callee.symbol.getAssemblySymbol(),
+			const callee = this.visitAndRead(node.callee);
+			result.concat(callee);
+			result.concat(this.functionManagement.getRawFunctionCall(callee.instructionReturn,
 				new Map(), this.currentFunction === 'main', recursive ? null : this.currentFunction));
 		} else {
 			result.concat(this.functionManagement.getFunctionCall(
@@ -2368,9 +2569,9 @@ export class CodeGenerator extends ASTVisitor {
 		}
 		
 		// Get a copy of function return
-		if (relevantFunction.type.returnType !== 'void' && !node.getAttribute('disposeReturn')) {
+		if (relevantFunctionType.returnType !== 'void' && !node.getAttribute('disposeReturn')) {
 			//this.getTempVariable();
-			const returnTypeContent = this.semantic.getTypeInfo(relevantFunction.type.returnType);
+			const returnTypeContent = this.semantic.getTypeInfo(relevantFunctionType.returnType);
 			if (!returnTypeContent) {
 				this.addError("Return type unclear");
 			}
@@ -2911,7 +3112,7 @@ export class CodeGenerator extends ASTVisitor {
 			this.currentScope.addSymbol(symbol);
 		}
 
-		if (this.recuriveInfo.has(this.currentFunction)) {
+		if (this.recursiveInfo.has(this.currentFunction)) {
 			//symbol.accessThroughPointer = true;
 			//symbol.needMemoryAllocation = true;
 			symbol.isRecursiveSymbol = true;

@@ -149,6 +149,7 @@ export const TokenType = {
     PREPROCESSOR_IF: 'PREPROCESSOR_IF',
     PREPROCESSOR_IFDEF: 'PREPROCESSOR_IFDEF',
     PREPROCESSOR_IFNDEF: 'PREPROCESSOR_IFNDEF',
+    PREPROCESSOR_ELIF: 'PREPROCESSOR_ELIF',
     PREPROCESSOR_ELSE: 'PREPROCESSOR_ELSE',
     PREPROCESSOR_ENDIF: 'PREPROCESSOR_ENDIF',
     PREPROCESSOR_INCLUDE: 'PREPROCESSOR_INCLUDE',
@@ -245,6 +246,7 @@ export const KEYWORDS = {
     '#define': TokenType.PREPROCESSOR_DEFINE,
     '#undef': TokenType.PREPROCESSOR_UNDEF,
     '#if': TokenType.PREPROCESSOR_IF,
+    '#elif': TokenType.PREPROCESSOR_ELIF,
     '#else': TokenType.PREPROCESSOR_ELSE,
     '#ifdef': TokenType.PREPROCESSOR_IFDEF,
     '#ifndef': TokenType.PREPROCESSOR_IFNDEF,
@@ -352,6 +354,9 @@ export class Lexer {
         // 预处理器状态
         this.macros = {...macros, '__MINDUSTRY__': '1'}; // 存储宏定义 {name: value}
         this.macroParams = {...macroParams};
+        /**
+         * @type {{ origin: bool, executed: bool, suppress: bool }}
+         */
         this.conditionalStack = []; // 条件编译栈，存储是否跳过代码块的状态
         this.skipping = false; // 当前是否处于“跳过代码”状态
         this.pragmas = []; // 收集所有 #pragma 指令内容
@@ -852,6 +857,9 @@ export class Lexer {
             case TokenType.PREPROCESSOR_IF:
                 this.handleIf(args, startLocation);
                 break;
+            case TokenType.PREPROCESSOR_ELIF:
+                this.handleElif(args, startLocation);
+                break;
             case TokenType.PREPROCESSOR_ELSE:
                 this.handleElse(args, startLocation);
                 break;
@@ -886,10 +894,10 @@ export class Lexer {
         
         const trimmedArgs = args.trim();
         const firstSpace = trimmedArgs.indexOf(' ');
-
+        const firstParen = trimmedArgs.indexOf('(');
+        const endParen = firstParen < 0 ? -1 : trimmedArgs.indexOf(')');
+        
         const resolveParameters = (text) => {
-            const firstParen = trimmedArgs.indexOf('(');
-            const endParen = trimmedArgs.substring(0, firstSpace).lastIndexOf(')');
             if (firstParen === -1) {
                 return {
                     name: text,
@@ -912,13 +920,15 @@ export class Lexer {
             this.macroParams[macroInfo.name] = macroInfo.parameters;
         } else {
             // 有值的宏定义
-            const macroName = trimmedArgs.substring(0, firstSpace);
+            const endLocation = firstParen < 0 ? firstSpace : endParen + 1;
+            const macroName = trimmedArgs.substring(0, endLocation);
             const macroInfo = resolveParameters(macroName);
-            let macroValue = trimmedArgs.substring(firstSpace + 1).trim();
-            
+            let macroValue = trimmedArgs.substring(endLocation).trim();
+            /*
             if (macroValue.startsWith('(') && macroValue.endsWith(')')) {
                 macroValue = macroValue.substring(1, macroValue.length - 1);
             }
+                */
             // Parameter list?
             this.macroParams[macroInfo.name] = macroInfo.parameters;
             this.macros[macroInfo.name] = macroValue;
@@ -946,7 +956,7 @@ export class Lexer {
         
         if (this.skipping) {
             // 如果已经在跳过块中，仍然需要处理条件栈
-            this.conditionalStack.push(this.skipping);
+            this.conditionalStack.push({origin: this.skipping, executed: false, suppress: true});
             this.skipping = true;
             this.tokens.push(new Token(TokenType.PREPROCESSOR_IF, `#if ${args}`.trim(), location));
             return;
@@ -960,7 +970,7 @@ export class Lexer {
             const conditionValue = result !== 0;
             
             // 将当前 skipping 状态压栈
-            this.conditionalStack.push(this.skipping);
+            this.conditionalStack.push({ origin: this.skipping, executed: conditionValue, suppress: false });
             // 更新 skipping 状态
             this.skipping = !conditionValue;
             
@@ -978,7 +988,7 @@ export class Lexer {
     handleIfdef(args, location) {
         // Preventing embedding problem
         if (this.skipping) {
-            this.conditionalStack.push(this.skipping);
+            this.conditionalStack.push({ origin: this.skipping, executed: false, suppress: true });
             this.skipping = true;
             this.tokens.push(new Token(TokenType.PREPROCESSOR_IFDEF, `#ifdef ${args}`.trim(), location));
             return;
@@ -987,7 +997,7 @@ export class Lexer {
         const macroName = args.trim();
         const isDefined = this.macros.hasOwnProperty(macroName);
         
-        this.conditionalStack.push(this.skipping);
+        this.conditionalStack.push({ origin: this.skipping, executed: isDefined, suppress: false });
         this.skipping = this.skipping || !isDefined;
         this.tokens.push(new Token(TokenType.PREPROCESSOR_IFDEF, `#ifdef ${args}`.trim(), location));
     }
@@ -995,7 +1005,7 @@ export class Lexer {
     // 处理 #ifndef
     handleIfndef(args, location) {
         if (this.skipping) {
-            this.conditionalStack.push(this.skipping);
+            this.conditionalStack.push({ origin: this.skipping, executed: false, suppress: true });
             this.skipping = true;
             this.tokens.push(new Token(TokenType.PREPROCESSOR_IFNDEF, `#ifndef ${args}`.trim(), location));
             return;
@@ -1004,26 +1014,65 @@ export class Lexer {
         const macroName = args.trim();
         const isDefined = this.macros.hasOwnProperty(macroName);
         
-        this.conditionalStack.push(this.skipping);
+        this.conditionalStack.push({ origin: this.skipping, executed: isDefined, suppress: false });
         this.skipping = this.skipping || isDefined;
         this.tokens.push(new Token(TokenType.PREPROCESSOR_IFNDEF, `#ifndef ${args}`.trim(), location));
     }
     
+    // Manually added
+    handleElif(args, location) {
+        const condition = args.trim();
+        
+        try {
+            // 计算表达式
+            const result = this.evaluateExpression(condition);
+            
+            // 在C语言中，0为假，非0为真
+            const conditionValue = result !== 0;
+            
+            // 更新 skipping 状态
+            if (this.conditionalStack.length === 0) {
+                this.addError(`#elif without matching #if`, location);
+            } else if (!this.conditionalStack[this.conditionalStack.length - 1].executed) {
+                const top = this.conditionalStack[this.conditionalStack.length - 1];
+                if (!top.suppress && conditionValue) {
+                    this.skipping = false;
+                    top.executed = true;
+                }
+            } else {
+                this.skipping = true;
+            }
+            
+            this.tokens.push(new Token(TokenType.PREPROCESSOR_ELIF, `#elif ${args}`.trim(), location));
+        } catch (error) {
+            this.addError(`Error evaluating #elif expression: ${error.message}`, location);
+            // this.conditionalStack.push(this.skipping);
+            // this.skipping = true;
+            this.tokens.push(new Token(TokenType.PREPROCESSOR_ELIF, `#elif ${args}`.trim(), location));
+        }
+    }
+
     // 处理 #endif
     handleEndif(args, location) {
         if (this.conditionalStack.length === 0) {
             this.addError(`#endif without matching #if`, location);
         } else {
-            this.skipping = this.conditionalStack.pop();
+            this.skipping = this.conditionalStack.pop().origin;
         }
         this.tokens.push(new Token(TokenType.PREPROCESSOR_ENDIF, `#endif ${args}`.trim(), location));
     }
 
     handleElse(args, location) {
+
+        const checker = x => (!x.executed && !x.suppress);
+
         if (this.conditionalStack.length === 0) {
             this.addError(`#else without matching #if`, location);
-        } else if (!this.conditionalStack[this.conditionalStack.length - 1]) {
-            this.skipping = !this.skipping;
+        } else if (checker(this.conditionalStack[this.conditionalStack.length - 1])) {
+            this.skipping = false;
+            this.conditionalStack[this.conditionalStack.length - 1].executed = true;
+        } else {
+            this.skipping = true;
         }
         this.tokens.push(new Token(TokenType.PREPROCESSOR_ELSE, `#else ${args}`.trim(), location));
     }

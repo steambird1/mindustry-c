@@ -128,9 +128,26 @@ export class Instruction extends AttributeClass {
 		this.setAttribute('isSymbolic', true);
 		this.setAttribute('relevantSymbol', symbol);
 		this.setAttribute('isNearPointer', symbol.isNearPointer);
-		this.setAttribute('isRegStruct', symbol.myType().isTypeInfo && symbol.myType().isRegStruct());
-		this.setAttribute('isStructRet', ['struct', 'union'].includes(symbol.myType().kind));
+		// this.setAttribute('isRegStruct', symbol.myType().isTypeInfo && symbol.myType().isRegStruct());
+		// this.setAttribute('isStructRet', ['struct', 'union'].includes(symbol.myType().kind));
 		this.setAttribute('isTemporary', symbol.isVirtualSymbol);
+
+		const typeInfo = symbol.myType();
+		return typeInfo.isTypeInfo ? this.set_returns_type(typeInfo) : this;
+	}
+
+	/**
+	 * 
+	 * @param {TypeInfo?} typeInfo 
+	 * @returns {Instruction}
+	 */
+	set_returns_type(typeInfo) {
+		if (!typeInfo) return this;
+		this.setAttribute('isRegStruct', typeInfo.isRegStruct());
+		this.setAttribute('isStructRet', ['struct', 'union'].includes(typeInfo.kind));
+		this.setAttribute('isNearPointer', (this.getAttribute('isNearPointer') === true) || (typeInfo.isNear() && typeInfo.isPointerImpl()));
+		this.setAttribute('isPointer', typeInfo.isPointerImpl());
+		this.setAttribute('isPointerAccess', (this.getAttribute('isPointerAccess') === true) || (typeInfo.isPointerImpl() && !typeInfo.isStrictPointerImpl()));
 		return this;
 	}
 	
@@ -627,10 +644,11 @@ export class FunctionRegisterer {
 	/**
 	 * Allocating heap memory for function symbols.
 	 * @param {string} functionName 
-	 * @param {boolean | null} setStackpos 
+	 * @param {boolean | null} [setStackpos=true] 
+	 * @param {boolean} [noRecursive=false] 
 	 * @returns {Instruction}
 	 */
-	getFunctionStackAssignment(functionName, setStackpos = true) {
+	getFunctionStackAssignment(functionName, setStackpos = true, noRecursive = false) {
 		const dynamicSetStackpos = (setStackpos === null);
 		/**
 		 * @type {functionInfo}
@@ -704,7 +722,7 @@ export class FunctionRegisterer {
 			heapPreparation.concat(outResetStackpos());
 			heapPreparation.concat(new InstructionReferrer(terminate, 'set_stackpos_term'));
 		} else if (setStackpos) {
-			heapPreparation.concat(outSetStackpos());
+			if (!noRecursive) heapPreparation.concat(outSetStackpos());
 		} else {
 			heapPreparation.concat(outResetStackpos());
 		}
@@ -832,7 +850,7 @@ export class FunctionRegisterer {
 						result.concat(new InstructionReferrer(skipPrsv, 'noprsv'));
 						return result;
 					})()
-				) : this.getFunctionStackAssignment(name, true);
+				) : this.getFunctionStackAssignment(name, true, true);
 			
 			connector.concat(heapPreparation);
 			connector.concat(func.body);

@@ -759,12 +759,7 @@ export class ASTVisitor extends CompilationPhase {
      * @param {ASTVisitorReduce | null} [reduce=null] 
 	 */
 	further(node, callee, halt = null, reduce = null) {
-		const fields = [
-			'functions', 'globalDeclarations', 'typeDefinitions',
-			'statements', 'expression', 'test', 'consequent', 'alternate',
-			'body', 'init', 'update', 'argument', 'left', 'right',
-			'declarators', 'arguments', 'callee', 'initializer'
-		];
+		const fields = ['functions', 'globalDeclarations', 'typeDefinitions', 'returnType', 'statements', 'statement', 'expression', 'test', 'consequent', 'alternate', 'body', 'init', 'update', 'argument', 'left', 'right', 'declarators', 'arguments', 'callee', 'initializer', 'parameters'];
         let result = null;
 		for (const field of fields) {
 			if (node[field]) {

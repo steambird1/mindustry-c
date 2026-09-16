@@ -2,15 +2,19 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	VariableDeclarationNode, CastExpression, ConditionalExpressionNode, NumericLiteralNode, StringLiteralNode,
 	CharacterLiteralNode, NullLiteralNode, ASTVisitor, __convert, objectList,
 	liquidList, unitList, buildingList,
-	InitializerListNode
+	InitializerListNode,
+	TypeSpecifierNode,
+	DeclaratorNode
  } from "./mindcBase.js";
+import { Instruction, MemoryBlockInfo } from "./mindcGeneratorBase.js";
 
 export class VariableLinker {
 	/**
 	 * 
 	 * @param {string} variableName 
+	 * @param {SymbolEntry} entry
 	 */
-	constructor(variableName) {
+	constructor(variableName, entry) {
 		/**
 		 * @type {VariableLinker[]}
 		 */
@@ -30,6 +34,7 @@ export class VariableLinker {
 		 */
 		this.name = variableName;
 		this.rejecting = false;
+		this.entry = entry;
 	}
 
 	/**
@@ -121,6 +126,9 @@ export class SymbolEntry {
         this.writeCount = 0; // 写入次数
 		// Unused end
 	
+		/**
+		 * @type {MemoryBlockInfo?}
+		 */
         this.memoryLocation = null;
 		this.accessThroughPointer = false;	// In-memory variable, must be accessed through memory blocks
 											// THIS ALSO MEANS THAT: you can and should always dereference it to get the real value
@@ -133,6 +141,12 @@ export class SymbolEntry {
 		this.extraMemoryLocation = null;	// For variables having both access-through and implement-as, this will be the memory space where their value is placed.
 		this.isExtraNear = false;			// This should be written by and only by code generator
 
+		/**
+		 * @type { {stackSymbols: SymbolEntry[], regStructMem: Map<string, string> }? }
+		 */
+		this.memberHandler = null;
+
+		this.isAuto = false;
 		this.isAutoDevice = false;	// Must be manually done!
 		this.isVirtualSymbol = false;
 		this.isRecursiveSymbol = false;
@@ -160,7 +174,7 @@ export class SymbolEntry {
         this.isDead = false;
 
 		// Optimizer tag used now
-		this.variableReferrer = new VariableLinker(name);
+		this.variableReferrer = new VariableLinker(name, this);
     }
 	
 	// 标记为常量
@@ -179,6 +193,7 @@ export class SymbolEntry {
 	/**
 	 * 
 	 * @returns {TypeInfo | null | {returnType: string; parameters: any[]}}
+	 * @deprecated Use it only when you don't care about memory attributes.
 	 */
 	myType() {
 		if (!this.type) return null;
@@ -249,13 +264,22 @@ export class SymbolEntry {
 		/**
 		 * @type {TypeInfo}
 		 */
-		let resultType = this.myType().duplicate();
-		if (this.isAutoDevice) resultType.qualifiers.push('auto');
-		if (this.isRegister) resultType.qualifiers.push('register');
-		if (this.isConst || this.type.isConst) resultType.qualifiers.push('const');
-		if (this.isVolatile || this.type.isVolatile) resultType.qualifiers.push('volatile');
-		if (this.isExtern) resultType.qualifiers.push('extern');
-		if (this.isStatic) resultType.qualifiers.push('static');
+		let resultType;
+		if (this.kind !== 'function') {
+			// Let it crash otherwise.
+			resultType = this.myType().duplicate();
+			// if (resultType.isTypeInfo) {
+			if (this.isAuto || this.isAutoDevice) resultType.qualifiers.push('auto');
+			if (this.isRegister) resultType.qualifiers.push('register');
+			if (this.isConst || resultType.isConst()) resultType.qualifiers.push('const');
+			if (this.isVolatile || resultType.isVolatile()) resultType.qualifiers.push('volatile');
+			if (this.isExtern) resultType.qualifiers.push('extern');
+			if (this.isStatic) resultType.qualifiers.push('static');
+			// }	// I guess it should crash otherwise. If there's no judgment, it will
+		} else {
+			resultType = new TypeInfo(this.name, 'function', 1);
+			resultType.functionTo = this;
+		}
 		return resultType;
 	}
 
@@ -276,6 +300,18 @@ export class SymbolEntry {
 		 */
 		let checkScope = s => (s ? (s == scope || checkScope(s.parent)) : false);
 		return checkScope(this.scope);
+	}
+
+	/**
+	 * @returns {string?}
+	 */
+	getFunctionRegion() {
+		const search = scope => {
+			if (scope.type === 'f') return scope.astNode.name;
+			else if (!scope.parent) return null;
+			else return search(scope);
+		};
+		return this.scope ? search(this.scope) : null;
 	}
 }
 
@@ -514,8 +550,12 @@ export class TypeInfo {
 			result += `[${this.arraySize ?? ''}]`;
 		}
 		if (this.kind === 'function') {
-			result += '{' + this.functionTo.type.returnType.toString() + ' || ';
-			result += (this.functionTo.type.parameters.map(param => (param.type.toString()))).join(',') + '}';
+			if (this.functionTo) {
+				result += '{' + this.functionTo.type.returnType.toString() + ' || ';
+				result += (this.functionTo.type.parameters.map(param => (param.type.toString()))).join(',') + '}';
+			} else {
+				result = `{ ??${this.name} }`;
+			}
 		}
         return result;
     }
@@ -540,6 +580,21 @@ export class TypeInfo {
 			}
 		} else {
 			return this.pointerTo;
+		}
+	}
+
+	/**
+	 * 
+	 * @param {number} k 
+	 * @returns {TypeInfo?}
+	 */
+	extractKth(k) {
+		if (['array', 'pointer'].includes(this.kind)) {
+			return this.extractSingle();
+		} else if (['struct', 'union'].includes(this.kind)) {
+			return this.members[k];
+		} else {
+			return null;
 		}
 	}
 
@@ -581,6 +636,9 @@ export class SemanticAnalyzer extends ASTVisitor {
         super(compiler);
         this.errors = [];
         this.warnings = [];
+		/**
+		 * @type {Scope}
+		 */
         this.currentScope = null;
         this.currentFunction = null;
         this.symbolTable = new Map();
@@ -952,7 +1010,8 @@ export class SemanticAnalyzer extends ASTVisitor {
         
         if (defNode.members && defNode.members.length > 0) {
             defNode.members.forEach(member => {
-                const memberTypeName = this.getTypeNameFromTypeNode(member.type);
+                // const memberTypeName = this.getTypeNameFromTypeNode(member.type);
+				const memberTypeName = this.getTypeNameFromDeclarator(member);
                 const memberType = this.getTypeInfo(memberTypeName);
                 
                 if (!memberType) {
@@ -984,7 +1043,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                 structType.size = maxMemberSize;
                 // 联合体所有成员偏移量都是0
                 defNode.members.forEach((member, index) => {
-                    const memberTypeName = this.getTypeNameFromTypeNode(member.type);
+                    const memberTypeName = this.getTypeNameFromDeclarator(member);
                     const memberType = this.getTypeInfo(memberTypeName);
                     if (memberType) {
                         const memberInfo = new MemberInfo(
@@ -1330,10 +1389,6 @@ export class SemanticAnalyzer extends ASTVisitor {
 		const warningStorages = ['volatile'];
 		const warningKinds = ['pointer', 'array'];
 
-		if ((varType.qualifiers.includes(warningStorages) || warningKinds.includes(varType.kind)) && warningTypes.includes(varType.name)) {
-			this.addWarning(`Variable ${declarator.name} (with type ${varType.toString()}) cannot be stored in memory`, declarator.location);
-		}
-
         node.declarators.forEach(declarator => {
             // 检查变量是否已声明
             const existingSymbol = this.currentScope.lookupCurrent(declarator.name);
@@ -1387,6 +1442,15 @@ export class SemanticAnalyzer extends ASTVisitor {
 				//pointerAccess = true;
             }
 
+			const extractToBottom = /**
+			@param {TypeInfo} extr
+			@returns {TypeInfo}
+			*/ extr => extr.isStrictPointerImpl() ? extractToBottom(extr.extractSingle()) : extr;
+
+			if ((finalType.qualifiers.some(q => warningStorages.includes(q)) || warningKinds.includes(finalType.kind)) && warningTypes.includes(extractToBottom(finalType).name)) {
+				this.addWarning(`Variable ${declarator.name} (with type ${varType.toString()}) cannot be stored in memory`, declarator.location);
+			}
+
             // 创建变量符号
             const varSymbol = new SymbolEntry(
                 declarator.name,
@@ -1411,6 +1475,9 @@ export class SemanticAnalyzer extends ASTVisitor {
 			if (storageClass === 'static') {
 				varSymbol.isStatic = true;
 				//varSymbol.accessThroughPointer = true;	// i.e. [omitted] need memory allocation
+			}
+			if (storageClass === 'auto') {
+				varSymbol.isAuto = true;
 			}
 			/*
 			if (storageClass === 'extern') {
@@ -1498,6 +1565,21 @@ export class SemanticAnalyzer extends ASTVisitor {
 		node.dataType = this.typeTable.get('null_t');
 	}
 
+	/**
+	 * Get type name from a declarator, not only a type node.
+	 * NOTE: CANNOT be a function.
+	 * 
+	 * @param {DeclaratorNode} decl 
+	 */
+	getTypeNameFromDeclarator(decl) {
+		const simpleType = this.getTypeNameFromTypeNode(decl.type);
+		let suffix = '';
+		if (decl.arrayDimensions && decl.arrayDimensions.length) {
+			suffix = ' ' + decl.arrayDimensions.map(dim => `[${dim.value}]`).join('');
+		}
+		return simpleType + suffix;
+	}
+
 	// 5th conversation
 	// 新增辅助方法：从类型节点中提取类型名称
 	// 7th (1 Dec)
@@ -1505,6 +1587,11 @@ export class SemanticAnalyzer extends ASTVisitor {
 	// Priority adjusted manually !!!
 	// Also add pointer dereference manually
 	// This function doesn't case const qualifier
+	/**
+	 * 
+	 * @param {TypeSpecifierNode} typeNode 
+	 * @returns 
+	 */
     getTypeNameFromTypeNode(typeNode) {
         if (!typeNode) return null;
         
@@ -1578,8 +1665,8 @@ export class SemanticAnalyzer extends ASTVisitor {
         node.symbol = symbol; // 将符号关联到节点
 
         // 设置节点类型
-        if (symbol.kind === 'variable' || symbol.kind === 'parameter') {
-            node.dataType = this.getTypeInfo(symbol.type.type);
+        if (symbol.kind !== 'type') {
+            node.dataType = this.getTypeInfo(symbol.extractType());
         }
     }
 
@@ -1842,6 +1929,19 @@ export class SemanticAnalyzer extends ASTVisitor {
         const member = node.getChild(1);
         const computed = node.getAttribute('computed');
 		const operator = node.getAttribute('operator'); // '.' 或 '->'
+
+		const regOffset = (offset, parent = null) => {
+			if (object.type === 'MemberExpression') {
+				// this.visit(object);	// ? should have visited !!
+				if (typeof object.getAttribute('totalMemberOffset') === 'number') {
+					node.setAttribute('totalMemberOffset', object.getAttribute('totalMemberOffset') + offset);
+					node.setAttribute('totalSource', object.hasAttribute('totalSource') ? object.getAttribute('totalSource') : object);
+				}
+			} else {
+				node.setAttribute('totalMemberOffset', offset);
+				node.setAttribute('totalSource', object);
+			}
+		};
         
         this.visit(object);
         const objectType = this.getExpressionType(object);
@@ -1875,9 +1975,13 @@ export class SemanticAnalyzer extends ASTVisitor {
             
             this.visit(member);
             const indexType = this.getExpressionType(member);
-            if (indexType && indexType.name !== 'int') {
-                this.addWarning(`Array index should be of type 'int'`, member.location);
+            if (indexType && !this.isTypeCompatible(indexType, 'int')) {
+                this.addWarning(`Array index should be of intergal type`, member.location);
             }
+			if (member.type === 'NumericLiteral' && member.value) {
+				const objectSize = objectType.extractSingle().size ?? 1;
+				regOffset(objectSize * member.value);
+			}
             
             node.dataType = objectType.extractSingle();
 			return;
@@ -1937,15 +2041,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 		// 设置节点属性，便于代码生成阶段使用
 		node.setAttribute('memberOffset', memberInfo.offset);
 		node.setAttribute('memberName', memberName);
-		
-		if (object.type === 'MemberExpression') {
-			this.visit(object);
-			if (typeof object.getAttribute('totalMemberOffset') === 'number') {
-				node.setAttribute('totalMemberOffset', object.getAttribute('totalMemberOffset') + memberInfo.offset);
-			}
-		} else {
-			node.setAttribute('totalMemberOffset', memberInfo.offset);
-		}
+		regOffset(memberInfo.offset);
 
 		// 如果是通过指针访问，记录解引用信息
 		if (operator === '->') {
@@ -1958,16 +2054,41 @@ export class SemanticAnalyzer extends ASTVisitor {
         this.visit(node.callee);
 
         // 检查参数
-		const funcSymbol = this.currentScope.lookup(node.callee.name);
-		let expectedParams = funcSymbol.type.parameters || [], isFunctionPointer = false;
-        if (!funcSymbol || (funcSymbol.kind !== 'function' && 
+		/**
+		 * @type {SymbolEntry?}
+		 */
+		let funcSymbol = null;
+		/**
+		 * @type {TypeInfo}
+		 */
+		let funcType = null;
+		let readableFunctionName = "<unknown function>";
+		if (node.callee.type === 'Identifier') {
+			funcSymbol = this.currentScope.lookup(node.callee.name);
+			funcType = funcSymbol.myType();
+			readableFunctionName = funcSymbol.name;
+		} else if (node.callee.dataType) {
+			funcType = node.callee.dataType;
+			readableFunctionName = funcType.toString();
+		} else {
+			this.addError(`Cannot resolve function`, node.callee.location);
+			return;
+		}
+		
+		let expectedParams = funcType.parameters || [], isFunctionPointer = false;
+        if (funcSymbol && (funcSymbol.kind !== 'function' && 
 			(!funcSymbol.type.type || funcSymbol.type.type.kind !== 'function'))) {
             this.addError(`Undeclared function '${node.callee.name}'`, node.callee.location);
             return;
         }
-		
-		if (funcSymbol.kind !== 'function' && funcSymbol.type.type.kind === 'function') {
-			expectedParams = funcSymbol.type.type.functionTo.type.parameters;
+		if (!funcSymbol && funcType.kind !== 'function') {
+			this.addError(`Object of type '${funcType.toString()}' is not callable`);
+			return;
+		}
+
+		if ((funcSymbol && funcSymbol.kind !== 'function' && funcSymbol.type.type.kind === 'function')
+			|| (!funcSymbol)) {
+			expectedParams = funcType.functionTo.type.parameters;
 			isFunctionPointer = true;
 		}
         node.arguments.forEach((arg, index) => this.visit(arg, {
@@ -1979,7 +2100,7 @@ export class SemanticAnalyzer extends ASTVisitor {
        
         if (node.arguments.length !== expectedParams.length) {
             this.addError(
-                `Function '${node.callee.name}' expects ${expectedParams.length} arguments, but ${node.arguments.length} were provided`,
+                `Function '${readableFunctionName}' expects ${expectedParams.length} arguments, but ${node.arguments.length} were provided`,
                 node.location
             );
             return;
@@ -1999,7 +2120,8 @@ export class SemanticAnalyzer extends ASTVisitor {
         });
 
 		if (isFunctionPointer) {
-			node.dataType = this.getTypeInfo(funcSymbol.type.type.functionTo.type.returnType);
+			node.dataType = this.getTypeInfo(funcSymbol ?
+					funcSymbol.type.type.functionTo.type.returnType : funcType.functionTo.type.returnType);
 		} else {
 			node.dataType = this.getTypeInfo(funcSymbol.type.returnType);
 		}
@@ -2188,9 +2310,17 @@ export class SemanticAnalyzer extends ASTVisitor {
 		const declaratorTypes = ['VariableDeclarator', 'Declarator'];
 		node.dataType = this.typeTable.get('null_t').duplicate();	// size might be modified
 		node.dataType.size = 0;
+		let index = 0;
 		node.children.forEach(child => {
-			this.visit(child);
+			let further = undefined;
+			if (param && param.givenType) {
+				further = {
+					givenType: param.givenType.extractKth(index)
+				};
+			}
+			this.visit(child, further);
 			node.dataType.size += child.dataType ? child.dataType.size : 0;
+			index++;
 		});
 		node.setAttribute('requiredSize', node.dataType.size);
 		// Assign a virtual symbol for it
