@@ -1618,14 +1618,16 @@ export class Parser {
 		if (this.matchToken(TokenType.LEFT_BRACE)) {
 			let initList = ASTBuilder.initializerList();
 			this.consumeToken();
-			while (true) {
-				const expr = this.parseInitializerList();
-				initList.addChild(expr);
-				if (this.matchToken(TokenType.RIGHT_BRACE)) {
-					break;	// End of the list
-				}
-				this.expectToken(TokenType.COMMA);	// already consuming
-			}
+            if (!this.matchToken(TokenType.RIGHT_BRACE)) {
+                while (true) {
+                    const expr = this.parseInitializerList();
+                    initList.addChild(expr);
+                    if (this.matchToken(TokenType.RIGHT_BRACE)) {
+                        break;	// End of the list
+                    }
+                    this.expectToken(TokenType.COMMA);	// already consuming
+                }
+            }
 			this.consumeToken();	// consume '}'
 			return initList;
 		}
