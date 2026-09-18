@@ -1490,9 +1490,9 @@ export class SemanticAnalyzer extends ASTVisitor {
 			
 			// 添加const和volatile信息
             const qualifiers = node.type.getAttribute('qualifiers') || [];
-            varSymbol.isConst = qualifiers.includes('const') || finalType.isConst();
-            varSymbol.isVolatile = qualifiers.includes('volatile') || finalType.isVolatile();
-			varSymbol.isExtern = qualifiers.includes('extern') || finalType.isExtern();
+            varSymbol.isConst = finalType.isConst();
+            varSymbol.isVolatile = finalType.isVolatile();
+			varSymbol.isExtern = finalType.isExtern();
 			
 			// 检查是否为全局变量
             varSymbol.isGlobal = this.currentScope === this.globalScope;
