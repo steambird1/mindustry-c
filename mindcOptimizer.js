@@ -599,7 +599,7 @@ export class Optimizer extends ASTVisitor {
 	// Some unary expressions have side	effects of writing (++ and --):
 	// ! Manually adjusted !
 	analyzeUnaryExpression(node, info = null) {
-		
+		const curStat = this.shouldRunEvaluation(node, info);
 		if ((node.operator === '++' || node.operator === '--')) {
 			if (node.argument.type === 'Identifier') {
 				const scopePath = this.currentScope.lookupScopeOf(node.argument.name).getPath();
@@ -612,7 +612,18 @@ export class Optimizer extends ASTVisitor {
 				}
 				this.addWriteForCurrentScope(node.argument.name, 
 					(info.isUnsure || !info.actualCalling) ? null : newConstant, 
-					this.shouldRunEvaluation(node, info));
+					curStat);
+			}
+		} else if (node.operator === '&') {
+			if (node.argument.type === 'Identifier') {
+				const scopePath = this.currentScope.lookupScopeOf(node.argument.name).getPath();
+				const localConstants = this.localConstants.get(scopePath);
+				if (curStat) {
+					if (localConstants.has(node.argument.name)) {
+						localConstants.delete(node.argument.name);
+					}
+					this.addWriteForCurrentScope(node.argument.name, null, curStat);
+				}
 			}
 		} else {
 			this.analyzeNode(node.argument, info);
@@ -2942,7 +2953,8 @@ export class Optimizer extends ASTVisitor {
 				 * @type {SymbolEntry?}
 				 */
 				const symbol = node.symbol;
-				if (symbol && ((!( symbol.isGlobal || (restrictions && (restrictions === 'strict' || restrictions.has(symbol))) ))
+				if (symbol && (!(symbol.isAddressed || symbol.isExtern || symbol.isVolatile))
+						&& ((!( symbol.isGlobal || (restrictions && (restrictions === 'strict' || restrictions.has(symbol))) ))
 						 || (symbol.isConst && symbol.type !== 'parameter'))) {
 					const constValue = constants.get(node.name);
 					if (constValue !== undefined) {
@@ -3360,7 +3372,7 @@ export class Optimizer extends ASTVisitor {
 				if (scope != null) {
 					const symbol = this.currentScope.lookup(node.name);
 					if (!symbol.isConst && 
-						(symbol.isGlobal ||
+						(symbol.isGlobal || symbol.isAddressed || symbol.isExtern || symbol.isVolatile ||
 						(this.restrictiveVariables && ((this.restrictiveVariables === 'strict') 
 						|| (this.restrictiveVariables !== 'strict' && this.restrictiveVariables.has(symbol)))))) {
 						return undefined;
