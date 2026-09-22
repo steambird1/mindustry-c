@@ -4,7 +4,8 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	liquidList, unitList, buildingList,
 	InitializerListNode,
 	TypeSpecifierNode,
-	DeclaratorNode
+	DeclaratorNode,
+	ASTBuilder
  } from "./mindcBase.js";
 import { Instruction, MemoryBlockInfo } from "./mindcGeneratorBase.js";
 
@@ -157,6 +158,7 @@ export class SymbolEntry {
 		this.isRegister = false; // 标记是否为register变量
 		this.isStatic = (this.myType() instanceof TypeInfo) ? this.myType().isStatic() : false;
 		this.isExtern = (this.myType() instanceof TypeInfo) ? this.myType().isExtern() : false;
+		this.isRemote = (this.myType() instanceof TypeInfo) ? this.myType().isRemote() : false;
 		// Note: this is also available for functions:
 		// (for functions, once 'true', it can't be inlined !)
         this.isAddressed = false; // 标记是否被取地址
@@ -168,6 +170,29 @@ export class SymbolEntry {
 
 		// Used for code generator
 		this.isNearPointer = false;
+
+		// Simple array means array satisfying the following conditions that can be converted into a
+		// builtin array by default:
+		// 1. The array is of simple object type (Note: in this case, device, content_t and null_t are also allowed)
+		// volatile variables, struct/union, array and pointer are NOT simple object types.
+		// 2. The array is never cast to pointer type (Note: function calls permitted.)
+		// If an array is both simple array and constant array, further optimization can be done.
+		// If the array is of device, content_t (or sometimes null_t) type, then simple array is A MUST.
+		/**
+		 * If the type is 'embedded', it works like pdlist / sdlist. If it requires shared feature (i.e. remote access),
+		 * instead of using 'sdlist' there will be an additional library not working in the same way as this array
+		 * as the method must be specified.
+		 * 
+		 * By using array_init(type, mutable, implement, {data...}) you are also allowed to manually specify the way 
+		 * such thing is loaded.
+		 * 
+		 * @type {arrayStyle}
+		 */
+		this.arrayStyle = {
+			type: 'traditional',
+			mutable: true,
+			implement: null
+		};
         
         // 优化标记 [Not really used right away]
         this.canBeEliminated = false;
@@ -269,18 +294,31 @@ export class SymbolEntry {
 			// Let it crash otherwise.
 			resultType = this.myType().duplicate();
 			// if (resultType.isTypeInfo) {
-			if (this.isAuto || this.isAutoDevice) resultType.qualifiers.push('auto');
-			if (this.isRegister) resultType.qualifiers.push('register');
-			if (this.isConst || resultType.isConst()) resultType.qualifiers.push('const');
-			if (this.isVolatile || resultType.isVolatile()) resultType.qualifiers.push('volatile');
-			if (this.isExtern) resultType.qualifiers.push('extern');
-			if (this.isStatic) resultType.qualifiers.push('static');
+			/*
+			Every conversion of the type used to push these again, so a type
+			touched more than once ended up with `const const const`. Add each
+			qualifier at most once.
+			*/
+			const withQualifier = name => {
+				if (!resultType.qualifiers.includes(name)) resultType.qualifiers.push(name);
+			};
+			if (this.isAuto || this.isAutoDevice) withQualifier('auto');
+			if (this.isRegister) withQualifier('register');
+			if (this.isConst || resultType.isConst()) withQualifier('const');
+			if (this.isVolatile || resultType.isVolatile()) withQualifier('volatile');
+			if (this.isExtern) withQualifier('extern');
+			if (this.isStatic) withQualifier('static');
+			resultType.qualifiers = [...new Set(resultType.qualifiers)];
 			// }	// I guess it should crash otherwise. If there's no judgment, it will
 		} else {
 			resultType = new TypeInfo(this.name, 'function', 1);
 			resultType.functionTo = this;
 		}
 		return resultType;
+	}
+
+	isArray() {
+		return this.extractType().kind === 'array';
 	}
 
 	describe() {
@@ -307,9 +345,10 @@ export class SymbolEntry {
 	 */
 	getFunctionRegion() {
 		const search = scope => {
-			if (scope.type === 'f') return scope.astNode.name;
-			else if (!scope.parent) return null;
-			else return search(scope);
+			if (!scope) return null;
+			if (scope.type === 'f') return scope.astNode ? scope.astNode.name : null;
+			if (!scope.parent) return null;
+			return search(scope.parent);
 		};
 		return this.scope ? search(this.scope) : null;
 	}
@@ -472,6 +511,8 @@ export class TypeInfo {
 		 * @type {true}
 		 */
 		this.isTypeInfo = true;
+
+		this.annotations = new AttributeClass();
     }
     
     isConst() {
@@ -481,6 +522,16 @@ export class TypeInfo {
     isVolatile() {
         return this.qualifiers.includes('volatile');
     }
+
+	/**
+	 * Whether the value lives in ANOTHER processor: every access becomes a
+	 * `read` / `write` on the device named by the pointer.
+	 *
+	 * @returns {boolean}
+	 */
+	isRemote() {
+		return (this.qualifiers ?? []).includes('remote');
+	}
 
 	isExtern() {
 		return this.qualifiers.includes('extern');
@@ -510,11 +561,50 @@ export class TypeInfo {
 	 * 
 	 * @returns {boolean}
 	 */
+	/**
+	 * Whether the DEFINITION itself forces this struct into memory, i.e. whether
+	 * it embeds something that needs memory (an array, or a struct that needs
+	 * memory) at any depth. This is a property of the type, so every instance of
+	 * it must be stored in memory -- no copy can stay in registers.
+	 *
+	 * @param {Set<string>} [seen] Guard against recursive definitions
+	 * @returns {boolean}
+	 */
+	intrinsicallyRequiresMemory(seen = null) {
+		if (!['struct', 'union'].includes(this.kind)) return false;
+		const visited = seen ?? new Set();
+		if (this.name) {
+			if (visited.has(this.name)) return false;
+			visited.add(this.name);
+		}
+		return (this.members ?? []).some(member =>
+			member && member.type && member.type.isTypeInfo && member.type.isRequireMem());
+	}
+
 	isStrictPointerImpl() {
 		const pointerImplementation = ['pointer', 'array'];
+		if (this.kind === 'struct' || this.kind === 'union') {
+			/*
+			`forceMemoryImpl` is set on a COPY of the type when an instance of it
+			has its address taken. A processor has no way to point at a group of
+			registers, so that copy has to become a piece of memory. Instances
+			whose address is never taken keep the original type and stay in
+			registers.
+			*/
+			if (this.forceMemoryImpl === true) return true;
+			/*
+			A struct that CONTAINS an array -- or a struct that itself must live in
+			memory -- can never be held in registers either: the array needs memory
+			of its own, and how many of them a running program needs is not known
+			at compile time (a recursive call may need arbitrarily many).
+			*/
+			return (this.members ?? []).some(member =>
+				member && member.type && member.type.isTypeInfo && member.type.isRequireMem());
+		}
 		return ((typeof this.kind === 'object') && this.kind.isStrictPointerImpl()) ||
 		 pointerImplementation.includes(this.kind);
 	}
+
 
 	/**
 	 * 
@@ -522,6 +612,21 @@ export class TypeInfo {
 	 */
 	isPointerImpl() {
 		const pointerImplementation = ['pointer', 'array'];
+		if (this.kind === 'struct' || this.kind === 'union') {
+			return this.isVolatile() || this.isStrictPointerImpl();
+		}
+		return ((typeof this.kind === 'object') && this.kind.isPointerImpl()) ||
+		 pointerImplementation.includes(this.kind) || this.isVolatile();
+	}
+
+	/**
+	 * The difference between this and isPointerImpl() is that simple pointer might not require
+	 * memory assignment.
+	 * 
+	 * @returns {boolean}
+	 */
+	isRequireMem() {
+		const pointerImplementation = ['array'];
 		if (this.kind === 'struct' || this.kind === 'union') {
 			return this.isVolatile() || this.isStrictPointerImpl();
 		}
@@ -541,14 +646,58 @@ export class TypeInfo {
 	}	
     
     toString() {
-        let result = this.qualifiers.length > 0 ? this.qualifiers.join(' ') + ' ' : '';
-        result += this.name;
-        if ((this.kind === 'pointer' || this.kind === 'array') && this.pointerTo) {
-            result += this.pointerTo.toString() + '*';
-        }
-		if (this.type === 'array') {
-			result += `[${this.arraySize ?? ''}]`;
-		}
+		/*
+		Qualifiers accumulate while a type is copied around, so print each one
+		once. The pointee is printed WITHOUT re-listing the outer qualifiers and
+		the `*` goes where C puts it, otherwise `const int *` came out as
+		`const const const int*`.
+		*/
+		/*
+		A qualifier describes the level it sits on, and for a POINTER the levels
+		are genuinely different types: `const int *` is a pointer to a constant
+		int, `int *const` is a constant pointer to a plain int. So every level
+		prints its OWN qualifiers and `const int *const` keeps both -- the
+		pointer's own ones go after the `*`, the way C writes them.
+
+		Duplicates are still dropped, but only WITHIN one level: they come from
+		the same type being copied around and say nothing.
+		*/
+		const qualifiersOf = t => [...new Set(t?.qualifiers ?? [])];
+		const render = t => {
+			if (!t) return '';
+			const own = qualifiersOf(t);
+			if ((t.kind === 'pointer' || t.kind === 'array') && t.pointerTo) {
+				const inner = render(t.pointerTo);
+				if (t.kind === 'pointer') {
+					return inner + '*' + (own.length > 0 ? ' ' + own.join(' ') : '');
+				}
+				/*
+				An array has no separate surface syntax -- C writes
+				`const int[5]`, never `int[5] const` -- so the element level
+				carries the qualifier and the array level only adds what the
+				element does not already show.
+				*/
+				const extra = own.filter(q => !qualifiersOf(t.pointerTo).includes(q));
+				/*
+				`arraySize` is not necessarily a number: it is often the
+				literal NODE from the declarator. Interpolating it straight
+				into a template calls its `toString()`, which reaches for a
+				source location and throws.
+				*/
+				const sizeOf = x => {
+					if (x === undefined || x === null) return '';
+					if (typeof x === 'string' || typeof x === 'number') return String(x);
+					if (Array.isArray(x)) return x.map(sizeOf).join('');
+					return String(x.value ?? '');
+				};
+				return (extra.length > 0 ? extra.join(' ') + ' ' : '') + inner
+					+ `[${sizeOf(t.arraySize)}]`;
+			}
+			// `name` may be a node rather than a string in odd cases
+			const name = (typeof t.name === 'string') ? t.name : (t.name?.value ?? '');
+			return (own.length > 0 ? own.join(' ') + ' ' : '') + name;
+		};
+		let result = render(this);
 		if (this.kind === 'function') {
 			if (this.functionTo) {
 				result += '{' + this.functionTo.type.returnType.toString() + ' || ';
@@ -654,9 +803,87 @@ export class SemanticAnalyzer extends ASTVisitor {
 		// Cannot do initialization in construction !!!
     }
 
+	/**
+	 * Classify every `&x` in the program: builtin output parameter, stored into
+	 * a pointer, or an ordinary address use. See `analyze()` for why.
+	 *
+	 * Runs on the full AST, before any optimisation removes declarations.
+	 *
+	 * @param {any} ast
+	 */
+	collectAddressUses(ast) {
+		/** @type {Map<string, {builtin: number, pointers: Set<string>, other: number}>} */
+		const table = new Map();
+		// Symbols live in nested scopes, so resolve by name over the whole tree
+		let allSymbols = null;
+		const symbolsOf = name => {
+			if (!allSymbols) {
+				allSymbols = new Map();
+				const visit = scope => {
+					scope?.symbols?.forEach(sym => {
+						if (!allSymbols.has(sym.name)) allSymbols.set(sym.name, []);
+						allSymbols.get(sym.name).push(sym);
+					});
+					scope?.children?.forEach(visit);
+				};
+				visit(this.globalScope);
+			}
+			return allSymbols.get(name) ?? [];
+		};
+		const entryOf = symbol => {
+			if (!symbol) return null;
+			const key = symbol.getAssemblySymbol?.() ?? symbol.name ?? null;
+			if (!key) return null;
+			if (!table.has(key)) table.set(key, { builtin: 0, pointers: new Set(), other: 0 });
+			return table.get(key);
+		};
+		const isOutputBuiltin = name => name === 'ulocate' || name === 'ucontrol';
+
+		const walk = (node, parent) => {
+			if (!node || typeof node !== 'object') return;
+			if (Array.isArray(node)) { node.forEach(child => walk(child, parent)); return; }
+			if (node.type === 'UnaryExpression' && node.operator === '&'
+				&& node.argument && node.argument.type === 'Identifier') {
+				const candidates = symbolsOf(node.argument.name);
+				const entry = entryOf(candidates.length === 1 ? candidates[0]
+					: (candidates.find(c => /coreX|coreY|coreFound/.test(c.name)) ?? candidates[0]));
+				if (entry) {
+					if (parent && (parent.type === 'FunctionCall' || parent.type === 'BuiltinCall')) {
+						const callee = parent.callee?.name ?? parent.functionName ?? parent.name ?? null;
+						if (isOutputBuiltin(callee)) entry.builtin++;
+						else entry.other++;
+					} else if (parent && parent.type === 'VariableDeclarator') {
+						/*
+						`int *p = &x` -- remember p. Whether x needs a real
+						address depends on p, which is decided later.
+						*/
+						entry.pointers.add(parent.name);
+					} else if (parent && parent.type === 'AssignmentExpression'
+						&& parent.right === node && parent.left?.type === 'Identifier') {
+						entry.pointers.add(parent.left.name);
+					} else {
+						entry.other++;
+					}
+				}
+			}
+			for (const key of ['children', 'functions', 'globalDeclarations', 'statements',
+				'declarators', 'arguments', 'argument', 'left', 'right', 'initializer',
+				'expression', 'test', 'consequent', 'alternate', 'body', 'init', 'update',
+				'callee', 'declarations', 'elements']) {
+				const child = node[key];
+				if (Array.isArray(child)) child.forEach(c => walk(c, node));
+				else if (child && typeof child === 'object') walk(child, node);
+			}
+		};
+		walk(ast, null);
+		this.addressUseTable = table;
+	}
+
     analyze(ast) {
         this.errors = [];
         this.warnings = [];
+        // `remote()` bindings that name an array declared further down
+        this.pendingRemoteLinks = [];
         this.currentScope = new Scope(null, 'g');
         this.currentFunction = null;
 		this.globalScope = this.currentScope;
@@ -696,14 +923,49 @@ export class SemanticAnalyzer extends ASTVisitor {
 			'@liquidCount': this.typeTable.get('int'),
 			'@unit': this.typeTable.get('device')
 		};
+		/*
+		`#pragma var(<type>, @name)` declares a processor variable: it behaves
+		exactly like `@this`, only with the type the program asked for.
+		*/
+		this.contentTable = (this.compiler?.extraConfig?.getAttribute('contentTable')) ?? null;
+		if (this.contentTable) {
+			for (const [name, typeName] of this.contentTable.variables) {
+				const info = this.typeTable.get(typeName);
+				if (info) this.specialTypes[name] = info;
+			}
+		}
 		
 		// 建立AST节点和作用域的关联
         this.linkScopesToAST(ast);
 		
 		// 第一遍：收集类型定义（typedef, struct, union）
         this.collectTypeDefinitions(ast);
+		// In-memory copies of struct types, made on demand by `&s`
+		this.memoryVariants = new Map();
 
         this.visit(ast);
+		/*
+		Record HOW the address of each variable is taken. The generator needs
+		this to decide whether the variable really has to live in memory:
+
+		  - `ulocate(..., &x, ...)` writes into the register NAMED x, so x may
+		    stay a register at any version;
+		  - `int *p = &x` needs a real address only when p is a traditional
+		    pointer -- if p keeps names (or is never used at all) x may stay a
+		    register too;
+		  - anything else genuinely needs an address.
+		*/
+        this.collectAddressUses(ast);
+        /*
+        Only now is the whole program read, so only now can a `remote()` that
+        mentions an array declared further down be bound.
+        */
+        this.finalizeRemoteLinks();
+        /*
+        Only now is every call site known, so only now can each array parameter
+        be told which layout it will be given.
+        */
+        this.finalizeArrayParameters(ast);
 
         return {
             success: this.errors.length === 0,
@@ -888,7 +1150,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'stop', returnType: 'void', parameters: [] },
 			{ name: 'end', returnType: 'void', parameters: [] },
 			{ name: 'jump', returnType: 'void', parameters: [], hasVarArgs: true, special: 'jump' }, // 特殊处理
-			{ name: 'read', returnType: 'void', parameters: [], special: 'read'}, // 特殊处理
+			{ name: 'read', returnType: 'null_t', parameters: [], special: 'read'}, // 特殊处理
+			{ name: 'stricteq', returnType: 'bool', parameters: [], hasVarArgs: true, special: 'stricteq' }, // 严格相等
 			{ name: 'write', returnType: 'void', parameters: [], special: 'write'}, // 特殊处理
 			{ name: 'ubind', returnType: 'void', parameters: ['content_t']},
 			{ name: 'ucontrol', returnType: 'void', parameters: [], hasVarArgs: true},
@@ -912,6 +1175,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'rand', returnType: 'float', parameters: ['float']},
 			{ name: 'memcpy', returnType: 'void', parameters: ['void*', 'void*', 'unsigned']},
 			{ name: 'memsp', returnType: 'void*', parameters: ['device', 'int']},
+			{ name: 'byname', returnType: 'void*', parameters: [], hasVarArgs: true, special: 'byname' },
+			{ name: 'remote', returnType: 'void*', parameters: [], hasVarArgs: true, special: 'remote' },
 			...(this.extraConfig.getAttribute('extraFunctions') ?? [])
 		];
 
@@ -955,7 +1220,19 @@ export class SemanticAnalyzer extends ASTVisitor {
 						returnType: typedefNode.functionDefinition.returnType.typeName,
 						parameters: typedefNode.functionDefinition.parameters.map(param => ({
 							name: param.name,
-							type: this.getTypeNameFromTypeNode(param.type)
+							type: ((param) => {
+									/*
+									An array parameter keeps its dimensions on the
+									PARAMETER node, not on the type specifier -- so
+									`typedef void (*cb)(int s[3])` used to come out
+									as `cb{void || int}` and no array could ever be
+									handed to it.
+									*/
+									if (param.arrayDimensions?.length && !param.type?.arrayDimensions?.length) {
+										param.type.arrayDimensions = param.arrayDimensions;
+									}
+									return this.getTypeNameFromTypeNode(param.type);
+								})(param)
 						}))
 					},
 					this.globalScope,
@@ -1179,7 +1456,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 		let result = null;
 
 		// Get qualifiers from typeNameRaw string:
-		const checkQualifiers = ['const', 'volatile', 'near', 'extern', 'auto', 'static'];
+		const checkQualifiers = ['const', 'volatile', 'near', 'extern', 'auto', 'static', 'register', 'remote'];
 		let existQualifiers = [], relevantPointers = [];
 		const splitResult = typeName.split(' ').map((value, index) => {
 			let result = 0, noPtr = '';
@@ -1247,8 +1524,9 @@ export class SemanticAnalyzer extends ASTVisitor {
             case 'basic':
             case 'device':
             case 'null':
+				return 1;
             case 'pointer':
-                return 1;
+                return 2;
             case 'struct':
             case 'union':
                 return typeInfo.size || 1;
@@ -1285,7 +1563,19 @@ export class SemanticAnalyzer extends ASTVisitor {
     visitProgram(node) {
         // 遍历所有全局声明和函数
 		node.globalDeclarations.forEach(decl => this.visit(decl));
+		/*
+		Both passes below need the whole program: the set of overloads (a call
+		may come before some of them), and the arguments of every call to an
+		`auto` function (that is what decides the versions to emit).
+		*/
+		this.prescanFunctionDeclarations(node);
+		/*
+		Everything is visited FIRST: an `auto` version is chosen from what the
+		call site really hands over, and that is only known once the arguments
+		have symbols (a local has none before its function is visited).
+		*/
         node.functions.forEach(func => this.visit(func));
+		if (this.overloadMode() !== 'none') this.expandAutoTemplates(node);
     }
 
     visitFunctionDeclaration(node) {
@@ -1298,6 +1588,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 
 		// 获取返回类型名称
 		// Added after correctional conversation.
+		this.checkOverloading(node);
 		const returnTypeName = this.getTypeNameFromTypeNode(node.returnType);
 		if (!returnTypeName) {
 			this.addError(`Invalid return type for function '${node.name}'`, node.returnType.location);
@@ -1319,7 +1610,11 @@ export class SemanticAnalyzer extends ASTVisitor {
             'function',
             node.location
         );
-		funcSymbol.owningScope = node.scope;
+		/*
+		Not yet: the scope above may not exist yet (a function built by the
+		compiler, such as an `auto` instantiation, has none until the next
+		lines make one). It is assigned again once it surely does.
+		*/
 
         this.currentScope.addSymbol(funcSymbol);
         this.currentFunction = funcSymbol;
@@ -1328,8 +1623,16 @@ export class SemanticAnalyzer extends ASTVisitor {
 		let functionScope = node.scope;
 		if (!functionScope) {
 			node.scope = functionScope = new Scope(this.currentScope, 'f');
+			/*
+			The scope has to know which declaration it belongs to: several later
+			passes (the optimizer's function info, for one) look the body up
+			through it. A scope the parser never saw -- one made here for an
+			`auto` instantiation -- would otherwise have none.
+			*/
+			functionScope.astNode = node;
 			this.currentScope.children.push(functionScope);
 		}
+		funcSymbol.owningScope = functionScope;
 		this.currentScope = functionScope;
 
         // 添加参数到作用域
@@ -1344,6 +1647,29 @@ export class SemanticAnalyzer extends ASTVisitor {
             );
 			if (gotType.isNear()) {
 				paramSymbol.isNearPointer = true;
+			}
+			/*
+			`void f(struct pt *byname q)` -- the parameter itself carries the
+			member NAMES, so it must not be treated as a block/offset pair.
+			*/
+            if (this.hasByNameQualifier(param)) {
+				paramSymbol.usesNamePointer = true;
+				paramSymbol.forcedNamePointer = true;
+			}
+			/*
+			An `auto` parameter of an instantiated version: the representation
+			this version was made for. Setting it here -- instead of letting the
+			call-site notes decide -- is what lets one version take names while
+			another takes addresses, which a single function cannot do.
+			*/
+			const autoRep = param.autoRep ?? param.getAttribute?.('autoRep') ?? null;
+			if (autoRep === 'name') {
+				paramSymbol.usesNamePointer = true;
+				paramSymbol.forcedNamePointer = true;
+			} else if (autoRep === 'memory' || autoRep === 'handle') {
+				paramSymbol.noNamePointer = true;
+				paramSymbol.arrayParamRep = (autoRep === 'handle' && gotType.kind === 'array')
+					? 'handle' : (gotType.kind === 'array' ? 'traditional' : null);
 			}
             this.currentScope.addSymbol(paramSymbol);
         });
@@ -1426,11 +1752,35 @@ export class SemanticAnalyzer extends ASTVisitor {
 			}
             
             // 处理数组
+			/*
+			`int a[] = {3, 4, 5}`: the size is left out and taken from the
+			initializer instead. C only allows the OUTERMOST one to be left out,
+			but there is no harm in accepting an inner one too when the nesting
+			makes it obvious.
+			*/
+			this.deduceRemoteArrayDimensions(declarator);
+			this.deduceArrayDimensions(declarator);
             if (declarator.arrayDimensions && declarator.arrayDimensions.length > 0) {
                 let arrayType = finalType;
                 for (const dim of declarator.arrayDimensions.reverse()) {
+					/*
+					A dimension has to be known while compiling. A const of a
+					literal counts; anything else would be a variable length
+					array, which this compiler does not support (the stack
+					frame size is fixed at compile time), so say so instead of
+					silently pretending the size is 1.
+					*/
 					if (dim.type !== 'NumericLiteral') {
-						this.addWarning('Array size must be literal, or memory space is unallocated');
+						const folded = this.constantDimensionOf(dim);
+						if (folded !== null) {
+							dim.value = folded;
+							dim.type = 'NumericLiteral';
+						} else {
+							this.addError(
+								`Variable length arrays are not supported: the size of ` +
+								`'${declarator.name}' must be a compile time constant`,
+								declarator.location);
+						}
 					}
                     const arrType = new TypeInfo('', 'array', arrayType.size * ((typeof dim.value === 'number') ? dim.value : 1));
                     arrType.arraySize = dim;
@@ -1442,12 +1792,30 @@ export class SemanticAnalyzer extends ASTVisitor {
 				//pointerAccess = true;
             }
 
+			/*
+			Peel off pointers and array layers. A struct/union has no "single"
+			type underneath it, so the recursion stops there -- otherwise the
+			walk would run off the end into `null`.
+			*/
 			const extractToBottom = /**
 			@param {TypeInfo} extr
 			@returns {TypeInfo}
-			*/ extr => extr.isStrictPointerImpl() ? extractToBottom(extr.extractSingle()) : extr;
+			*/ extr => {
+				if (!extr || !extr.isTypeInfo) return extr;
+				if (!extr.isStrictPointerImpl()) return extr;
+				const single = extr.extractSingle?.() ?? null;
+				if (!single || single === extr) return extr;
+				return extractToBottom(single);
+			};
 
-			if ((finalType.qualifiers.some(q => warningStorages.includes(q)) || warningKinds.includes(finalType.kind)) && warningTypes.includes(extractToBottom(finalType).name)) {
+			/*
+			Only warn when the variable really ends up in memory: an array that
+			was asked for a register layout (array("embedded...") / "encoded")
+			holds its elements there, where a device is perfectly fine.
+			*/
+			const requestedImpl = declarator.getAttribute?.('arrayImplementation') ?? null;
+			const staysInRegisters = !!requestedImpl && requestedImpl !== 'traditional';
+			if (!staysInRegisters && (finalType.qualifiers.some(q => warningStorages.includes(q)) || warningKinds.includes(finalType.kind)) && warningTypes.includes(extractToBottom(finalType).name)) {
 				this.addWarning(`Variable ${declarator.name} (with type ${varType.toString()}) cannot be stored in memory`, declarator.location);
 			}
 
@@ -1508,6 +1876,76 @@ export class SemanticAnalyzer extends ASTVisitor {
 
             this.currentScope.addSymbol(varSymbol);
 
+			/*
+			`int a[10] = array("embedded_divided", {3, 4});`
+			`array(...)` is a compile time directive: it names the layout the
+			array must use, and may carry the initial contents. It is consumed
+			here -- the rest of the compiler only ever sees the contents.
+			*/
+			this.consumeArrayDirective(declarator, varSymbol);
+			/*
+			`int *remote p` -- a pointer that ITSELF lives in another processor.
+			Reaching it would mean reading two registers out of the other
+			processor, which is not implemented; the check below is where the
+			support would go.
+			*/
+			/*
+			`int *remote p`: the pointer itself lives in the other processor.
+			Reaching it means reading the pair `p_block` / `p_pos` from there.
+			*/
+			if (this.isRemotePointerDeclarator(declarator)) {
+				if (!this.supportsRemotePointer()) {
+					this.addError(`A pointer that is itself remote ('int *remote') is not supported yet`,
+						declarator.location);
+					return;
+				}
+				varSymbol.isRemote = true;
+				varSymbol.remoteStored = true;
+				/*
+				`int *byname remote q`: the pointer also asks for the NAME form, so
+				it is ONE register over there instead of the block/pos pair.
+				*/
+				varSymbol.remoteStoredByName = this.hasByNameQualifier(declarator);
+			}
+			this.consumeRemoteDirective(declarator, varSymbol, finalType, qualifiers);
+
+			/*
+			`int *s = byname(&c);` -- the pointer itself has to hold a NAME,
+			and that has to be decided before anything asks for its storage.
+			*/
+			if (declarator.initializer && this.containsByName(declarator.initializer)
+				&& finalType.kind === 'pointer') {
+				varSymbol.usesNamePointer = true;
+				varSymbol.forcedNamePointer = true;
+			}
+			/*
+			`struct pt *p = &st;` where `st` is a `register` struct: the pointer
+			has to carry member names, since a register value has no address.
+			*/
+			if (finalType.kind === 'pointer' && declarator.initializer
+				&& declarator.initializer.type === 'UnaryExpression'
+				&& declarator.initializer.operator === '&') {
+				const inner = declarator.initializer.argument;
+				if (inner && inner.type === 'Identifier') {
+					const src = this.currentScope.lookup(inner.name) ?? null;
+					const srcType = src?.myType?.() ?? null;
+					/*
+					Only when the struct really stays in registers: a nested struct,
+					one too wide for the threshold, or one compiled without the pragma
+					is degraded to memory instead, and then the pointer needs an
+					ADDRESS -- forcing a name packet here would make `p->m` step a
+					name pointer, which has no address to step.
+					*/
+					if (src?.addressedByName || (src?.isRegister && srcType
+						&& (srcType.kind === 'struct' || srcType.kind === 'union')
+						&& this.allowsStructNamePointer(srcType))) {
+						varSymbol.usesNamePointer = true;
+						varSymbol.forcedNamePointer = true;
+						varSymbol.addressedByName = true;
+					}
+				}
+			}
+
             // 检查初始化表达式
             if (declarator.initializer) {
                 this.visit(declarator.initializer, {
@@ -1532,6 +1970,742 @@ export class SemanticAnalyzer extends ASTVisitor {
 			}
         });
     }
+
+	/**
+	 * The initializer list behind a declarator's initializer.
+	 *
+	 * `array("embedded", {...})` is still in place at this point (it is
+	 * consumed later), so it has to be looked through -- otherwise
+	 * `int a[] = array("embedded", {1, 2, 3, 4})` would look like it has no
+	 * initializer at all and its size could not be deduced.
+	 *
+	 * @param {ASTNode?} initializer
+	 * @returns {ASTNode?} an InitializerList, or null
+	 */
+	initializerListOf(initializer) {
+		if (!initializer) return null;
+		if (initializer.type === 'InitializerList') return initializer;
+		if (initializer.type === 'FunctionCall' && initializer.callee?.name === 'array') {
+			const second = (initializer.arguments ?? [])[1];
+			if (second && second.type === 'InitializerList') return second;
+		}
+		return null;
+	}
+
+	/**
+	 * Fill in the array dimensions that were left out (`int a[] = {...}`).
+	 *
+	 * Counting is done level by level: the number of items at one level is the
+	 * size of that dimension. A dimension that WAS written is not counted but
+	 * still descends one level.
+	 *
+	 * @param {ASTNode} declarator
+	 * @returns {void}
+	 */
+	deduceArrayDimensions(declarator) {
+		const dims = declarator.arrayDimensions;
+		if (!Array.isArray(dims) || dims.length === 0) return;
+		if (!dims.some(d => !d)) return;	// Nothing left out
+		const list = this.initializerListOf(declarator.initializer);
+		if (!list) {
+			// Same reason as below: do not leave `null` behind
+			this.addError(
+				`The size of array '${declarator.name}' is neither given nor deducible: ` +
+				`write a size, or an initializer list to count`,
+				declarator.location);
+			for (let i = 0; i < dims.length; i++) {
+				if (!dims[i]) dims[i] = ASTBuilder.numericLiteral(1);
+			}
+			return;
+		}
+		let level = list;
+		for (let i = 0; i < dims.length; i++) {
+			if (dims[i]) {
+				level = this.descendInitializer(level);
+				continue;
+			}
+			const count = this.initializerCountOf(level);
+			/*
+			Even on failure put something in: leaving `null` here makes the
+			loop that builds the type read `.type` of null and throw, which
+			hides the real message.
+			*/
+			dims[i] = ASTBuilder.numericLiteral(count > 0 ? count : 1);
+			if (count <= 0) {
+				this.addError(
+					`Cannot deduce dimension ${i + 1} of array '${declarator.name}'`,
+					declarator.location);
+				return;
+			}
+			level = this.descendInitializer(level);
+		}
+	}
+
+	/**
+	 * @param {ASTNode?} list
+	 * @returns {ASTNode?} the first sub-list, if there is one
+	 */
+	descendInitializer(list) {
+		const items = list?.values ?? list?.children ?? null;
+		const first = Array.isArray(items) ? items[0] : null;
+		return (first && first.type === 'InitializerList') ? first : null;
+	}
+
+	/**
+	 * How many items an initializer list holds.
+	 *
+	 * @param {ASTNode?} list
+	 * @returns {number}
+	 */
+	initializerCountOf(list) {
+		const items = list?.values ?? list?.children ?? null;
+		return Array.isArray(items) ? items.length : 0;
+	}
+
+	/**
+	 * Recognize `T a[N] = array("<implementation>"[, <initializer list>])`.
+	 *
+	 * The directive is removed from the tree; what is left behind is the
+	 * initializer list (if any), so that everything downstream sees an
+	 * ordinary array declaration carrying one extra attribute.
+	 *
+	 * @param {ASTNode} declarator
+	 * @param {SymbolEntry} symbol
+	 */
+	consumeArrayDirective(declarator, symbol) {
+		const initializer = declarator.initializer;
+		if (!initializer || initializer.type !== 'FunctionCall') return;
+		const callee = initializer.callee;
+		if (!callee || callee.name !== 'array') return;
+		const args = initializer.arguments ?? [];
+		if (args.length === 0) {
+			this.addError(`array() needs the name of an implementation`, initializer.location);
+			return;
+		}
+		const first = args[0];
+		if (first.type !== 'StringLiteral') {
+			this.addError(`The first parameter of array() must be a string literal`, initializer.location);
+			return;
+		}
+		const requested = String(first.raw).replace(/^"|"$/g, '');
+		const known = ['traditional', 'embedded', 'embedded_divided', 'encoded',
+			'embedded_lookup', 'embedded_lookup_item', 'embedded_lookup_liquid',
+			'embedded_lookup_unit', 'embedded_lookup_block'];
+		if (!known.includes(requested)) {
+			this.addError(`Unknown array implementation '${requested}' (expected one of ${known.join(', ')})`,
+				initializer.location);
+			return;
+		}
+		const contents = (args.length >= 2 && args[1].type === 'InitializerList') ? args[1] : null;
+		if (requested === 'encoded' && !contents) {
+			this.addError(`An encoded array must be given its contents: array("encoded", {...})`,
+				initializer.location);
+			return;
+		}
+		declarator.setAttribute('arrayImplementation', requested);
+		symbol.requestedArrayImplementation = requested;
+		/*
+		An array named after a lookup table can only be as long as that table.
+		*/
+		const category = this.lookupCategoryOf(requested);
+		if (category) {
+			this.checkLookupCapacity(symbol.name, category,
+				this.arrayDimensionsOf(symbol.myType?.())[0] ?? 0, initializer.location);
+		}
+		declarator.initializer = contents;
+		if (contents) {
+			this.recordArrayInitialValues(symbol, contents, requested === 'encoded',
+				initializer.location);
+		}
+	}
+
+	/**
+	 * `remote int ru[] = remote(processor1, u);` -- the size comes from the
+	 * array on the other side, which has to be known before the type is built.
+	 *
+	 * @param {any} declarator
+	 * @returns {void}
+	 */
+	deduceRemoteArrayDimensions(declarator) {
+		const dims = declarator.arrayDimensions;
+		if (!Array.isArray(dims) || dims.length === 0) return;
+		if (dims[dims.length - 1]) return;		// already written out
+		const call = declarator.initializer;
+		if (!call) return;
+		const called = (call.type === 'BuiltinCall') ? call.functionName
+			: (call.callee ? (call.callee.name ?? call.callee.value) : null);
+		if (called !== 'remote') return;
+		const targetNode = (call.arguments ?? [])[1];
+		if (!targetNode || (targetNode.type !== 'Identifier' && targetNode.type !== 'StringLiteral')) return;
+		const target = this.lookupSymbol?.(targetNode.name)
+			?? this.currentScope?.lookup?.(targetNode.name) ?? null;
+		const type = target?.myType?.() ?? null;
+		if (!type || type.kind !== 'array') return;
+		const total = this.totalArraySizeOf(type);
+		if (!total) return;
+		const node = { type: 'NumericLiteral', value: String(total), raw: String(total) };
+		dims[dims.length - 1] = node;
+	}
+
+	/**
+	 * @param {TypeInfo} type
+	 * @returns {number}
+	 */
+	totalArraySizeOf(type) {
+		let sizes = type.arraySize ?? [];
+		if (!Array.isArray(sizes)) sizes = [sizes];
+		let total = 1;
+		for (const dim of sizes) {
+			const value = (typeof dim === 'number') ? dim
+				: (dim && typeof dim === 'object' && typeof dim.value === 'number') ? dim.value : 1;
+			total *= value;
+		}
+		return total;
+	}
+
+	/**
+	 * Whether the `remote` qualifier was written after a `*`, which makes the
+	 * POINTER remote rather than what it points at.
+	 *
+	 * @param {any} declarator
+	 * @returns {boolean}
+	 */
+	isRemotePointerDeclarator(declarator) {
+		const levels = declarator?.pointerQualifiers ?? [];
+		return levels.some(list => (list ?? []).includes('remote'));
+	}
+
+	/**
+	 * RESERVED: whether a `remote` ARRAY is supported. Reaching one means
+	 * naming `u_0`, `u_1`, ... in the other processor, and picking the name at
+	 * run time when the subscript is not constant.
+	 *
+	 * @returns {boolean}
+	 */
+	supportsRemoteArray() {
+		return true;
+	}
+
+	/**
+	 * RESERVED: whether `int *remote` (a pointer stored in another processor)
+	 * is supported. Kept as a single place to switch on when the two register
+	 * read / write it needs is implemented.
+	 *
+	 * @returns {boolean}
+	 */
+	/**
+	 * Whether a pointer may carry the NAMES of a struct's members.
+	 * Enabled by `#pragma optimize(struct_pointer[, n])` on v150 or newer.
+	 * @returns {boolean}
+	 */
+	supportsStructNamePointer() {
+		if ((this.targetVersion ?? 0) < 150) return false;
+		const cfg = this.compiler?.extraConfig?.getAttribute?.('optimizeOption') ?? null;
+		return cfg ? cfg.doStructPointerOptimize === true : false;
+	}
+
+	/**
+	 * How many registers a name based pointer to this type would need: one per
+	 * scalar member. Kept here (rather than in the infrastructure) because the
+	 * decision has to be made while analysing, before any value class exists.
+	 * @param {TypeInfo?} type
+	 * @returns {number}
+	 */
+	structPacketWidth(type, depth = 0) {
+		if (!type || !type.isTypeInfo || depth > 8) return 1;
+		if ((type.members ?? []).some(m => {
+			const mt = m.type ?? m.memberType;
+			return mt && mt.isTypeInfo && (mt.kind === 'struct' || mt.kind === 'union');
+		})) return Infinity;
+		if (type.kind === 'pointer' || type.kind === 'array') return 2;
+		if (type.kind !== 'struct' && type.kind !== 'union') return 1;
+		if (type.isPointerImpl?.()) return 2;
+		const members = type.members ?? [];
+		if (members.length === 0) return 1;
+		const widths = members.map(m => this.structPacketWidth(m.type ?? m.memberType, depth + 1));
+		return type.kind === 'union' ? Math.max(...widths) : widths.reduce((a, b) => a + b, 0);
+	}
+
+	/**
+	 * Whether `&st` may be taken for a struct kept in registers: the pragma
+	 * must be on and the packet must fit the threshold.
+	 * @param {TypeInfo?} type
+	 * @returns {boolean}
+	 */
+	allowsStructNamePointer(type) {
+		if (!this.supportsStructNamePointer()) return false;
+		/*
+		A member that is itself a struct has no single register name, so such a
+		struct can never be carried this way -- whatever the threshold says.
+		*/
+		const nested = (type?.members ?? []).some(m => {
+			const mt = m.type ?? m.memberType;
+			return !!mt && mt.isTypeInfo && (mt.kind === 'struct' || mt.kind === 'union');
+		});
+		if (nested) return false;
+		const cfg = this.compiler?.extraConfig?.getAttribute?.('optimizeOption') ?? {};
+		const limit = (typeof cfg.structPointerThreshold === 'number')
+			? cfg.structPointerThreshold : Infinity;
+		return this.structPacketWidth(type) <= limit;
+	}
+
+	supportsRemotePointer() {
+		return true;
+	}
+
+	/**
+	 * Whether a declarator (or a parameter) asks for the "holds a name"
+	 * representation by writing `byname` as a POINTER qualifier:
+	 *   struct pt *byname q
+	 * `byname` is a reserved word, so this is a plain token test.
+	 *
+	 * @param {any} node
+	 * @returns {boolean}
+	 */
+	hasByNameQualifier(node) {
+		/*
+		Either place may carry it: the declarator when the pointer belongs to
+		the declared name, or the type specifier when it was parsed there.
+		(`??` cannot be used: an empty array is not null.)
+		*/
+		const levels = [
+			...(node?.pointerQualifiers ?? []),
+			...(node?.type?.pointerQualifiers ?? [])
+		];
+		return levels.some(list => (list ?? []).includes('byname'));
+	}
+
+	/**
+	 * Whether an expression contains a `byname(&x)` call.
+	 *
+	 * @param {ASTNode?} node
+	 * @returns {boolean}
+	 */
+	containsByName(node) {
+		const seen = new Set();
+		const walk = n => {
+			if (!n || typeof n !== 'object' || seen.has(n)) return false;
+			seen.add(n);
+			if (n.functionName === 'byname'
+				|| (n.callee && (n.callee.name ?? n.callee.value) === 'byname')) return true;
+			for (const key of Object.keys(n)) {
+				if (key === 'parent') continue;
+				const child = n[key];
+				if (Array.isArray(child)) {
+					for (const item of child) if (walk(item)) return true;
+				} else if (child && typeof child === 'object') {
+					if (walk(child)) return true;
+				}
+			}
+			return false;
+		};
+		return walk(node);
+	}
+
+	/**
+	 * The global variable whose register name is `assembly` (`"g:.u"` -> `u`).
+	 *
+	 * `remote(@this, "g:.u")` names the variable by string. When this program
+	 * declares it too, that declaration has to be found: `remote(...)` is the
+	 * only thing mentioning it, and its initializer is consumed -- so without
+	 * the link the declaration looks unused, is removed, and its elements are
+	 * never initialised (every read of a self remote array returns 0).
+	 *
+	 * @param {string} assembly The register name, as written in the string
+	 * @returns {SymbolEntry?}
+	 */
+	globalByAssembly(assembly) {
+		const wanted = String(assembly ?? '');
+		if (!wanted || !this.globalScope) return null;
+		for (const symbol of this.globalScope.symbols.values()) {
+			if (symbol.kind === 'function' || symbol.kind === 'type') continue;
+			if (symbol.getAssemblySymbol?.() === wanted) return symbol;
+		}
+		return null;
+	}
+
+	/**
+	 * `remote T x = remote(<processor>, <variable>);`
+	 *
+	 * `remote(dev, x)` means: ON THE DEVICE `dev` there is a variable named
+	 * `x`, and this declaration operates THAT one. Every access is a
+	 * `read` / `write` to `dev`, so the variable need not be declared in this
+	 * program at all -- its NAME is all that is needed.
+	 *
+	 * A declaration of the same name here is therefore only a DESCRIPTION of
+	 * the variable over there (its type, and for an array its length and
+	 * layout); it does NOT become the thing being read and written. The one
+	 * exception is `remote(@this, x)`: the device is this very processor, so
+	 * the local declaration really is the target.
+	 *
+	 * `dev` may be any device expression. For a variable over there it should
+	 * be a global (a local's register name depends on optimisations that differ
+	 * between two programs).
+	 *
+	 * The initializer is consumed: what is left is the binding, which the code
+	 * generator turns into two `set`s (device, name).
+	 *
+	 * @param {any} declarator
+	 * @param {SymbolEntry} symbol
+	 * @param {TypeInfo} finalType
+	 * @returns {void}
+	 */
+	consumeRemoteDirective(declarator, symbol, finalType, qualifiers = [], deferred = false) {
+		const initializer = declarator.initializer;
+		if (!initializer) return;
+		const called = (initializer.type === 'BuiltinCall')
+			? initializer.functionName
+			: (initializer.callee ? (initializer.callee.name ?? initializer.callee.value) : null);
+		if (called !== 'remote') return;
+		const args = initializer.arguments ?? [];
+		const location = initializer.location;
+		/*
+		`remote int *p`: the qualifier belongs to what is pointed at, and the
+		pointer type built for the declarator does not carry it -- so look at
+		the declaration's own qualifier list as well.
+		*/
+		if (!finalType.isRemote() && !qualifiers.includes('remote') && !symbol.remoteStored) {
+			this.addError(`remote() needs the declaration to be qualified 'remote', as in 'remote int x = remote(...)'`,
+				location);
+			declarator.initializer = null;
+			return;
+		}
+		if (args.length < 2 || args.length > 3) {
+			this.addError(`remote() takes the processor and the variable, and optionally `
+				+ `the layout both sides use (such as "embedded_lookup_item")`, location);
+			declarator.initializer = null;
+			return;
+		}
+		/*
+		The layout may be given here too: when the variable is named by a string
+		there is no local declaration to read it from, and the two processors
+		have to agree on it explicitly anyway.
+		*/
+		const layoutNode = args.length >= 3 ? args[2] : null;
+		const layout = (layoutNode && layoutNode.type === 'StringLiteral')
+			? String(layoutNode.raw ?? layoutNode.value).replace(/^"|"$/g, '') : null;
+		const deviceNode = args[0];
+		const targetNode = args[1];
+		/*
+		`remote(@this, x)` is the one case where the local declaration IS the
+		target: the device named is this very processor.
+		*/
+		const selfDevice = deviceNode?.type === 'Identifier'
+			&& String(deviceNode.name) === '@this';
+		// `&s` gives a pointer, a plain `s` binds the variable itself
+		let inner = targetNode;
+		if (inner.type === 'UnaryExpression' && inner.operator === '&') inner = inner.argument;
+		if (!inner || (inner.type !== 'Identifier' && inner.type !== 'StringLiteral')) {
+			this.addError(`The variable of remote() must be a name (or its address &name)`, location);
+			declarator.initializer = null;
+			return;
+		}
+		let targetSymbol = this.lookupSymbol?.(inner.name) ?? this.currentScope?.lookup?.(inner.name) ?? null;
+		/*
+		`remote int turn = remote(dev, turn)` names the variable `turn` OF THE
+		OTHER PROCESSOR -- the declaration being made here must not shadow it,
+		or it would look like "a remote variable reaching a remote variable".
+		*/
+		if (targetSymbol && targetSymbol === symbol) targetSymbol = null;
+		/*
+		A name visible in a NON-global scope is taken as it is -- but it is a
+		local, whose register name depends on optimisations that differ between
+		two processors, so reaching it from another processor is not reliable.
+		*/
+		if (targetSymbol && !targetSymbol.isGlobal && !selfDevice) {
+			this.addWarning(`'${inner.name}' is a local: its register name depends on how this `
+				+ `program is optimised, so another processor may not find it under that name. `
+				+ `Declare it globally to reach it remotely`, location);
+		}
+		/*
+		A string names the variable of the OTHER processor, which need not exist
+		here at all -- but it MAY: `remote(@this, "g:.u")` reaches this very
+		program. Resolving the string to the local declaration is what keeps it
+		alive, because `remote(...)` is the only thing that mentions it and the
+		initializer is consumed here. Without this the array is never
+		initialised, so every element reads back as 0.
+		*/
+		if (!targetSymbol && targetNode.type === 'StringLiteral') {
+			// A StringLiteral carries its text in `value` / `raw`, not in `name`.
+			targetSymbol = this.globalByAssembly(
+				String(targetNode.raw ?? targetNode.value ?? '').replace(/^"|"$/g, ''));
+		}
+		/*
+		The variable of the other processor does not have to exist here at all:
+		a string literal names it directly (useful for pointers, which would
+		otherwise have to be declared locally only to be named).
+		*/
+		if (!targetSymbol && targetNode.type !== 'UnaryExpression'
+			&& targetNode.type === 'StringLiteral') {
+			symbol.remoteDevice = deviceNode;
+			symbol.remoteName = String(targetNode.raw ?? targetNode.value).replace(/^"|"$/g, '');
+			symbol.isRemote = true;
+			if (layout) symbol.requestedArrayImplementation = layout;
+			declarator.initializer = null;
+			return;
+		}
+		if (!targetSymbol && inner.type === 'Identifier' && !selfDevice) {
+			/*
+			Only an array whose length is not written here has a reason to wait:
+			a declaration further down may still supply it.
+			*/
+			const lengthUnknown = finalType && finalType.kind === 'array'
+				&& (() => {
+					const dims = this.arrayDimensionsOf(finalType);
+					return !dims.length || dims[0] === null;
+				})();
+			if (lengthUnknown && !deferred) {
+				/*
+				Take the initializer away for now: it is a `remote(...)` call,
+				and nothing here knows how to type-check one. It is put back when
+				the binding is retried.
+				*/
+				(this.pendingRemoteLinks ??= []).push(
+					{ declarator, symbol, finalType, qualifiers, initializer: declarator.initializer });
+				declarator.initializer = null;
+				return;
+			}
+			if (lengthUnknown) {
+				this.addError(`'${inner.name}' is not declared here, so remote() cannot know how `
+					+ `long the array on the other processor is: give the length, as in `
+					+ `'remote int ru[5] = remote(processor1, ${inner.name})'`, location);
+				declarator.initializer = null;
+				return;
+			}
+			/*
+			Not declared here -- so take the symbol a global `x` of this type
+			would have. Nothing is defined by that; it is what carries the
+			description of the variable over there.
+			*/
+			targetSymbol = this.synthesiseRemoteTarget(inner.name, finalType, location);
+			if (layout) targetSymbol.requestedArrayImplementation = layout;
+		}
+		if (!targetSymbol) {
+			/*
+			Not declared YET: `remote int ru[] = remote(p1, u);` may well appear
+			before `int u[4];`. Nothing about this binding can be decided before
+			the whole program is read, so remember it and try again once it has
+			been -- see `finalizeRemoteLinks`.
+			*/
+			if (targetNode.type !== 'StringLiteral' && targetNode.type !== 'UnaryExpression') {
+				/*
+				Take the initializer away for now: it is a `remote(...)` call,
+				and nothing here knows how to type-check one. It is put back when
+				the binding is retried.
+				*/
+				(this.pendingRemoteLinks ??= []).push(
+					{ declarator, symbol, finalType, qualifiers, initializer: declarator.initializer });
+				declarator.initializer = null;
+				return;
+			}
+			this.addError(`'${inner.name}' is not declared, so it cannot be reached remotely`, location);
+			declarator.initializer = null;
+			return;
+		}
+
+		if (targetSymbol.isRemote) {
+			this.addError(`'${inner.name}' is itself remote: remote() cannot chain through two processors`, location);
+			declarator.initializer = null;
+			return;
+		}
+		/*
+		An array is reached element by element, and each element is a register
+		of the other processor -- which needs the subscript to be known and a
+		representation this compiler does not build yet. Reserved below.
+		*/
+		if (targetSymbol.myType?.()?.kind === 'array') {
+			if (!this.supportsRemoteArray()) {
+				this.addError(`A remote array is not supported yet`, location);
+				declarator.initializer = null;
+				return;
+			}
+			if (!targetSymbol.isGlobal) {
+				this.addWarning(`A remote array has to be global on both sides`, location);
+			}
+			/*
+			Reaching an array means naming its elements one by one, so they have
+			to BE registers. `encoded` (the whole array as one string) has none,
+			and `lookup` names them after contents instead of after the array.
+			*/
+			const requested = targetSymbol.requestedArrayImplementation ?? null;
+			/*
+			The layout belongs to BOTH sides: the remote declaration may name it
+			(the third argument of remote()), and the array itself may. Agreeing
+			is what makes `ru[1]` mean the same register on both processors.
+			*/
+			if (layout && requested && layout !== requested) {
+				this.addError(`'${targetSymbol.name}' is declared array("${requested}"), `
+					+ `but remote() asks for "${layout}": the two processors have to agree `
+					+ `on the layout`, location);
+			}
+			if (requested === null) {
+				/*
+				Nothing was asked for, so the layout is chosen automatically --
+				and an automatically chosen `lookup` table is exactly what two
+				processors may guess differently. Pick the plain register layout
+				instead: it only needs the array's own name, which both sides
+				already share.
+				*/
+				targetSymbol.requestedArrayImplementation = layout ?? 'embedded_divided';
+			} else if (requested === 'encoded' || requested === 'traditional') {
+				this.addError(`A remote array has to keep its elements in registers: `
+					+ `'${targetSymbol.name}' is declared '${requested}'`, location);
+				} else if (this.lookupCategoryOf(requested)) {
+					/*
+					Allowed, and the table is named -- but the array may not be
+					longer than that table, or the extra elements would read as 0.
+					*/
+					const effective = layout ?? requested;
+					const category = this.lookupCategoryOf(effective);
+					if (category) {
+						this.checkLookupCapacity(targetSymbol.name, category,
+							this.arrayDimensionsOf(targetSymbol.myType?.())[0] ?? 0, location);
+					}
+				} else if (requested === 'embedded_lookup') {
+				/*
+				Allowed, but only with the table named: two processors that
+				guess may well guess differently.
+				*/
+				this.addError(`A remote array using a lookup table must name it: `
+					+ `use array("embedded_lookup_item", ...) (or _liquid, _unit, _block) `
+					+ `instead of array("embedded_lookup", ...)`, location);
+			}
+			/*
+			`remote(...)` is the only thing that mentions the array, and the
+			initializer is consumed here -- so nothing would be left to keep it
+			alive and its elements would never be initialised.
+			*/
+			if (selfDevice) targetSymbol.isRemoteTarget = true;
+		}
+		/*
+		Only `remote(@this, x)` really uses the declaration of this program:
+		elsewhere the declaration is just a description of a variable that lives
+		on the other processor, and emitting registers for it here would only
+		waste them.
+		*/
+		if (selfDevice) targetSymbol.isRemoteTarget = true;
+		declarator.initializer = null;
+		symbol.remoteDevice = deviceNode;
+		symbol.remoteTarget = targetSymbol;
+		symbol.remoteName = targetSymbol.getAssemblySymbol();
+		if (layout) symbol.requestedArrayImplementation = layout;
+		symbol.remoteTakeAddress = targetNode.type === 'UnaryExpression';
+		symbol.isRemote = true;
+	}
+
+	/**
+	 * `int *s = byname(&c);`
+	 *
+	 * The same representation as an automatic name pointer, but asked for
+	 * explicitly -- so it does not need `#pragma optimize(pointer)`. (It still
+	 * needs the version that can `read` from `@this`.)
+	 *
+	 * @param {any} node The call
+	 * @returns {boolean} whether it was a byname() call
+	 */
+	consumeByNameCall(node) {
+		const args = node.arguments ?? [];
+		if (args.length !== 1) {
+			this.addError(`byname() requires exactly 1 argument: the address of a variable`, node.location);
+			return true;
+		}
+		const inner = args[0];
+		if (inner.type !== 'UnaryExpression' || inner.operator !== '&'
+			|| !inner.argument || inner.argument.type !== 'Identifier') {
+			this.addError(`byname() needs the address of a variable, as in byname(&c)`, node.location);
+			return true;
+		}
+		const symbol = this.lookupSymbol?.(inner.argument.name)
+			?? this.currentScope?.lookup?.(inner.argument.name) ?? null;
+		if (!symbol) {
+			this.addError(`'${inner.argument.name}' is not declared`, node.location);
+			return true;
+		}
+		if (!symbol.isGlobal) {
+			this.addWarning(`byname(&${inner.argument.name}) points at a local: its register name may change`,
+				node.location);
+		}
+		/*
+		Remember it: the optimizer's name pointer analysis is what keeps such a
+		variable out of memory, and it normally refuses without the pragma.
+		*/
+		symbol.forcedNamePointer = true;
+		if (!this.forcedNamePointers) this.forcedNamePointers = new Set();
+		this.forcedNamePointers.add(symbol.getAssemblySymbol());
+		node.setAttribute('bynameTarget', symbol.getAssemblySymbol());
+		node.setAttribute('bynameSymbol', symbol);
+		node.dataType = this.getTypeInfo('void*');
+		return true;
+	}
+
+	/**
+	 * The numeric value of one item of an initializer list.
+	 *
+	 * A content constant such as `@lead` counts as a number too: its id is
+	 * known from the content tables (or from `#pragma id`).
+	 *
+	 * @param {ASTNode?} item
+	 * @returns {number?} null when it is not a compile time number
+	 */
+	numberOfInitializerItem(item) {
+		if (!item) return null;
+		if (item.type === 'NumericLiteral') {
+			const value = Number(item.value);
+			return Number.isFinite(value) ? value : null;
+		}
+		/*
+		`{(int)(@thorium), ...}`: the element is a content constant written with
+		an explicit cast, because the array itself is `const int`. The cast does
+		not change which content it is, so look through it -- otherwise such an
+		array silently becomes all zeros.
+		*/
+		if (item.type === 'CastExpression') {
+			return this.numberOfInitializerItem(item.expression);
+		}
+		if (item.type === 'Identifier' && typeof item.name === 'string' && item.name[0] === '@') {
+			const table = this.contentTable;
+			if (!table) return null;
+			for (const category of ['item', 'liquid', 'unit', 'block']) {
+				const id = table.idOf(category, item.name);
+				if (id !== undefined) return (id === null) ? null : id;
+			}
+			return null;
+		}
+		return null;
+	}
+
+	/**
+	 * Remember the contents of an array given with a literal list.
+	 *
+	 * Everything here must be a compile time number, because these are exactly
+	 * the arrays that may be stored as an encoded table instead of in memory.
+	 * An `encoded` array has no other way to hold its values, so for it the
+	 * contents are mandatory; for the rest a non-numeric element simply means
+	 * "this one cannot use the constant representations".
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @param {ASTNode} list An InitializerList
+	 * @param {boolean} required
+	 * @param {any} location For the error message
+	 * @returns {void}
+	 */
+	recordArrayInitialValues(symbol, list, required, location = null) {
+		const items = list.values ?? list.children ?? [];
+		if (!Array.isArray(items) || items.length === 0) return;
+		const numbers = items.map(item => this.numberOfInitializerItem(item));
+		const bad = numbers.findIndex(v => v === null || !Number.isFinite(v));
+		if (bad >= 0) {
+			if (required) {
+				const raw = items[bad]?.name ?? items[bad]?.raw ?? items[bad]?.value ?? '?';
+				this.addError(
+					`An encoded array can only hold numbers; element ${bad} ('${raw}') is not one`,
+					location);
+			}
+			// Not usable as a constant table, but the array itself is still fine
+			return;
+		}
+		symbol.arrayInitialValues = numbers;
+	}
 
 	/**
 	 * 
@@ -1612,7 +2786,11 @@ export class SemanticAnalyzer extends ASTVisitor {
         }
 
 		if (typeNode.arrayDimensions && typeNode.arrayDimensions.length) {
-			ptrSuffix += ' ' + typeNode.arrayDimensions.map(dim => `[${dim.value}]`).join('');
+			/*
+			An unspecified dimension (`int p[]`) has no node to read a value
+			from -- it is exactly the "any size" the caller is allowed to pass.
+			*/
+			ptrSuffix += ' ' + typeNode.arrayDimensions.map(dim => `[${dim?.value ?? ''}]`).join('');
 		}
 		
         // 如果是TypeSpecifier节点
@@ -1653,6 +2831,28 @@ export class SemanticAnalyzer extends ASTVisitor {
 			}
 			*/
 			node.dataType = this.typeTable.get('content_t');
+			/*
+			A `@name` nobody declared and no table knows is still a content
+			constant, but the compiler cannot tell WHICH one, so mark the node:
+			an implicit conversion to `item_t` & friends is refused (an explicit
+			cast is still allowed, it simply cannot be folded away).
+			*/
+			if (this.contentTable && this.contentTable.isOpaque(node.name)) {
+				node.setAttribute('opaqueContent', true);
+				/*
+				Mark the TYPE as well, so every compatibility check (assignment,
+				initialisation, argument passing) sees it: the compiler cannot tell
+				which content this is, so it may not silently become an `item_t`.
+				An explicit cast is still allowed -- that is the programmer saying
+				"I know better" -- but its result is not a compile time constant.
+				*/
+				const marked = this.typeTable.get('content_t').duplicate();
+				// `duplicate()` shares the annotations object: a fresh one keeps
+				// the marker on this type only
+				marked.annotations = new AttributeClass();
+				marked.annotations.setAttribute('opaqueContent', true);
+				node.dataType = marked;
+			}
 			return;
 		}
         const symbol = this.currentScope.lookup(node.name);
@@ -1692,6 +2892,19 @@ export class SemanticAnalyzer extends ASTVisitor {
             return;
         }
 
+        /*
+        `char` is a STRING in this dialect, so `+` concatenates. Whether it can
+        actually be done is decided later: only two literals can be joined at
+        compile time, and there is no instruction that joins two strings at
+        run time. The check is here so that the rejection comes from the code
+        generator with a source location, not from here as a type error.
+        */
+        const isCharString = t => !!t && (t.name === 'char');
+        if (node.operator === '+' && isCharString(leftType) && isCharString(rightType)) {
+            node.dataType = this.getTypeInfo('char');
+            return;
+        }
+
         // 检查操作符的类型兼容性
         if (!this.isTypeCompatibleForOperator(node.operator, leftType, rightType)) {
             this.addError(
@@ -1721,7 +2934,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 				}
 				
 				// 设置表达式结果类型
-				node.dataType = argType.pointerTo.discardQualifier(['volatile']);
+				// The discard was of no reason ...
+				node.dataType = argType.pointerTo; //.discardQualifier(['volatile']);
 				break;
 				
 			case '&': // 取地址操作
@@ -1731,10 +2945,45 @@ export class SemanticAnalyzer extends ASTVisitor {
 					return;
 				}
 				
-				// 检查是否为register变量
+				/*
+				Taking the address of a `register` variable used to be forbidden
+				outright. It is fine when the pointer can carry NAMES instead of
+				an address -- that is precisely the representation a register
+				value demands. A struct qualifies; a scalar only does when name
+				pointers are on at all.
+				*/
 				if (this.isRegisterVariable(node.argument)) {
-					this.addError(`Cannot take address of register variable`, node.location);
-					return;
+					const registerSymbol = (node.argument.type === 'Identifier')
+						? (this.currentScope.lookup(node.argument.name) ?? null) : null;
+					const registerType = registerSymbol?.myType?.() ?? argType;
+					const isAggregate = !!registerType && registerType.isTypeInfo
+						&& (registerType.kind === 'struct' || registerType.kind === 'union');
+					/*
+					A struct can only be reached by NAME when that representation
+					is enabled; otherwise it still has to go into memory.
+					*/
+					const named = (isAggregate && this.allowsStructNamePointer(registerType))
+						|| (!!registerType && registerType.kind === 'pointer');
+					if (named) {
+						if (registerSymbol) {
+							registerSymbol.addressedByName = true;
+							registerSymbol.forcedNamePointer = true;
+						}
+					} else if (!isAggregate) {
+						/*
+						A scalar `register` variable has neither an address nor a name
+						representation, so there is nothing to point at.
+						*/
+						this.addError(`Cannot take address of register variable`, node.location);
+						return;
+					}
+					/*
+					An aggregate falls through on purpose: it is too wide for a name
+					packet, or it nests another struct, or the pragma is off.
+					`markVariableAsAddressed` below then degrades it to the in-memory
+					copy of its type -- the same path any struct takes -- instead of
+					refusing a program that is perfectly writable in C.
+					*/
 				}
 				
 				// 标记变量已被取地址
@@ -1805,12 +3054,127 @@ export class SemanticAnalyzer extends ASTVisitor {
 		return false;
 	}
 	
+	/**
+	 * Mark a struct/union type as one that must be stored in memory.
+	 *
+	 * The flag goes onto the *canonical* type -- the object kept in
+	 * `structTable`, which is shared by every use of the struct, including the
+	 * member entries of every struct that embeds it. That sharing is what makes
+	 * the requirement spread outwards: once `struct inner` must live in memory,
+	 * `struct outer { struct inner i; ... }` reports `isStrictPointerImpl()` as
+	 * well and is forced into memory too.
+	 *
+	 * @param {TypeInfo} type
+	 * @returns {void}
+	 */
+	/**
+	 * The "in memory" variant of a struct/union type.
+	 *
+	 * Taking the address of a struct held in registers is impossible -- a
+	 * processor cannot name a group of registers. Rather than degrading the whole
+	 * type (which would drag every other instance of it into memory too), an
+	 * implicit COPY of the type is made and only that copy is marked as stored in
+	 * memory. The variable whose address was taken switches to the copy; every
+	 * other instance of the same struct keeps the original type and stays in
+	 * registers.
+	 *
+	 * A struct whose DEFINITION already demands memory (it embeds an array, say)
+	 * has no such copy: every instance of it is in memory anyway, so the type
+	 * itself is handed back unchanged.
+	 *
+	 * @param {TypeInfo} type
+	 * @returns {TypeInfo}
+	 */
+	memoryVariantOf(type) {
+		if (!type || !type.isTypeInfo) return type;
+		if (!['struct', 'union'].includes(type.kind)) return type;
+		// Already a memory implementation? Nothing to do.
+		if (type.isStrictPointerImpl()) return type;
+		this.memoryVariants = this.memoryVariants ?? new Map();
+		const existing = this.memoryVariants.get(type.name);
+		if (existing) return existing;
+		const copy = type.duplicate();
+		copy.forceMemoryImpl = true;
+		this.memoryVariants.set(type.name, copy);
+		/*
+		Every pointer to this struct must now see the memory copy: a pointer can
+		only ever point at an instance that has an address, and those are exactly
+		the ones using the copy.
+		*/
+		this.retargetPointersTo(type.name, copy);
+		return copy;
+	}
+
+	/**
+	 * Repoint every pointer-to-`structName` at `variant`, so that `p->m` is
+	 * resolved through memory.
+	 *
+	 * @param {string} structName
+	 * @param {TypeInfo} variant
+	 * @returns {void}
+	 */
+	retargetPointersTo(structName, variant) {
+		const fixType = type => {
+			if (!type || !type.isTypeInfo) return;
+			if (type.kind === 'pointer' && type.pointerTo
+				&& type.pointerTo.name === structName
+				&& ['struct', 'union'].includes(type.pointerTo.kind)) {
+				type.pointerTo = variant;
+			}
+		};
+		for (const type of this.typeTable.values()) fixType(type);
+		for (const structType of this.structTable.values()) {
+			(structType.members ?? []).forEach(member => {
+				if (member && member.type) fixType(member.type);
+			});
+		}
+		const visitScope = scope => {
+			if (!scope) return;
+			(scope.getAllSymbols?.() ?? []).forEach(symbol => {
+				const type = symbol.myType?.() ?? null;
+				if (type && type.isTypeInfo) fixType(type);
+			});
+			scope.children?.forEach(visitScope);
+		};
+		visitScope(this.globalScope);
+	}
+
 	// 添加辅助方法标记变量已被取地址
 	markVariableAsAddressed(node) {
 		if (node.type === 'Identifier') {
 			const symbol = this.currentScope.lookup(node.name);
 			if (symbol) {
 				symbol.isAddressed = true;
+				/*
+				A struct held in registers has no address at all: a processor
+				cannot name "the group of registers called s". Rather than
+				refusing the program, the struct is degraded to a piece of
+				memory -- and so is every struct that embeds it (see
+				`TypeInfo.requireMemoryImplementation`).
+				*/
+				const symbolType = symbol.myType?.() ?? null;
+				/*
+				With a name-based pointer to a struct, taking the address no
+				longer forces the struct into memory: the pointer carries the
+				NAME of every member instead of an address.
+				*/
+				if (symbol.addressedByName === true) {
+					/* keep it in registers */
+				} else if (symbolType && ['struct', 'union'].includes(symbolType.kind)) {
+					/*
+					Give this variable the in-memory COPY of its type. Only this
+					variable changes; other instances of the same struct are left
+					alone.
+					*/
+					const variant = this.memoryVariantOf(symbolType);
+					if (variant !== symbolType) {
+						if (symbol.type && typeof symbol.type === 'object' && symbol.type.type) {
+							symbol.type.type = variant;
+						} else {
+							symbol.type = variant;
+						}
+					}
+				}
 				if (symbol.kind === 'variable') {
 					symbol.accessThroughPointer = true;
 				} else if (symbol.kind === 'struct' || symbol.kind === 'union') {
@@ -1818,15 +3182,39 @@ export class SemanticAnalyzer extends ASTVisitor {
 				}
 			}
 			
-			// 被取地址的变量不能放在寄存器中
-			if (symbol.isRegister) {
+			/*
+			Being addressed normally forces a variable out of registers -- but
+			not when the pointer is going to carry names instead of an address,
+			which is exactly how a register resident value is reached.
+			*/
+			if (symbol.isRegister && !symbol.addressedByName) {
 				this.addWarning(`Register variable '${node.name}' has its address taken, will be stored in memory`, node.location);
 				symbol.isRegister = false; // 强制取消register优化
 			}
 		} else if (node.type === 'MemberExpression') {
 			// 处理结构体成员被取地址的情况
 			const object = node.getChild(0);
+			/*
+			A registry struct keeps each member in a register of its own, so
+			`&s.m` needs no memory at all -- and the struct itself can never be
+			given an address (a processor cannot build the name). Forcing it into
+			memory here would therefore be pure waste.
+			*/
 			this.markVariableAsAddressed(object);
+		} else if (node.type === 'CastExpression') {
+			/*
+			`(T*)x`, where x is a plain variable, is the idiom of this dialect
+			for an output parameter -- `ulocate(..., (volatile int*)coreX, ...)`
+			means "write the result into coreX". So it is `&x` in disguise and
+			the variable has to live in memory. A cast of something that is
+			already a pointer is an ordinary conversion instead.
+			*/
+			const target = node.dataType ?? null;
+			const inner = node.expression ?? null;
+			const isPointerish = t => !!t && (t.isPointerImpl?.() === true || t.isStrictPointerImpl?.() === true);
+			if (isPointerish(target) && !isPointerish(inner?.dataType)) {
+				this.markVariableAsAddressed(inner);
+			}
 		} else if (node.type === 'UnaryExpression' && node.operator === '*') {
 			// 解引用表达式的地址（如&*ptr）等于ptr
 			const arg = node.argument;
@@ -1979,7 +3367,12 @@ export class SemanticAnalyzer extends ASTVisitor {
                 this.addWarning(`Array index should be of intergal type`, member.location);
             }
 			if (member.type === 'NumericLiteral' && member.value) {
-				const objectSize = objectType.extractSingle().size ?? 1;
+				/*
+				For a string (`char s`), `s[i]` indexes single characters, and
+				there is no element type underneath to ask for a size.
+				*/
+				const elementType = objectType.extractSingle?.() ?? null;
+				const objectSize = (elementType && elementType.size) ? elementType.size : 1;
 				regOffset(objectSize * member.value);
 			}
             
@@ -2050,7 +3443,1087 @@ export class SemanticAnalyzer extends ASTVisitor {
 		
     }
 
+	/**
+	 * A dimension written as a name (`const int N = 4; int a[N];`).
+	 *
+	 * @param {ASTNode?} dim
+	 * @returns {number?} null when it is not a compile time constant
+	 */
+	constantDimensionOf(dim) {
+		if (!dim) return null;
+		if (dim.type === 'NumericLiteral') return Number(dim.value);
+		if (dim.type === 'Identifier') {
+			const symbol = this.currentScope?.lookup(dim.name);
+			const init = symbol?.initializer ?? symbol?.declarator?.initializer ?? null;
+			if (symbol?.isConst && init && init.type === 'NumericLiteral') {
+				return Number(init.value);
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * `lenof(a)` -- the number of ELEMENTS, i.e. the outermost dimension.
+	 *
+	 * Only an array symbol has one; a parameter is only a pointer by the time
+	 * it is called, so asking for its length is an error rather than a guess.
+	 *
+	 * @param {ASTNode} node
+	 * @returns {number?}
+	 */
+	lenofOf(node, location) {
+		if (!node) {
+			this.addError(`lenof() needs an array`, location);
+			return null;
+		}
+		/*
+		`lenof(a[1])` is a question about the type of `a[1]`, which is
+		`int[6]` when `a` is `int[5][6]` -- so the answer is the OUTERMOST
+		dimension of that type, 6. Only the outermost one can be given: the
+		rest are not part of the type of the expression.
+		*/
+		const dimensionOfType = (type, what) => {
+			if (!type || type.kind !== 'array') {
+				this.addError(`lenof() needs an array, but ${what} is not one`, location);
+				return null;
+			}
+			const first = (this.dimensionListOf(type) ?? [])[0];
+			if (first === undefined || first === null) {
+				this.addError(`The length of ${what} is not known here`, location);
+				return null;
+			}
+			return first;
+		};
+		if (node.type === 'Identifier') {
+			const symbol = this.currentScope?.lookup(node.name) ?? null;
+			if (!symbol) {
+				this.addError(`Undeclared identifier '${node.name}'`, location);
+				return null;
+			}
+			return dimensionOfType(symbol.myType?.() ?? null, `'${node.name}'`);
+		}
+		// Anything else: what the expression itself stands for
+		this.visit(node);
+		const type = this.getExpressionType(node) ?? node.dataType ?? null;
+		const written = (node.type === 'MemberExpression')
+			? `this element` : `this expression`;
+		return dimensionOfType(type, written);
+	}
+
+	/**
+	 * The dimensions of an array type as numbers, outermost first.
+	 *
+	 * @param {TypeInfo} type
+	 * @returns {number[]?}
+	 */
+	dimensionListOf(type) {
+		const raw = type?.arraySize ?? null;
+		if (raw === null || raw === undefined) return null;
+		const items = Array.isArray(raw) ? raw : [raw];
+		return items.map(item => (item && typeof item.value === 'number')
+			? item.value
+			: (typeof item === 'number' ? item : null));
+	}
+
+	/**
+	 * How many memory cells one value of this type occupies.
+	 *
+	 * @param {TypeInfo} type
+	 * @returns {number?} null when the type has no memory representation
+	 */
+	sizeOfTypeInfo(type) {
+		if (!type) return null;
+		// Types that never reach memory have no meaningful size
+		if (['char', 'content_t', 'device', 'null_t'].includes(type.name)) return null;
+		// An inner array is a value of its own size, so this recurses
+		const elementSize = t => {
+			if (!t) return 1;
+			if (t.kind === 'pointer') return 2;	// block + position
+			if (t.kind === 'array') {
+				const dims = (this.dimensionListOf(t) ?? []).filter(d => d !== null);
+				return dims.reduce((a, b) => a * b, 1) * elementSize(t.pointerTo);
+			}
+			if (t.kind === 'struct' || t.kind === 'union') return t.size ?? 1;
+			return 1;
+		};
+		return elementSize(type);
+	}
+
+	/**
+	 * Fold `sizeof(...)` / `lenof(...)`, which are compile time questions.
+	 *
+	 * The call node is turned into the number it stands for, so that
+	 * everything downstream -- constant folding, array sizes, code generation
+	 * -- only ever sees a literal.
+	 *
+	 * @param {ASTNode} node A FunctionCall
+	 * @returns {boolean} whether it was one of them
+	 */
+	foldCompileTimeFunction(node) {
+		const name = node.callee?.name;
+		if (name !== 'sizeof' && name !== 'lenof') return false;
+		const location = node.location;
+		const args = node.arguments ?? [];
+		let value = null;
+		if (name === 'sizeof') {
+			if (args.length !== 1) {
+				this.addError(`sizeof() takes exactly one operand`, location);
+				return true;
+			}
+			const arg = args[0];
+			if (arg.type === 'StringLiteral') {
+				// `sizeof(<type>)`: the parser left the type's NAME here
+				const resolveType = raw => {
+					const direct = this.getTypeInfo(raw);
+					if (direct) return direct;
+					// `sizeof(struct pt)` -- the tag alone is the name here
+					const stripped = raw.replace(/^(struct|union)\s+/, '').trim();
+					return (stripped !== raw) ? this.getTypeInfo(stripped) : null;
+				};
+				const info = resolveType(String(arg.value));
+				if (!info) {
+					this.addError(`Unknown type '${arg.value}' in sizeof()`, location);
+					return true;
+				}
+				value = this.sizeOfTypeInfo(info);
+				if (value === null) {
+					this.addError(
+						`sizeof() cannot be applied to '${arg.value}': it has no memory representation`,
+						location);
+					return true;
+				}
+			} else {
+				this.visit(arg);
+				const type = this.getExpressionType(arg);
+				value = this.sizeOfTypeInfo(type);
+				if (value === null) {
+					this.addError(
+						`sizeof() cannot be applied to this operand: it has no memory representation`,
+						location);
+					return true;
+				}
+			}
+		} else {
+			if (args.length !== 1) {
+				this.addError(`lenof() takes exactly one operand`, location);
+				return true;
+			}
+			value = this.lenofOf(args[0], location);
+			if (value === null) return true;
+		}
+		// Become the number itself
+		node.type = 'NumericLiteral';
+		node.value = value;
+		node.raw = String(value);
+		node.children = [];
+		node.arguments = undefined;
+		node.callee = undefined;
+		node.dataType = this.getTypeInfo('int');
+		return true;
+	}
+
+    /**
+     * The name a function is emitted under.
+     *
+     * Several functions may share a name (overloading), and they must not
+     * collide in the `FunctionRegisterer` -- so all but the first get a
+     * suffixed name. The first keeps the plain name, which keeps ordinary
+     * programs untouched.
+     *
+     * @param {string} name
+     * @param {number} [index] Position among the functions sharing this name
+     * @returns {string}
+     */
+    mangleFunctionName(name, index = 0) {
+        return index === 0 ? name : `${name}__ov${index}`;
+    }
+
+    /**
+     * How the compiler reacts to several functions sharing one name.
+     *
+     * `#pragma overload(auto | default | none)`. `default` (and `auto`) allow
+     * it; `none` refuses.
+     *
+     * @returns {'auto' | 'default' | 'none'}
+     */
+    overloadMode() {
+        const mode = this.compiler?.overloadMode ?? null;
+        return (mode === 'auto' || mode === 'default' || mode === 'none') ? mode : 'default';
+    }
+
+    /**
+     * Whether a parameter is written `auto` -- `void f(auto int *s)`.
+     *
+     * `auto` is also a storage class (`auto device`), so the qualifier may sit
+     * in either place, exactly as `byname` does.
+     *
+     * @param {any} node A parameter node
+     * @returns {boolean}
+     */
+    hasAutoQualifier(node) {
+        const levels = [
+            ...(node?.pointerQualifiers ?? []),
+            ...(node?.type?.pointerQualifiers ?? []),
+            node?.type?.getAttribute?.('qualifiers') ?? []
+        ];
+        if (levels.some(list => (list ?? []).includes('auto'))) return true;
+        return /\bauto\b/.test(String(this.getTypeNameFromTypeNode(node) ?? ''));
+    }
+
+    /**
+     * Whether a pointer that only ever holds register names is allowed here.
+     * @returns {boolean}
+     */
+    namePointersEnabled() {
+        const config = this.compiler?.optimizerConfig ?? null;
+        if (config?.getAttribute?.('doPointerOptimize') === true) return true;
+        if (config?.doPointerOptimize === true) return true;
+        return (this.compiler?.config?.getAttribute?.('doPointerOptimize') === true);
+    }
+
+    /**
+     * A deep copy of an AST subtree.
+     *
+     * Needed to emit one version of an `auto` function per representation of
+     * its arguments: the versions are the same program, only the parameter's
+     * representation differs, so the body has to be copied rather than shared.
+     *
+     * @param {any} node
+     * @param {Map} [seen]
+     * @returns {any}
+     */
+    cloneAstNode(node, seen = new Map()) {
+        if (node === null || node === undefined || typeof node !== 'object') return node;
+        if (Array.isArray(node)) return node.map(n => this.cloneAstNode(n, seen));
+        if (seen.has(node)) return seen.get(node);
+        if (typeof node.type !== 'string' || !(node._attributes instanceof Map)) return node;
+        const copy = new ASTNode(node.type, node.location);
+        seen.set(node, copy);
+        for (const [key, value] of node._attributes) copy.setAttribute(key, value);
+        for (const key of Object.keys(node)) {
+            /*
+            A cached `scope` or `symbol` belongs to the function this was
+            copied from: keeping it would make the copy's body look up names
+            in a scope that is not its own. They are rebuilt when the copy is
+            visited.
+            */
+            if (key === 'parent' || key === 'scope' || key === 'symbol'
+                || key === '_attributes' || key === 'type' || key === 'location') continue;
+            copy[key] = this.cloneAstNode(node[key], seen);
+        }
+        return copy;
+    }
+
+    /**
+     * The parameter type list of a function declaration, as type names.
+     * @param {any} node
+     * @returns {string[]}
+     */
+    parameterTypeNamesOf(node) {
+        return (node?.parameters ?? []).map(param => String(this.getTypeNameFromTypeNode(param) ?? '?'));
+    }
+
+    /**
+     * Collect every function declaration and give each one the name it will be
+     * emitted under.
+     *
+     * Done before anything is visited, so that a call site always sees the
+     * complete set of overloads -- a call may appear before some of them.
+     *
+     * @param {any} ast
+     * @returns {void}
+     */
+    prescanFunctionDeclarations(ast) {
+        /** @type {Map<string, {node: any, paramTypes: string[]}[]>} */
+        this.overloadSets = new Map();
+        for (const func of (ast?.functions ?? [])) {
+            if (!func || func.type !== 'FunctionDeclaration' || !func.name) continue;
+            if (!this.overloadSets.has(func.name)) this.overloadSets.set(func.name, []);
+            this.overloadSets.get(func.name).push({ node: func, paramTypes: this.parameterTypeNamesOf(func) });
+        }
+        for (const [name, list] of this.overloadSets) {
+            list.forEach((entry, index) => {
+                entry.node.name = this.mangleFunctionName(name, index);
+            });
+            /*
+            Two functions with the same name AND the same parameter list are
+            not overloads -- they are a redefinition.
+            */
+            for (let i = 0; i < list.length; i++) {
+                for (let j = i + 1; j < list.length; j++) {
+                    if (list[i].paramTypes.join(',') === list[j].paramTypes.join(',')) {
+                        this.addError(`Function '${name}' is already declared with these parameter types`,
+                            list[j].node.location);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The symbol of a variable that `remote(dev, x)` names by IDENTIFIER.
+     *
+     * `x` need not be declared in this program at all -- the variable lives on
+     * the other processor, and its name is all that is needed to reach it. But
+     * a SYMBOL is what carries the rest of the description (the length of an
+     * array, the layout its elements have), so behave as if a global `x` of the
+     * type this declaration asks for had been declared, and take its symbol.
+     *
+     * It is deliberately NOT added to any scope: nothing is really defined
+     * here, so no registers must be emitted for it and it must not be exported.
+     *
+     * @param {string} name
+     * @param {TypeInfo} finalType The type the declaration asks for
+     * @param {any} [location]
+     * @returns {SymbolEntry}
+     */
+    synthesiseRemoteTarget(name, finalType, location = null) {
+        this.remoteTargetCache ??= new Map();
+        const key = `${this.globalScope?.getPath?.() ?? 'g:'}.${name}`;
+        if (this.remoteTargetCache.has(key)) return this.remoteTargetCache.get(key);
+        /*
+        The variable over there is an ordinary one: `remote` describes how THIS
+        program reaches it, not what it is.
+        */
+        let type = finalType;
+        if (finalType && (finalType.qualifiers ?? []).includes('remote')) {
+            type = Object.create(Object.getPrototypeOf(finalType));
+            Object.assign(type, finalType);
+            type.qualifiers = [...finalType.qualifiers].filter(q => q !== 'remote');
+        }
+        const symbol = new SymbolEntry(name, { type: type }, this.globalScope, 'variable', location);
+        symbol.isGlobal = true;
+        this.remoteTargetCache.set(key, symbol);
+        return symbol;
+    }
+
+    /**
+     * How many elements a lookup table can name, and their names.
+     *
+     * @param {string} category item | liquid | unit | building
+     * @returns {string[]}
+     */
+    lookupNamesFor(category) {
+        const table = this.contentTable;
+        if (!table?.namesOf) return [];
+        const wanted = (category === 'building') ? 'block' : category;
+        return (table.namesOf(wanted) ?? []).map(n => String(n).replace(/^@/, ''));
+    }
+
+    /**
+     * `array("embedded_lookup_item", ...)` names its elements after contents,
+     * so it cannot hold more elements than that table has names for. Without
+     * this check the extra elements silently read as 0.
+     *
+     * @param {string} name The array's name, for the message
+     * @param {string} category item | liquid | unit | building
+     * @param {number} length
+     * @param {any} location
+     * @returns {void}
+     */
+    checkLookupCapacity(name, category, length, location) {
+        const names = this.lookupNamesFor(category);
+        if (!names.length && !this.contentTable) return;	// no table: nothing to check
+        if (length > names.length) {
+            this.addError(`Array '${name}' has ${length} elements, but the '${category}' `
+                + `lookup table only names ${names.length}: use at most ${names.length}, `
+                + `or another implementation such as array("embedded_divided", ...)`,
+                location);
+        }
+    }
+
+    /**
+     * Which lookup table an array implementation string asks for.
+     *
+     * @param {string?} requested
+     * @returns {string?} item | liquid | unit | building, or null
+     */
+    lookupCategoryOf(requested) {
+        if (!requested || !String(requested).startsWith('embedded_lookup_')) return null;
+        const CATEGORY_ALIASES = {
+            item: 'item', liquid: 'liquid', unit: 'unit', block: 'building', building: 'building'
+        };
+        return CATEGORY_ALIASES[String(requested).slice('embedded_lookup_'.length)] ?? null;
+    }
+
+    /**
+     * The dimensions of an array type, outermost first. `null` marks one that
+     * was left unspecified (`int p[]`).
+     *
+     * @param {TypeInfo?} type
+     * @returns {(number|null)[]}
+     */
+    arrayDimensionsOf(type) {
+        const dims = [];
+        let current = type;
+        while (current && current.isTypeInfo && current.kind === 'array') {
+            const size = current.arraySize ?? null;
+            /*
+            Two different shapes reach this point:
+              - a VARIABLE keeps one dimension per array level, as the node the
+                program wrote (`int a[3][4]` is an array of `int[4]`);
+              - a PARAMETER keeps all of them in one place, because its type is
+                rebuilt from a name like "int [3][4]".
+            `NaN` (from `[]`) and a missing size both mean "unspecified".
+            */
+            const number = value => (Number.isFinite(Number(value)) ? Number(value) : null);
+            if (Array.isArray(size)) {
+                for (const entry of size) dims.push(number(entry));
+            } else if (typeof size === 'number') {
+                dims.push(number(size));
+            } else if (size && typeof size.value !== 'undefined') {
+                dims.push(number(size.value));
+            } else {
+                dims.push(null);
+            }
+            current = current.pointerTo ?? null;
+        }
+        return dims;
+    }
+
+    /**
+     * `void f(int p[4])` may only be handed an array with at least 4 elements;
+     * `void f(int p[][])` accepts any size. Every dimension is checked, so
+     * `void f(int p[3][4])` needs `[>=3][>=4]`.
+     *
+     * @param {string} functionName
+     * @param {{name: string, type: any}} declared The parameter as declared
+     * @param {any} arg The argument expression
+     * @param {number} index 0-based argument position
+     * @returns {void}
+     */
+    checkArrayArgumentDimensions(functionName, declared, arg, index) {
+        /*
+        The function type stores a parameter's type as a name as often as not,
+        so normalise it before looking for dimensions.
+        */
+        const paramType = this.getTypeInfo(declared?.type ?? null) ?? null;
+        if (!paramType || !paramType.isTypeInfo || paramType.kind !== 'array') return;
+        const argType = this.getExpressionType(arg);
+        if (!argType || !argType.isTypeInfo || argType.kind !== 'array') return;
+        const want = this.arrayDimensionsOf(paramType);
+        const got = this.arrayDimensionsOf(argType);
+        if (want.length !== got.length) {
+            this.addError(
+                `Argument ${index + 1} of '${functionName}' is '${this.typeToString(argType)}', `
+                + `which does not have the ${want.length} dimension(s) the parameter asks for`,
+                arg.location);
+            return;
+        }
+        for (let i = 0; i < want.length; i++) {
+            if (want[i] === null || got[i] === null) continue;   // `[]` accepts anything
+            if (got[i] < want[i]) {
+                this.addError(
+                    `Argument ${index + 1} of '${functionName}' has ${got[i]} element(s) in `
+                    + `dimension ${i + 1}, but the parameter needs at least ${want[i]}`,
+                    arg.location);
+                return;
+            }
+        }
+    }
+
+    /**
+     * Record, for each array parameter, what the call sites hand over.
+     *
+     * An array argument is never silently decayed into a pointer, because a
+     * non-memory array has no address to decay into. So the parameter has to
+     * take over the representation the caller's array uses:
+     *
+     *   - `remote`      -- the elements are registers of another processor;
+     *   - `names`       -- an embedded / encoded layout, so the elements are
+     *                      registers here and are reached by name;
+     *   - `traditional` -- an ordinary in-memory array, passed as a pointer.
+     *
+     * @param {any} callNode
+     * @param {SymbolEntry?} funcSymbol
+     * @param {{name: string, type: any}[]} expectedParams
+     * @returns {void}
+     */
+    noteArrayArguments(callNode, funcSymbol, expectedParams) {
+        if (!funcSymbol) return;
+        const scope = funcSymbol.owningScope ?? null;
+        if (!scope) return;
+        (callNode.arguments ?? []).forEach((arg, index) => {
+            const declared = expectedParams[index];
+            if (!declared) return;
+            const paramSymbol = scope.lookup(declared.name);
+            if (!paramSymbol) return;
+            const paramType = paramSymbol.myType?.() ?? null;
+            if (!paramType) return;
+            if (arg.type !== 'Identifier') return;
+            const argSymbol = this.currentScope.lookup(arg.name);
+            if (!argSymbol) return;
+            const argType = argSymbol.myType?.() ?? null;
+            if (!argType || argType.kind !== 'array') return;
+            /*
+            Handed over as a POINTER (`void f(auto int *p)` / `f(arr)`): the
+            callee may write into it at any time, so its contents are no longer
+            known constants. Without this, `print(arr[0])` after the call is
+            folded back to the initial value and the write is lost.
+            */
+            if (paramType.kind === 'pointer') {
+                argSymbol.arrayEscapes = true;
+                return;
+            }
+            if (paramType.kind !== 'array') return;
+            const notes = paramSymbol.arrayArgumentNotes
+                ?? (paramSymbol.arrayArgumentNotes = {
+                    remote: false, register: false, traditional: false, requested: new Set()
+                });
+            const requested = argSymbol.requestedArrayImplementation ?? null;
+            if (argSymbol.isRemote === true) {
+                notes.remote = true;
+            } else if (requested && requested !== 'traditional') {
+                notes.register = true;
+                notes.requested.add(requested);
+            } else {
+                notes.traditional = true;
+            }
+            /*
+            The callee can write into the array, and this program cannot see
+            when it does. So the array is no longer a set of known constants --
+            without this, `print(a[1])` after a call would be folded back to the
+            value the array was initialised with and lose the write.
+            */
+            argSymbol.arrayEscapes = true;
+        });
+    }
+
+    /**
+     * Bind the `remote()` directives whose array was declared further down.
+     *
+     * @returns {void}
+     */
+    finalizeRemoteLinks() {
+        const pending = this.pendingRemoteLinks ?? [];
+        this.pendingRemoteLinks = [];
+        for (const entry of pending) {
+            entry.declarator.initializer = entry.initializer;
+            this.consumeRemoteDirective(entry.declarator, entry.symbol, entry.finalType,
+                entry.qualifiers, true);
+        }
+        for (const entry of (this.pendingRemoteLinks ?? [])) {
+            /*
+            Retrying with `deferred` set resolves it against a global symbol of
+            the required type -- which is enough unless the length of an array
+            is still unknown, the one thing a name alone cannot supply.
+            */
+            entry.declarator.initializer = entry.initializer;
+            this.consumeRemoteDirective(entry.declarator, entry.symbol, entry.finalType,
+                entry.qualifiers, true);
+        }
+        this.pendingRemoteLinks = [];
+    }
+
+    /**
+     * Which representation an `auto` parameter has to use for one argument.
+     *
+     * Only what can be known for sure is used; everything else falls back to
+     * the representation that is always correct (a memory pointer, or an array
+     * handle). Guessing the other way would generate wrong code.
+     *
+     * @param {any} template The function declaration
+     * @param {number} index Which parameter
+     * @param {any} arg The argument at this call site
+     * @returns {'name' | 'memory' | 'handle' | 'unknown'}
+     */
+    /**
+     * The declaration a name refers to, found in the AST itself.
+     *
+     * Needed because an `auto` function is specialised BEFORE the program is
+     * visited: at that point no scope holds the locals yet, so `scope.lookup()`
+     * cannot answer. Everything that decides a representation -- `remote`,
+     * `array("embedded_divided", ...)`, a plain `int b[4]` -- is visible in the
+     * source, so reading it there is enough.
+     *
+     * @param {any} ast
+     * @param {string} name
+     * @returns {{declarator: any, declaration: any, isRemote: boolean}?}
+     */
+    findDeclarationOf(ast, name) {
+        const wanted = String(name ?? '');
+        if (!wanted) return null;
+        let found = null;
+        const look = declaration => {
+            if (found || !declaration) return;
+            for (const declarator of (declaration.declarators ?? [])) {
+                if (String(declarator?.name ?? '') !== wanted) continue;
+                const qualifiers = [
+                    ...(declaration.type?.getAttribute?.('qualifiers') ?? []),
+                    ...(declarator.type?.getAttribute?.('qualifiers') ?? [])
+                ];
+                /*
+                `remote int ru[] = remote(dev, u)`: the qualifier may sit on the
+                declaration or on the declarator, and the binding itself is a
+                `remote(...)` call -- any of the three is enough to tell that the
+                array lives in another processor.
+                */
+                const initializer = declarator?.initializer ?? null;
+                const called = initializer?.type === 'BuiltinCall'
+                    ? initializer.functionName
+                    : (initializer?.callee?.name ?? null);
+                const isRemote = qualifiers.includes('remote') || called === 'remote';
+                found = { declarator, declaration, isRemote };
+                return;
+            }
+        };
+        /*
+        A directed walk: global declarations, then each function's statements
+        (into nested blocks). Walking every property instead wandered into the
+        type tables and never came back.
+        */
+        const statements = list => {
+            for (const statement of (list ?? [])) {
+                if (found || !statement || typeof statement !== 'object') continue;
+                if (statement.type === 'VariableDeclaration') look(statement);
+                else if (statement.type === 'CompoundStatement') statements(statement.statements);
+                else if (statement.body) {
+                    if (statement.body.type === 'CompoundStatement') statements(statement.body.statements);
+                    else statements([statement.body]);
+                }
+            }
+        };
+        statements(ast?.globalDeclarations ?? []);
+        for (const func of (ast?.functions ?? [])) {
+            if (found) break;
+            statements(func?.body?.statements ?? []);
+        }
+        return found;
+    }
+
+    autoRepresentationOf(template, index, arg, ast = null) {
+        const param = (template.parameters ?? [])[index];
+        if (!param) return 'unknown';
+        const type = this.getTypeInfo(this.getTypeNameFromTypeNode(param));
+        let inner = arg;
+        if (inner && inner.type === 'UnaryExpression' && inner.operator === '&') inner = inner.argument;
+        const symbol = (inner && inner.type === 'Identifier')
+            ? (inner.symbol ?? this.globalScope?.lookup?.(inner.name) ?? null) : null;
+        const declaration = (inner && inner.type === 'Identifier' && ast)
+            ? this.findDeclarationOf(ast, inner.name) : null;
+        if (!symbol && !declaration) return 'unknown';
+        if (type && type.kind === 'array') {
+            /*
+            Decided from the declaration, because the choice is a property of
+            how the array was written -- and it has to be known while the
+            versions are still being made.
+            */
+            if (declaration?.isRemote || symbol?.isRemote === true) return 'handle';
+            const requested = declaration?.declarator?.getAttribute?.('arrayImplementation')
+                ?? symbol?.requestedArrayImplementation ?? null;
+            if (requested === 'traditional') return 'memory';
+            if (requested) return 'handle';
+            /*
+            Nothing was written down, so the layout is chosen automatically --
+            and that choice is not visible here. Guessing would risk a version
+            that expects a pointer for an array that ended up in registers (or
+            the other way round), so refuse instead.
+            */
+            if (this.compiler?.arrayOptimize === true) return 'ambiguous';
+            return 'memory';
+        }
+        if (type && type.kind === 'pointer') {
+            /*
+            An array with no address of its own has to travel as a handle; one
+            in memory travels as a pointer.
+            */
+            if (symbol.isRemote === true) return 'handle';
+            const requested = symbol.requestedArrayImplementation ?? null;
+            if (requested === 'traditional') return 'memory';
+            if (requested === null && !(this.compiler?.arrayOptimize === true)) return 'memory';
+            return 'handle';
+        }
+        if (type && type.kind === 'pointer') {
+            /*
+            `&x` can be the NAME of x, which lets x stay in a register -- but
+            only when x really is one plain register and name pointers are on.
+            */
+            if (arg && arg.type === 'UnaryExpression' && arg.operator === '&') {
+                if (symbol) {
+                    const targetType = symbol.myType?.() ?? null;
+                    const oneRegister = !!targetType && targetType.size === 1
+                        && !['array', 'struct', 'union'].includes(targetType.kind);
+                    const movable = !symbol.isVolatile && !symbol.isExtern && !symbol.isStatic
+                        && !symbol.accessThroughPointer && !symbol.needMemoryAllocation;
+                    if (oneRegister && movable && this.namePointersEnabled()) return 'name';
+                    return 'memory';
+                }
+                /*
+                A local: no symbol yet, so judge the declaration. A plain scalar
+                that nothing else forces into memory can be named.
+                */
+                const qualifierList = [
+                    ...(declaration?.declaration?.type?.getAttribute?.('qualifiers') ?? []),
+                    ...(declaration?.declarator?.type?.getAttribute?.('qualifiers') ?? [])
+                ];
+                const forced = qualifierList.includes('volatile') || qualifierList.includes('extern')
+                    || qualifierList.includes('static');
+                const typeName = String(declaration?.declarator?.type?.typeName
+                    ?? declaration?.declaration?.type?.typeName ?? '');
+                const composite = /\bstruct\b|\bunion\b|\[/.test(typeName);
+                if (!forced && !composite && this.namePointersEnabled()) return 'name';
+                return 'memory';
+            }
+            if (symbol.usesNamePointer === true) return 'name';
+            if (symbol.myType?.()?.kind === 'array') return 'memory';
+            return 'memory';
+        }
+        return 'unknown';
+    }
+
+    /**
+     * Does the body use the `auto` parameter in a way only an address allows?
+     *
+     * A name pointer or an array handle cannot be moved, so `s + 1` (and
+     * `s[i]`, which is the same thing) rules that instance out.
+     *
+     * @param {any} template
+     * @param {string} paramName
+     * @returns {boolean}
+     */
+    autoBodyNeedsAddress(template, paramName) {
+        let found = false;
+        const seen = new Set();
+        const walk = node => {
+            if (!node || typeof node !== 'object' || found) return;
+            if (seen.has(node)) return;
+            seen.add(node);
+            if (Array.isArray(node)) { node.forEach(walk); return; }
+            /*
+            An ARRAY parameter is a different matter: `s[i]` is a subscript, and
+            a handle supports that (it is what indexing a handle means). Only
+            moving the parameter itself -- `s + 1` -- needs an address.
+            */
+            const paramIsArray = (() => {
+                const p = (template.parameters ?? []).find(x => String(x?.name ?? '') === paramName);
+                if (!p) return false;
+                const t = this.getTypeInfo(this.getTypeNameFromTypeNode(p));
+                return !!t && t.kind === 'array';
+            })();
+            if (node.type === 'BinaryExpression'
+                && (node.operator === '+' || node.operator === '-')
+                && [node.left, node.right].some(side => side?.type === 'Identifier' && side.name === paramName)) {
+                found = true; return;
+            }
+            if (node.type === 'MemberExpression' && !paramIsArray) {
+                const object = node.children?.[0] ?? node.object ?? null;
+                if (object?.type === 'Identifier' && object.name === paramName) { found = true; return; }
+            }
+            for (const key of Object.keys(node)) {
+                if (key === 'parent' || key === 'scope') continue;
+                walk(node[key]);
+            }
+        };
+        walk(template.body);
+        return found;
+    }
+
+    /**
+     * Emit one version of every `auto` function per representation of its
+     * arguments.
+     *
+     * `void f(auto int *s)` is a TEMPLATE, not a function: what `s` has to be
+     * (a name, an address, an array handle) depends on what each call site
+     * hands over. One call site needing a name and another needing an address
+     * used to be a silent miscompilation -- a single function cannot do both.
+     * Here each call site picks its own version.
+     *
+     * @param {any} ast
+     * @returns {void}
+     */
+    expandAutoTemplates(ast) {
+        const templates = (ast?.functions ?? []).filter(
+            func => (func?.parameters ?? []).some((param, i) => this.hasAutoQualifier(param)));
+        if (!templates.length) return;
+
+        /** @type {any[]} */
+        const calls = [];
+        const seen = new Set();
+        const walk = node => {
+            if (!node || typeof node !== 'object') return;
+            if (seen.has(node)) return;		// scopes and `parent` point back
+            seen.add(node);
+            if (Array.isArray(node)) { node.forEach(walk); return; }
+            if (node.type === 'FunctionCall') calls.push(node);
+            for (const key of Object.keys(node)) {
+                if (key === 'parent' || key === 'scope') continue;
+                walk(node[key]);
+            }
+        };
+        walk(ast);
+
+        for (const template of templates) {
+            const originalName = String(template.name ?? '');
+            /*
+            Marked: it is a pattern, not a function that is emitted. Its
+            parameters carry the notes of every call site mixed together, which
+            is exactly what the versions are here to separate -- so later passes
+            must not read them.
+            */
+            template.setAttribute('autoTemplate', true);
+            const autoIndices = (template.parameters ?? [])
+                .map((param, i) => (this.hasAutoQualifier(param) ? i : -1)).filter(i => i >= 0);
+            const mine = calls.filter(call => call?.callee?.type === 'Identifier'
+                && String(call.callee.name) === originalName);
+            const groups = new Map();
+            for (const call of mine) {
+                const signature = autoIndices
+                    .map(i => this.autoRepresentationOf(template, i, call.arguments?.[i] ?? null, ast)).join('|');
+                if (!groups.has(signature)) groups.set(signature, []);
+                groups.get(signature).push(call);
+            }
+            if (groups.size === 0) continue;
+            /*
+            Nothing is really being overloaded here, just specialised: mark
+            every instance so the versions keep their own names.
+            */
+            const instances = [];
+            let index = 0;
+            for (const [signature, callSites] of groups) {
+                const reps = signature.split('|');
+                if (reps.includes('ambiguous')) {
+                    this.addError(`'${originalName}' has an 'auto' parameter, and this call hands it `
+                        + `an array whose layout is chosen automatically -- which one it is cannot be `
+                        + `known here. Write it down (array("embedded_divided", ...), or `
+                        + `array("traditional", ...)), or turn '#pragma optimize(array)' off`,
+                        callSites[0]?.location ?? null);
+                    continue;
+                }
+                if (reps.includes('unknown')) {
+                    this.addError(`'${originalName}' has an 'auto' parameter, and what this call hands `
+                        + `it cannot be made out`, callSites[0]?.location ?? null);
+                    continue;
+                }
+                const name = this.mangleFunctionName(originalName, index++);
+                for (let a = 0; a < autoIndices.length; a++) {
+                    const paramIndex = autoIndices[a];
+                    const paramName = template.parameters[paramIndex]?.name;
+                    if (reps[a] !== 'memory' && paramName
+                        && this.autoBodyNeedsAddress(template, paramName)) {
+                        this.addError(`Parameter '${paramName}' of '${originalName}' is 'auto', and this `
+                            + `call hands it something that has no address (${reps[a]}) -- but the body `
+                            + `moves the pointer (s + 1, or s[i]), which needs one`,
+                            callSites[0]?.location ?? null);
+                    }
+                }
+                const copy = this.cloneAstNode(template);
+                copy.name = name;
+                copy.scope = null;
+                copy.setAttribute('autoInstance', true);
+                copy.setAttribute('autoReps', signature);
+                autoIndices.forEach((paramIndex, a) => {
+                    const param = copy.parameters?.[paramIndex];
+                    /*
+                    A parameter node is a plain object (it is built by spreading
+                    an ASTNode), so the representation goes on it directly.
+                    */
+                    if (param) param.autoRep = reps[a];
+                });
+                instances.push(copy);
+                for (const call of callSites) {
+                    call.callee.name = name;
+                    call.callee.setAttribute('overloadResolved', true);
+                }
+            }
+            const list = ast.functions ?? [];
+            const at = list.indexOf(template);
+            /*
+            Nothing could be specialised (every call was refused): keep the
+            template, so the program still names something.
+            */
+            if (!instances.length) continue;
+            /*
+            The template was already visited, so its name is taken. Drop the
+            symbol before the versions claim the names -- the first version
+            keeps the plain name.
+            */
+            for (const scope of [this.globalScope, template.scope]) {
+                if (scope?.symbols?.delete) scope.symbols.delete(originalName);
+            }
+            if (at >= 0) list.splice(at, 1, ...instances);
+            /*
+            The versions are built after the program was visited, so they have
+            to be visited now -- that is what gives each one its own scope and
+            its own parameter symbols.
+            */
+            const savedScope = this.currentScope;
+            this.currentScope = this.globalScope;
+            for (const instance of instances) this.visit(instance);
+            this.currentScope = savedScope;
+            for (const call of mine) {
+                if (call?.callee?.type !== 'Identifier') continue;
+                call.callee.symbol = this.globalScope?.lookup?.(call.callee.name) ?? call.callee.symbol;
+            }
+            /*
+            The versions are chosen by representation, not by type -- so put
+            them in the overload set under the name they were written with,
+            and let the call sites (already rewritten) keep their pick.
+            */
+            this.overloadSets?.set(originalName,
+                instances.map(node => ({ node, paramTypes: this.parameterTypeNamesOf(node) })));
+        }
+    }
+
+    /**
+     * Whether `remote` appears anywhere on a type -- on the array itself, or on
+     * the element level (`remote int s[4]` puts it on `int`).
+     *
+     * @param {TypeInfo?} type
+     * @returns {boolean}
+     */
+    typeHasRemoteQualifier(type) {
+        let current = type ?? null;
+        let guard = 0;
+        while (current && guard++ < 8) {
+            if ((current.qualifiers ?? []).includes('remote')) return true;
+            current = current.pointerTo ?? null;
+        }
+        return false;
+    }
+
+    /**
+     * Turn the notes collected at every call site into one decision per array
+     * parameter. Called once, after the whole program has been visited.
+     *
+     * @param {any} ast
+     * @returns {void}
+     */
+    finalizeArrayParameters(ast) {
+        const visitScope = scope => {
+            if (!scope) return;
+            /*
+            The pattern behind `auto` versions: nothing is emitted for it, and
+            its parameters hold every call site's notes at once.
+            */
+            if (scope.astNode?.getAttribute?.('autoTemplate') === true) {
+                (scope.children ?? []).forEach(visitScope);
+                return;
+            }
+            for (const symbol of scope.symbols.values()) {
+                const notes = symbol.arrayArgumentNotes;
+                /*
+                A version emitted for one representation already knows it:
+                re-deciding from the call-site notes would mix them back
+                together, which is exactly what the versions are here to avoid.
+                */
+                if (symbol.arrayParamRep) continue;
+                const declaredRemote = symbol.isRemote === true
+                    || this.typeHasRemoteQualifier(symbol.myType?.());
+                /*
+                `remote int s[4]`: the elements are registers of another
+                processor, so this parameter travels as a HANDLE. That has to be
+                decided from the declaration alone -- a call through a function
+                pointer gives no call-site information at all, yet the callee
+                still has to agree on the form the array arrives in.
+                */
+                if (declaredRemote) {
+                    symbol.arrayParamRep = 'handle';
+                    if (notes?.traditional) {
+                        this.addError(`Parameter '${symbol.name}' is declared 'remote', `
+                            + `but is also passed an ordinary array: the elements cannot be `
+                            + `in another processor and in memory at the same time`, symbol.location);
+                    }
+                    continue;
+                }
+                if (!notes) continue;
+                if (notes.remote) {
+                    symbol.arrayParamRep = 'handle';
+                    if (notes.traditional) {
+                        this.addError(`Parameter '${symbol.name}' is declared 'remote', `
+                            + `but is also passed an ordinary array: the elements cannot be `
+                            + `in another processor and in memory at the same time`, symbol.location);
+                    }
+                } else if (notes.register) {
+                    symbol.arrayParamRep = 'handle';
+                    if (notes.traditional) {
+                        this.addError(`Parameter '${symbol.name}' is passed both an array held in `
+                            + `registers and an ordinary in-memory array; they have no layout in common`,
+                            symbol.location);
+                    }
+                } else {
+                    symbol.arrayParamRep = 'traditional';
+                }
+            }
+            (scope.children ?? []).forEach(visitScope);
+        };
+        visitScope(this.globalScope);
+    }
+
+    /**
+     * Reject everything that only function overloading could support.
+     *
+     * @param {any} node A function declaration
+     * @returns {void}
+     */
+    checkOverloading(node) {
+        const mode = this.compiler?.overloadMode ?? null;
+        const hasAuto = (node.parameters ?? []).some(param => this.hasAutoQualifier(param));
+        if (hasAuto && mode === 'none') {
+            this.addError(`An 'auto' parameter needs function overloading, which is turned off `
+                + `by '#pragma overload(none)'`, node.location ?? null);
+        }
+        /* Whether two functions may share a name is decided in
+           `prescanFunctionDeclarations`; `auto` versions are emitted in
+           `expandAutoTemplates`. */
+    }
+
+    /**
+     * Pick which of several functions sharing a name this call means.
+     *
+     * Called after the arguments have been visited (their types are needed)
+     * and rewrites `node.callee.name` to the chosen function's emitted name, so
+     * that everything downstream -- the generator, the optimizer, the inliner --
+     * sees one ordinary function, as before.
+     *
+     * @param {any} node A FunctionCall
+     * @returns {void}
+     */
+    resolveOverloadedCall(node) {
+        if (node?.callee?.type !== 'Identifier') return;
+        if (node.callee.getAttribute?.('overloadResolved') === true) return;
+        const name = String(node.callee.name ?? '');
+        const set = this.overloadSets?.get(name) ?? null;
+        if (!set || set.length <= 1) return;
+        const argTypes = (node.arguments ?? []).map(arg => this.getExpressionType(arg));
+        const score = entry => {
+            if (entry.paramTypes.length !== argTypes.length) return -1;
+            let total = 0;
+            for (let i = 0; i < argTypes.length; i++) {
+                const want = entry.paramTypes[i];
+                const got = argTypes[i];
+                if (!got) continue;
+                if (String(got.name ?? got) === String(want)) continue;
+                if (this.isTypeCompatible(want, got)) { total += 1; continue; }
+                return -1;
+            }
+            return total;
+        };
+        let best = null;
+        let bestScore = -1;
+        for (const entry of set) {
+            const got = score(entry);
+            if (got < 0) continue;
+            if (best === null || got < bestScore) { best = entry; bestScore = got; }
+        }
+        if (!best) {
+            this.addError(`No version of '${name}' accepts these arguments`
+                + ` (${argTypes.map(t => String(t?.name ?? t)).join(', ')})`, node.location);
+            return;
+        }
+        if (String(best.node.name) === name) return;
+        node.callee.name = best.node.name;
+        const symbol = this.currentScope?.lookup?.(best.node.name) ?? null;
+        if (symbol) node.callee.symbol = symbol;
+    }
+
     visitFunctionCall(node) {
+		if (node.callee && node.callee.type === 'Identifier' && node.callee.name === 'byname') {
+			// Keep it a call: the generator turns it into the address.
+			this.visit(node.arguments?.[0] ?? null);
+			this.consumeByNameCall(node);
+			return;
+		}
+		if (this.foldCompileTimeFunction(node)) return;
         this.visit(node.callee);
 
         // 检查参数
@@ -2096,6 +4569,21 @@ export class SemanticAnalyzer extends ASTVisitor {
 			givenTypeUnsure: true
 		}));
 
+		/*
+		Only now are the argument types known, so only now can the right
+		overload be chosen. Everything below then works on that one.
+		*/
+		this.resolveOverloadedCall(node);
+		if (node.callee.type === 'Identifier') {
+			const chosen = this.currentScope?.lookup?.(node.callee.name) ?? null;
+			if (chosen && chosen.kind === 'function') {
+				funcSymbol = chosen;
+				funcType = chosen.myType();
+				readableFunctionName = chosen.name;
+				expectedParams = funcType.parameters || [];
+			}
+		}
+
         // 检查参数数量
        
         if (node.arguments.length !== expectedParams.length) {
@@ -2117,7 +4605,19 @@ export class SemanticAnalyzer extends ASTVisitor {
                     arg.location
                 );
             }
+            /*
+            An array argument is NOT decayed into a pointer, so its dimensions
+            stay part of the contract: every dimension the parameter names has
+            to be at least as large as what is handed over. `void f(int p[])`
+            names nothing and therefore accepts anything.
+            */
+            this.checkArrayArgumentDimensions(readableFunctionName, expectedParams[index], arg, index);
         });
+        /*
+        An array keeps its own layout when it is passed, so the parameter has to
+        be told which layout it will be given -- see `finalizeArrayParameters`.
+        */
+        this.noteArrayArguments(node, funcSymbol, expectedParams);
 
 		if (isFunctionPointer) {
 			node.dataType = this.getTypeInfo(funcSymbol ?
@@ -2132,6 +4632,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 		const funcSymbol = this.currentScope.lookup(node.functionName);
 		if (!funcSymbol || funcSymbol.kind !== 'function') {
 			this.addError(`Unknown builtin function '${node.functionName}'`, node.location);
+			return;
+		}
+
+		// `byname(&c)`: handled here, because the parser makes it a builtin call
+		if (node.functionName === 'byname') {
+			node.arguments.forEach(arg => this.visit(arg));
+			this.consumeByNameCall(node);
 			return;
 		}
 
@@ -2161,12 +4668,24 @@ export class SemanticAnalyzer extends ASTVisitor {
 			case 'read':
 				if (node.arguments.length !== 2) {
 					this.addError(`'${node.functionName}' requires exactly 2 arguments`, node.location);
+				} else if (!node.arguments[0].dataType
+					|| !['device', 'null_t'].includes(String(node.arguments[0].dataType.name))) {
+					this.addError(`The building of '${node.functionName}' should be a device`, node.location);
 				}
 				break;
 				
 			case 'write':
 				if (node.arguments.length !== 3) {
 					this.addError(`'${node.functionName}' requires exactly 3 arguments`, node.location);
+				} else if (!node.arguments[1].dataType
+					|| !['device', 'null_t'].includes(String(node.arguments[1].dataType.name))) {
+					this.addError(`The building of '${node.functionName}' should be a device`, node.location);
+				}
+				break;
+
+			case 'stricteq':
+				if (node.arguments.length !== 2) {
+					this.addError(`'${node.functionName}' requires exactly 2 arguments`, node.location);
 				}
 				break;
 				
@@ -2184,7 +4703,9 @@ export class SemanticAnalyzer extends ASTVisitor {
 				break;
 		}
 
-		node.dataType = this.getTypeInfo(funcSymbol.type.returnType);
+		node.dataType = funcSymbol.type.returnTypeEval ?
+			funcSymbol.type.returnTypeEval(node)
+			 : this.getTypeInfo(funcSymbol.type.returnType);
 	}
 
 	// !! Has manual changes !!
@@ -2548,6 +5069,14 @@ export class SemanticAnalyzer extends ASTVisitor {
         }
 		if (!strictCompatible) {
 			if (specialContents.includes(targetType.name) && specialContents.includes(sourceType.name)) {
+				/*
+				A `@name` nobody declared is `content_t`, but WHICH content is
+				unknown, so it may only stay `content_t` unless the programmer
+				casts explicitly.
+				*/
+				const opaque = sourceType.annotations?.getAttribute?.('opaqueContent') === true
+					|| sourceType.getAttribute?.('opaqueContent') === true;
+				if (opaque && targetType.name !== 'content_t') return false;
 				return true;
 			}
 			// Clear names for checker

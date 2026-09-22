@@ -128,7 +128,10 @@
         .string { color: #ce9178; }
         .operator { color: #d4d4d4; }
         .punctuator { color: #d4d4d4; }
-        .comment { color: #6a9955; }
+        /* 注释：绿色 + 斜体 */
+        .comment { color: #6a9955; font-style: italic; }
+        /* 预处理指令（#pragma / #define ...）：青色 + 加粗，与上面所有色相都不同 */
+        .directive { color: #0b7a8c; font-weight: 600; }
         .special { color: #c586c0; }
         .predefined { color: #9cdcfe; }
         
@@ -424,6 +427,9 @@ void main() {
                             <li>查看右侧的汇编输出结果</li>
                             <li>对于建筑，使用形如 <code>auto device conveyor1;</code> 在开头声明</li>
                             <li>目前支持 print, printflush, draw 等内置调用。</li>
+                            <li>语法高亮与编译都在后台线程（Web Worker）中执行，编译期间仍可继续编辑；编译中再点按钮即可取消。</li>
+                            <li>需与 <code>mindcHighlightWorker.js</code>、<code>mindcCompileWorker.js</code> 放在同一目录（需通过 HTTP 服务访问，直接双击打开 file:// 会降级为主线程）。</li>
+                            <li>大文件按行分组着色：仅对当前可见区域生成标签，其余以纯文本输出，因此十几万字符的源码也能正常上色，且与编辑器行列严格对齐。</li>
                         </ol>
                     </div>
                 </div>
@@ -447,6 +453,10 @@ void main() {
         } from "./mindcLexer.js";
         import { MemoryBlock } from "./mindcGeneratorBase.js";
         import { Compiler } from "./mindc.js";
+        // 注释 / 预处理指令的高亮扫描（编译器流水线不受影响，见文件内说明）
+        import { HIGHLIGHT_CODEBOOK, DECOR_COMMENT, DECOR_DIRECTIVE,
+            scanDecorations, mergeTokensWithDecorations
+        } from "./mindcHighlightScan.js";
 
         document.addEventListener('DOMContentLoaded', function() {
             // 获取关键DOM元素
@@ -462,6 +472,111 @@ void main() {
             const exampleBtn = document.getElementById('example-btn');
             const clearBtn = document.getElementById('clear-btn');
             const copyOutputBtn = document.getElementById('copy-output-btn');
+
+            /* ---------------- 输入卡顿修复：常量与状态（提前声明，避免 TDZ） ---------------- */
+
+            // 纯字符串转义表：原实现每次转义都新建一个 <div> 并读 innerHTML，
+            // 一次高亮会产生数千次 DOM 分配，这是卡顿的主要来源之一。
+            const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+            // 预先算好 token 类型 -> CSS 类的映射。
+            // 原代码对每个 token 都执行 4 次 Object.values(TokenType).slice(...).includes(...)，
+            // 每次都重新构造一个 100+ 元素的数组。
+            const TOKEN_CLASS_MAP = (() => {
+                const all = Object.values(TokenType);
+                const map = new Map();
+                // 关键字 / 运算符 / 标点符号 / 特殊指令（沿用原切分区间）
+                all.slice(4, 41).forEach(t => map.set(t, 'keyword'));
+                all.slice(41, 70).forEach(t => map.set(t, 'operator'));
+                all.slice(70, 87).forEach(t => map.set(t, 'punctuator'));
+                all.slice(87, 111).forEach(t => map.set(t, 'special'));
+                map.set(TokenType.IDENTIFIER, 'identifier');
+                map.set(TokenType.NUMBER, 'number');
+                map.set(TokenType.STRING, 'string');
+                map.set(TokenType.CHARACTER, 'string');
+                map.set(TokenType.PREDEFINED_CONSTANT, 'predefined');
+                if (TokenType.COMMENT) map.set(TokenType.COMMENT, 'comment');
+                // 高亮伪类型：注释与预处理指令（Lexer 不产生它们，由扫描模块补充）
+                map.set(DECOR_COMMENT, 'comment');
+                map.set(DECOR_DIRECTIVE, 'directive');
+                return map;
+            })();
+
+            // 高亮防抖 + 单次生效（single-flight）：
+            // 每敲一个字符都跑一遍完整的 Lexer.tokenize() 并重建整个高亮层，
+            // 输入 "#pragma optimize(array)" 这类内容会连续触发几十次全量重算。
+            let highlightTimer = null;
+            let highlightSeq = 0;
+            const HIGHLIGHT_DELAY = 180; // ms，停止输入后再刷新高亮
+            function scheduleHighlight() {
+                if (highlightTimer) clearTimeout(highlightTimer);
+                // 文件越大，一次词法分析越贵：放宽防抖，避免连续按键时反复启动
+                const size = codeInput.value.length;
+                const delay = size > 80000 ? 400 : (size > 25000 ? 260 : HIGHLIGHT_DELAY);
+                highlightTimer = setTimeout(() => {
+                    highlightTimer = null;
+                    applySyntaxHighlighting();
+                }, delay);
+            }
+
+            // 行号只在行数变化时才重建
+            let lastLineCount = -1;
+
+            // 上一次渲染出来的高亮 HTML：内容没变就不必再动 DOM
+            let lastHighlightHTML = '';
+
+            /* ---------------- 大文件按行分组（视口）渲染 ---------------- */
+
+            // 除可见区域外，上下各多保留多少行做着色（滚动时不必立刻重算）
+            const VIEWPORT_MARGIN_LINES = 40;
+            // 视口之外的内容以"纯文本节点"输出：巨大但只有一两个文本节点，
+            // 浏览器处理它远比处理成千上万个 <span> 便宜，且天然保证与 textarea 对齐。
+            let cachedLineHeight = 0;
+            let lineStartsCache = { code: null, starts: null };
+            let prefixCache = { code: null, from: -1, html: '' };
+            let suffixCache = { code: null, to: -1, html: '' };
+            // 上一次渲染的输入，滚动时可直接复用来重绘
+            let lastRenderCode = null, lastRenderTokens = null;
+            let lastRange = { first: -1, last: -1 };
+            let viewportRaf = 0;
+            // token 类型 -> CSS 类的整数编码表（由 Worker 随结果下发，避免回传大量重复字符串）
+            let classByCode = null, lastCodebook = null;
+
+            /* ---------------- Web Worker：把重活移出主线程（带主线程降级） ---------------- */
+
+            // 语法高亮 worker（词法分析）
+            let highlightWorker = createWorker('./mindcHighlightWorker.js');
+            // 编译 worker（完整流水线，可能跑很久，可随时 terminate 取消）
+            let compileWorker = null;           // 懒创建：只在第一次编译时才付出启动开销
+            let compileRequestId = 0;
+            let compiling = false;
+
+            function createWorker(url) {
+                try {
+                    const worker = new Worker(url, { type: 'module' });
+                    worker.addEventListener('error', () => { /* 由调用方的超时/降级兜底 */ });
+                    return worker;
+                } catch (error) {
+                    // file:// 协议、老浏览器、或 Worker 被 CSP 拦下时都会走到这里
+                    console.warn('Worker 不可用，降级为主线程处理:', error && error.message);
+                    return null;
+                }
+            }
+
+            function getCompileWorker() {
+                if (!compileWorker) {
+                    compileWorker = createWorker('./mindcCompileWorker.js');
+                    if (compileWorker) {
+                        compileWorker.onmessage = event => {
+                            if (!event.data || event.data.id !== compileRequestId) return; // 过期/已取消的结果
+                            finishCompile(event.data);
+                        };
+                    }
+                }
+                return compileWorker;
+            }
+
+            /* ------------------------------------------------------------------------------ */
             
             // 初始化行号显示
             updateLineNumbers();
@@ -469,7 +584,7 @@ void main() {
             // 监听代码输入变化
             codeInput.addEventListener('input', function() {
                 updateLineNumbers();
-                applySyntaxHighlighting();
+                scheduleHighlight();   // 防抖：不再每次按键都全量重算高亮
             });
             
             // 监听代码滚动，同步行号和高亮区域
@@ -477,7 +592,22 @@ void main() {
                 lineNumbers.scrollTop = codeInput.scrollTop;
                 codeHighlight.scrollTop = codeInput.scrollTop;
                 codeHighlight.scrollLeft = codeInput.scrollLeft;
+                scheduleViewportRefresh();
             });
+
+            // 滚动到新的行区间时，用已有的 token 重绘（rAF 节流，不重新词法分析）
+            function scheduleViewportRefresh() {
+                if (viewportRaf) return;
+                viewportRaf = requestAnimationFrame(() => {
+                    viewportRaf = 0;
+                    if (!lastRenderTokens || lastRenderCode !== codeInput.value) return;
+                    const starts = getLineStarts(lastRenderCode);
+                    const range = computeVisibleRange(starts);
+                    if (!range) return;
+                    if (range.first === lastRange.first && range.last === lastRange.last) return;
+                    renderHighlight(lastRenderCode, lastRenderTokens);
+                });
+            }
             
             // 编译按钮点击事件
             compileBtn.addEventListener('click', function() {
@@ -497,7 +627,9 @@ void main() {
             // 清空按钮
             clearBtn.addEventListener('click', function() {
                 codeInput.value = '';
+                lastLineCount = -1;
                 updateLineNumbers();
+                if (highlightTimer) { clearTimeout(highlightTimer); highlightTimer = null; }
                 applySyntaxHighlighting();
             });
             
@@ -508,10 +640,20 @@ void main() {
             
             // 初始化语法高亮
             applySyntaxHighlighting();
+
+            // 空闲时预热编译 Worker，避免第一次点"编译"时才去加载整个编译器模块
+            const warmup = () => { try { getCompileWorker(); } catch (error) { /* ignore */ } };
+            if (window.requestIdleCallback) {
+                window.requestIdleCallback(warmup, { timeout: 3000 });
+            } else {
+                setTimeout(warmup, 1500);
+            }
             
             // 函数：更新行号显示
             function updateLineNumbers() {
                 const lines = codeInput.value.split('\n').length;
+                if (lines === lastLineCount) return;   // 行数没变就不必重建
+                lastLineCount = lines;
                 let lineNumbersHTML = '';
                 
                 for (let i = 1; i <= lines; i++) {
@@ -522,94 +664,271 @@ void main() {
             }
             
             // 函数：应用语法高亮
+            // (修复) 词法分析放进 Worker；主线程只负责把 token 列表拼成 HTML。
             async function applySyntaxHighlighting() {
+                const mySeq = ++highlightSeq;      // 单次生效：慢的旧结果直接丢弃
                 const code = codeInput.value;
-                
+
                 // 如果没有代码，清空高亮区域
                 if (!code.trim()) {
-                    codeHighlight.innerHTML = '';
+                    if (lastHighlightHTML !== '') {
+                        lastHighlightHTML = '';
+                        codeHighlight.innerHTML = '';
+                    }
                     return;
                 }
-                //console.log('SyntaxHighlight!')
-                // 创建词法分析器实例
+
+                const tokens = await tokenizeForHighlight(code, mySeq);
+                if (tokens === null) return;       // 已被更新的输入取代，或出错已降级处理
+
+                // 拼接 HTML 仍在主线程，放到空闲时段做，不与正在进行的输入抢时间
+                whenIdle(() => {
+                    if (codeInput.value !== code) return;   // 内容又变了，等下一次
+                    renderHighlight(code, tokens);
+                });
+            }
+
+            // 在主线程空闲时执行；不支持 requestIdleCallback 时退化为 setTimeout
+            function whenIdle(fn) {
+                if (window.requestIdleCallback) {
+                    window.requestIdleCallback(() => fn(), { timeout: 500 });
+                } else {
+                    setTimeout(fn, 0);
+                }
+            }
+
+            /**
+             * 取 token 列表。优先用 Worker；不可用时退回主线程（此时仍比原来便宜，
+             * 因为防抖 + 预计算配色表 + 纯字符串转义都还在）。
+             *
+             * 返回的是"紧凑结构"而不是对象数组：
+             *   { n, idx: Int32Array, len: Int32Array, codes: Int32Array }
+             * 10 万字符的源码有数万个 token，若逐个回传对象，光是结构化克隆的
+             * 反序列化就要在主线程花掉几十毫秒；三个 TypedArray 可以零拷贝转移。
+             *
+             * @param {string} code
+             * @param {number} mySeq
+             * @returns {Promise<{n: number, idx: Int32Array, len: Int32Array, codes: Int32Array} | null>}
+             */
+            async function tokenizeForHighlight(code, mySeq) {
+                if (highlightWorker) {
+                    let timedOut = false;
+                    let payload = null;
+                    try {
+                        payload = await new Promise(resolve => {
+                            const done = value => {
+                                highlightWorker.removeEventListener('message', onMessage);
+                                clearTimeout(guard);
+                                resolve(value);
+                            };
+                            // Worker 挂了 / 被 CSP 拦住时不会 reject，只能靠超时兜底
+                            const guard = setTimeout(() => { timedOut = true; done(null); }, 4000);
+                            const onMessage = event => {
+                                if (!event.data || event.data.id !== mySeq) return;
+                                done(event.data.ok ? event.data : null);
+                            };
+                            highlightWorker.addEventListener('message', onMessage);
+                            highlightWorker.postMessage({ id: mySeq, code });
+                        });
+                    } catch (error) {
+                        console.warn('高亮 Worker 失败，降级主线程:', error);
+                    }
+                    if (payload) return adoptCodebook(payload);
+                    if (timedOut) {
+                        // 这个 Worker 不可用（多半是 module worker 没跑起来），换回主线程
+                        try { highlightWorker.terminate(); } catch (error) { /* ignore */ }
+                        highlightWorker = null;
+                    }
+                    // 否则是词法分析本身失败（源码只敲了一半）：走降级路径显示纯文本
+                }
+
+                // 主线程降级路径：结构与 Worker 保持一致（注释/指令也一并扫描）
                 try {
                     const lexer = new Lexer(code, {}, true);
                     const result = await lexer.tokenize();
-                    //console.log(result);
-                    // 处理高亮HTML
-                    let highlightedHTML = '';
-                    let currentPosition = 0;
-                    
-                    // 对每个token进行高亮处理
-                    for (const token of result.tokens) {
-                        // 添加token之前的普通文本
-                        //console.log("Current:"+currentPosition+",coming:",token);
-                        if (token.location.index > currentPosition) {
-                            const plainText = code.substring(currentPosition, token.location.index);
-                            //console.log("Plain text: from"+currentPosition+"to"+token.location.index,`"${plainText}"`);
-                            highlightedHTML += `<span>${escapeHtml(plainText)}</span>`;
-                        }
-                        
-                        // 根据token类型添加高亮类
-                        let tokenText = `${token.value}` || '';
-                        const tokenType = token.type;
-                        
-                        let cssClass = '';
-                        if (tokenType.includes('KEYWORD') || 
-                            Object.values(TokenType).slice(4, 41).includes(tokenType)) { // 关键字范围
-                            cssClass = 'keyword';
-                        } else if (tokenType === TokenType.IDENTIFIER) {
-                            cssClass = 'identifier';
-                        } else if (tokenType === TokenType.NUMBER) {
-                            cssClass = 'number';
-                        } else if (tokenType === TokenType.STRING || tokenType === TokenType.CHARACTER) {
-                            tokenText = token.raw ?? token.value;
-                            //console.log(tokenText);
-                            cssClass = 'string';
-                        } else if (tokenType.includes('OPERATOR') || 
-                                   Object.values(TokenType).slice(41, 70).includes(tokenType)) { // 运算符范围
-                            cssClass = 'operator';
-                        } else if (tokenType.includes('PUNCTUATOR') || 
-                                   Object.values(TokenType).slice(70, 87).includes(tokenType)) { // 标点符号范围
-                            cssClass = 'punctuator';
-                        } else if (Object.values(TokenType).slice(87, 111).includes(tokenType)) { // 特殊指令
-                            cssClass = 'special';
-                        } else if (tokenType === TokenType.PREDEFINED_CONSTANT) {
-                            cssClass = 'predefined';
-                        } else if (tokenType === TokenType.COMMENT) {
-                            cssClass = 'comment';
-                        }
-
-                        if (cssClass) {
-                            highlightedHTML += `<span class="${cssClass}">${escapeHtml(tokenText)}</span>`;
-                        } else {
-                            highlightedHTML += escapeHtml(tokenText);
-                        }
-                        
-                        currentPosition = token.location.index + tokenText.length;
+                    if (mySeq !== highlightSeq) return null;
+                    const list = result.tokens;
+                    const base = new Array(list.length);
+                    for (let k = 0; k < list.length; k++) {
+                        const token = list[k];
+                        const isLiteral = token.type === TokenType.STRING || token.type === TokenType.CHARACTER;
+                        const text = isLiteral ? `${token.raw ?? token.value ?? ''}` : `${token.value ?? ''}`;
+                        base[k] = {
+                            index: token.location ? token.location.index : 0,
+                            length: text.length,
+                            type: token.type
+                        };
                     }
-                    
-                    // 添加剩余的文本
-                    if (currentPosition < code.length) {
-                        highlightedHTML += escapeHtml(code.substring(currentPosition));
+                    const merged = mergeTokensWithDecorations(base, scanDecorations(code));
+                    const n = merged.length;
+                    const idx = new Int32Array(n), len = new Int32Array(n), codes = new Int32Array(n);
+                    const codebook = localCodebook();
+                    for (let k = 0; k < n; k++) {
+                        const item = merged[k];
+                        idx[k] = item.index;
+                        len[k] = item.length;
+                        codes[k] = codebook.index(item.type);
                     }
-                    
-                    codeHighlight.innerHTML = highlightedHTML;
-                    
+                    return { n, idx, len, codes };
                 } catch (error) {
                     console.error('语法高亮出错:', error);
-                    // 如果词法分析失败，显示原始文本
-                    codeHighlight.innerHTML = escapeHtml(code);
+                    // 词法分析失败（例如源码只敲了一半）时显示原始文本
+                    if (mySeq === highlightSeq) {
+                        lastHighlightHTML = escapeHtml(code);
+                        codeHighlight.innerHTML = lastHighlightHTML;
+                    }
+                    return null;
                 }
+            }
+
+            /**
+             * Worker 端的类型编码表随结果下发；主线程据此建一张 code -> CSS 类 的数组。
+             * 这样每个 token 只占一个 Int32，而不是一串重复的类型字符串。
+             */
+            function adoptCodebook(payload) {
+                const book = payload.codebook;
+                if (book && book !== lastCodebook) {
+                    lastCodebook = book;
+                    classByCode = book.map(type => TOKEN_CLASS_MAP.get(type) || '');
+                }
+                if (!classByCode) classByCode = [];
+                return { n: payload.n, idx: payload.idx, len: payload.len, codes: payload.codes };
+            }
+
+            // 主线程降级路径用的类型编码表（与 Worker 共用同一份码表，下标一致）
+            let localBook = null;
+            function localCodebook() {
+                if (!localBook) {
+                    const index = new Map(HIGHLIGHT_CODEBOOK.map((type, i) => [type, i]));
+                    localBook = { types: HIGHLIGHT_CODEBOOK, index };
+                    if (!classByCode) {
+                        lastCodebook = HIGHLIGHT_CODEBOOK;
+                        classByCode = HIGHLIGHT_CODEBOOK.map(type => TOKEN_CLASS_MAP.get(type) || '');
+                    }
+                }
+                return localBook;
+            }
+
+            /**
+             * 主线程唯一剩下的高亮工作：把 token 拼成 HTML 字符串。
+             *
+             * 大文件按行分组：只有可见区域（上下各留 VIEWPORT_MARGIN_LINES 行缓冲）
+             * 生成 <span>，其余部分输出成转义后的纯文本。纯文本虽然长，但在 DOM 里
+             * 只是一两个文本节点，代价远低于数万个 <span>，而且字符一个不少，
+             * 与 textarea 的行列位置天然严格对齐（不需要测量行高、不需要垫片）。
+             */
+            function renderHighlight(code, tokens) {
+                lastRenderCode = code;
+                lastRenderTokens = tokens;
+
+                const starts = getLineStarts(code);
+                const range = computeVisibleRange(starts);
+                // 视口覆盖了全文（或还没布局）时，退化为原来的整篇渲染
+                const full = !range || (range.first === 0 && range.last === starts.length - 1);
+
+                const from = full ? 0 : starts[range.first];
+                const to = full ? code.length
+                    : ((range.last + 1 < starts.length) ? starts[range.last + 1] : code.length);
+                lastRange = { first: full ? 0 : range.first, last: full ? starts.length - 1 : range.last };
+
+                paintRange(code, tokens, from, to);
+            }
+
+            /**
+             * 生成 [from, to) 区间的 HTML：该区间内逐个 token 上色，区间外只输出纯文本。
+             */
+            function paintRange(code, tokens, from, to) {
+                let html = '';
+
+                // 视口之前：整段纯文本（按 code 缓存，滚动小距离时可复用）
+                if (from > 0) {
+                    if (!(prefixCache.code === code && prefixCache.from === from)) {
+                        prefixCache = { code, from, html: escapeHtml(code.slice(0, from)) };
+                    }
+                    html += prefixCache.html;
+                }
+
+                const idx = tokens.idx, len = tokens.len, codes = tokens.codes;
+                // 二分找到落在区间内的 token（idx 升序）
+                const lo = lowerBound(idx, from);
+                const hi = lowerBound(idx, to);
+                let cur = from;
+                for (let k = lo; k < hi; k++) {
+                    const i = idx[k];
+                    if (i > cur) html += `<span>${escapeHtml(code.substring(cur, i))}</span>`;
+                    // token 可能跨越区间右边界，截断以免和后面的纯文本重复
+                    const take = Math.max(0, Math.min(len[k], to - i));
+                    const text = code.substr(i, take);
+                    const cssClass = classByCode ? (classByCode[codes[k]] || '') : '';
+                    html += cssClass ? `<span class="${cssClass}">${escapeHtml(text)}</span>` : escapeHtml(text);
+                    cur = i + take;
+                }
+                if (cur < to) html += escapeHtml(code.substring(cur, to));
+
+                // 视口之后：整段纯文本
+                if (to < code.length) {
+                    if (!(suffixCache.code === code && suffixCache.to === to)) {
+                        suffixCache = { code, to, html: escapeHtml(code.slice(to)) };
+                    }
+                    html += suffixCache.html;
+                }
+
+                if (html === lastHighlightHTML) return;   // 没有变化就不碰 DOM
+                lastHighlightHTML = html;
+                codeHighlight.innerHTML = html;
+            }
+
+            /** 第一个 >= value 的下标 */
+            function lowerBound(array, value) {
+                let lo = 0, hi = array.length;
+                while (lo < hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (array[mid] < value) lo = mid + 1; else hi = mid;
+                }
+                return lo;
+            }
+
+            /** 每一行的起始偏移（含空行） */
+            function getLineStarts(code) {
+                if (lineStartsCache.code === code && lineStartsCache.starts) return lineStartsCache.starts;
+                const starts = [0];
+                for (let i = 0; i < code.length; i++) {
+                    if (code.charCodeAt(i) === 10) starts.push(i + 1);
+                }
+                lineStartsCache = { code, starts };
+                return starts;
+            }
+
+            /** 编辑器的行高（用于把 scrollTop 换算成行号） */
+            function getLineHeight() {
+                if (cachedLineHeight) return cachedLineHeight;
+                const style = window.getComputedStyle(codeInput);
+                const lh = parseFloat(style.lineHeight);
+                cachedLineHeight = (isFinite(lh) && lh > 0) ? lh : (parseFloat(style.fontSize) || 14) * 1.4;
+                return cachedLineHeight;
+            }
+
+            /** 当前可见的行区间（含上下缓冲行） */
+            function computeVisibleRange(starts) {
+                const viewHeight = codeInput.clientHeight;
+                const maxLine = starts.length - 1;
+                if (!viewHeight || maxLine < 0) return null;   // 尚未布局，按全篇处理
+                const lh = getLineHeight();
+                const top = codeInput.scrollTop;
+                // 必须钳制：scrollTop 超过可滚动高度时算出的 first 会越过最后一行，
+                // 导致区间反转、退化为全篇渲染。
+                const first = Math.min(maxLine, Math.max(0, Math.floor(top / lh) - VIEWPORT_MARGIN_LINES));
+                const last = Math.min(maxLine, Math.max(first, Math.ceil((top + viewHeight) / lh) + VIEWPORT_MARGIN_LINES));
+                return { first, last };
             }
             
             // 函数：转义HTML特殊字符
+            // (修复) 原实现为每个片段都新建一个 <div> 并读取 innerHTML，一次高亮会产生
+            // 数千次 DOM 分配与序列化，是输入卡顿的主要来源之一。改为纯字符串替换。
             function escapeHtml(text) {
-                const div = document.createElement('div');
-                div.textContent = text;
-                return div.innerHTML;
+                return String(text).replace(/[&<>"']/g, ch => HTML_ESCAPE_MAP[ch]);
             }
-            
+
             // 函数：添加内存块
             function addMemoryBlock() {
                 const blockCount = document.querySelectorAll('.memory-block-item').length;
@@ -745,118 +1064,150 @@ void main() {
                 document.getElementById('warning-count').textContent = '0';
             }
 
+            // 读取内存块配置（纯数据，便于跨线程传递）
+            function collectMemoryConfig() {
+                const memoryItems = document.querySelectorAll('.memory-block-item');
+                const config = [];
+                memoryItems.forEach((item, index) => {
+                    const nameInput = item.querySelector('.memory-block-name');
+                    const sizeInput = item.querySelector('.memory-block-size');
+                    config.push({
+                        name: (nameInput && nameInput.value) ? nameInput.value : `cell${index + 1}`,
+                        size: (sizeInput && parseInt(sizeInput.value)) ? parseInt(sizeInput.value) : 64
+                    });
+                });
+                return config;
+            }
+
+            // 用编译结果刷新界面（Worker 与主线程两条路径共用）
+            function renderCompileResult(result) {
+                if (result.success) {
+                    showCompileStatus('success', '成功', '编译成功完成');
+                    outputText.textContent = result.code || '编译成功，但未生成代码';
+
+                    if (result.errors && result.errors.length > 0) {
+                        displayErrors(result.errors);
+                    } else {
+                        clearErrorWarnings();
+                    }
+
+                    if (result.warnings && result.warnings.length > 0) {
+                        displayWarnings(result.warnings);
+                    } else {
+                        document.getElementById('warning-output').innerHTML = '<div class="p-3 text-muted">暂无警告信息</div>';
+                        document.getElementById('warning-count').textContent = '0';
+                    }
+                } else {
+                    showCompileStatus('error', '失败', '编译失败');
+                    outputText.textContent = '编译失败:\n' + (result.fatalError ? result.fatalError + '\n' : '');
+
+                    if (result.errors && result.errors.length > 0) {
+                        displayErrors(result.errors);
+                    } else {
+                        clearErrorWarnings();
+                    }
+
+                    if (result.warnings && result.warnings.length > 0) {
+                        displayWarnings(result.warnings);
+                    }
+                }
+            }
+
+            // Worker 编译结束（或失败）时的收尾
+            function finishCompile(data) {
+                setCompiling(false);
+                if (data && data.ok) {
+                    renderCompileResult(data);
+                } else {
+                    showCompileStatus('error', '异常', '编译过程中出现异常');
+                    outputText.textContent = '编译异常:\n' + ((data && data.fatalError) || 'Worker 未能完成编译');
+                }
+            }
+
+            // 切换"编译中"状态：期间按钮变成"取消编译"
+            function setCompiling(value) {
+                compiling = value;
+                compileBtn.textContent = value ? '取消编译' : '编译代码';
+                compileBtn.classList.toggle('btn-danger', value);
+                compileBtn.classList.toggle('btn-compile', !value);
+            }
+
+            // 取消正在进行的编译：Worker 无法中断，只能整个终止后重建
+            function cancelCompile() {
+                compileRequestId++;                 // 让在途结果失效
+                if (compileWorker) {
+                    compileWorker.terminate();
+                    compileWorker = null;
+                }
+                setCompiling(false);
+                showCompileStatus('error', '已取消', '编译已取消');
+                outputText.textContent = '编译已取消。';
+            }
+
             function compileCode() {
+                // 编译进行中时，按钮的作用是取消
+                if (compiling) {
+                    cancelCompile();
+                    return;
+                }
+
                 const code = codeInput.value;
-                
+
                 // 检查代码是否为空
                 if (!code.trim()) {
                     showCompileStatus('error', '错误', '请输入C代码');
                     outputText.textContent = '错误：请输入C代码';
                     return;
                 }
-                
-                // 获取内存块配置并创建 MemoryBlock 对象数组
-                const memoryBlocks = [];
-                const memoryBlockItems = document.querySelectorAll('.memory-block-item'); // 在这里定义
-                
-                memoryBlockItems.forEach((item, index) => {
-                    const nameInput = item.querySelector('.memory-block-name');
-                    const sizeInput = item.querySelector('.memory-block-size');
-                    
-                    const name = nameInput ? nameInput.value : `cell${index+1}`;
-                    const size = sizeInput ? parseInt(sizeInput.value) : 64;
-                    
-                    // 创建 MemoryBlock 对象 - 使用 (name, size) 参数
-                    memoryBlocks.push(new MemoryBlock(name, size));
-                });
-                
-                // 显示编译中状态
-                showCompileStatus('compiling', '编译中', '正在编译代码...');
+
+                const memory = collectMemoryConfig();
+
+                showCompileStatus('compiling', '编译中', '正在编译代码（后台线程）...');
                 outputText.textContent = '编译中...';
-                
-                // 使用 setTimeout 确保 UI 能够更新状态
+
+                const worker = getCompileWorker();
+                if (worker) {
+                    setCompiling(true);
+                    const id = ++compileRequestId;
+                    worker.postMessage({ id, code, memory });
+                    return;
+                }
+
+                // 降级：没有 Worker 时仍在后台跑，但会占用主线程
+                setCompiling(true);
+                const id = ++compileRequestId;
                 setTimeout(async () => {
+                    // 降级路径会把编译跑在主线程，此时编译器的海量 console.log
+                    // （优化器每轮日志、ScopeOp dump）会直接拖垮页面渲染 —— 先静音。
+                    const originalLog = console.log, originalWarn = console.warn;
+                    console.log = () => {};
+                    console.warn = () => {};
                     try {
-                        // 创建编译器实例
-                        // 根据 Compiler 类构造函数的参数说明：
-                        // 1. sourceCode: C 源代码字符串
-                        // 2. memoryInfo: MemoryBlock 对象组成的列表
-                        
-                        // Providing an example of compiler extension:
-
-
-                        // End.
-
-                        const compiler = new Compiler(code, memoryBlocks, null);
-                        
-                        // 执行编译
+                        const blocks = memory.map(b => new MemoryBlock(b.name, b.size));
+                        const compiler = new Compiler(code, blocks, null);
                         const result = await compiler.compile();
-                        
-                        // 修改为：
-                        if (result.success) {
-                            showCompileStatus('success', '成功', '编译成功完成');
-                            outputText.textContent = result.code || '编译成功，但未生成代码';
-                            
-                            // 分离显示错误和警告
-                            if (result.errors && result.errors.length > 0) {
-                                displayErrors(result.errors);
-                            } else {
-                                clearErrorWarnings();
-                            }
-                            
-                            if (result.warnings && result.warnings.length > 0) {
-                                displayWarnings(result.warnings);
-                            } else {
-                                // 如果没有警告，确保警告区域是空的
-                                document.getElementById('warning-output').innerHTML = '<div class="p-3 text-muted">暂无警告信息</div>';
-                                document.getElementById('warning-count').textContent = '0';
-                            }
-                        } else {
-                            showCompileStatus('error', '失败', '编译失败');
-                            outputText.textContent = '编译失败:\n';
-                            
-                            // 显示致命错误（如果有）
-                            if (result.fatalError) {
-                                outputText.textContent += result.fatalError + '\n';
-                            }
-                            
-                            // 显示错误信息
-                            if (result.errors && result.errors.length > 0) {
-                                displayErrors(result.errors);
-                            } else {
-                                clearErrorWarnings();
-                            }
-                            
-                            // 显示警告信息
-                            if (result.warnings && result.warnings.length > 0) {
-                                displayWarnings(result.warnings);
-                            }
-                        }
-                    // 在编译函数的 catch 块中，添加更详细的错误信息：
+                        console.log = originalLog;
+                        console.warn = originalWarn;
+                        if (id !== compileRequestId) return;
+                        finishCompile({
+                            ok: true,
+                            success: result.success,
+                            code: result.code ?? '',
+                            fatalError: result.fatalError ?? null,
+                            errors: result.errors ?? [],
+                            warnings: result.warnings ?? []
+                        });
                     } catch (error) {
-                        // 捕获编译过程中的异常
+                        console.log = originalLog;
+                        console.warn = originalWarn;
                         console.error('编译过程中出现异常:', error);
-                        showCompileStatus('error', '异常', '编译过程中出现异常');
-                        
-                        let errorMessage = `编译异常:\n${error.message}\n`;
-                        
-                        // 检查是否是 Compiler 类未定义的错误
-                        if (error.message.includes('Compiler is not defined') || 
-                            error.message.includes('Compiler is not a constructor')) {
-                            errorMessage += '\n提示：请确保编译器脚本已正确引入\n';
-                            errorMessage += '确保在HTML中引入了包含Compiler类的脚本文件\n';
-                        }
-                        
-                        // 检查是否是 MemoryBlock 类未定义的错误
-                        if (error.message.includes('MemoryBlock is not defined') || 
-                            error.message.includes('MemoryBlock is not a constructor')) {
-                            errorMessage += '\n提示：MemoryBlock类未定义\n';
-                            errorMessage += '请确保编译器中包含MemoryBlock类的定义\n';
-                        }
-                        
-                        outputText.textContent = errorMessage;
+                        if (id !== compileRequestId) return;
+                        finishCompile({
+                            ok: false,
+                            fatalError: `${error.message}\n${error.stack ?? ''}`
+                        });
                     }
-                }, 10); // 使用很短的延迟确保 UI 更新
+                }, 10);
             }
 
             // 函数：显示编译状态
@@ -887,6 +1238,7 @@ void main() {
                 const exampleCode = ``; // leave it blank now
                 
                 codeInput.value = exampleCode;
+                lastLineCount = -1;
                 updateLineNumbers();
                 await applySyntaxHighlighting();
                 showCompileStatus('info', '已加载', '示例代码已加载到编辑器');

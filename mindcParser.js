@@ -697,13 +697,23 @@ export class Parser {
         while (this.matchTokenTypeAt(this.currentTokenIndex, [
             TokenType.CONST, TokenType.VOLATILE,
             TokenType.STATIC, TokenType.EXTERN, TokenType.AUTO, TokenType.REGISTER,
-			TokenType.NEAR
+			TokenType.NEAR, TokenType.BYNAME
         ])) {
 			const qualifierToken = this.consumeToken();
             qualifiers.push(qualifierToken.value);
         }
+		/*
+		`remote` is a reserved word, so `remote int x` needs no lookahead. It is
+		also the pseudo function `remote(dev, var)`, which is why expression
+		position hands it over as the identifier it looks like (see below).
+		*/
+		while (this.matchToken(TokenType.REMOTE)) {
+			this.consumeToken();
+			qualifiers.push('remote');
+		}
         return qualifiers;
     }
+
 
 	// ****
 	// THIS FUNCTION HAS A MANUAL CHANGE
@@ -2138,12 +2148,95 @@ export class Parser {
         return expression;
     }
 
+	/**
+	 * `sizeof(<type>)` and `sizeof(<expression>)`.
+	 *
+	 * A type is told from an expression by how the argument STARTS: a type
+	 * keyword, or one of the dialect's own type names. Anything else is an
+	 * expression. The distinction is recorded in the argument itself -- a
+	 * string literal holds the type's name, anything else is a real
+	 * expression -- so that the semantic pass can tell them apart without
+	 * re-parsing.
+	 *
+	 * @param {object} token The `sizeof` token
+	 * @returns {ASTNode}
+	 */
+	parseSizeof(token) {
+		this.consumeToken();
+		const parenthesized = this.matchToken(TokenType.LEFT_PAREN);
+		if (parenthesized) this.consumeToken();
+		let argument;
+		if (this.isTypeNameStart()) {
+			const name = this.readTypeName(parenthesized);
+			argument = ASTBuilder.stringLiteral(name).setAttribute('location', token.location);
+		} else {
+			argument = this.parseExpression();
+			if (argument) argument.parent = null;
+		}
+		if (parenthesized) this.expectToken(TokenType.RIGHT_PAREN);
+		const call = ASTBuilder.functionCall(ASTBuilder.identifier('sizeof'));
+		call.arguments = [argument];
+		if (argument) argument.parent = call;
+		call.location = token.location;
+		return call;
+	}
+
+	/**
+	 * Whether the token under the cursor can begin a type name.
+	 *
+	 * @returns {boolean}
+	 */
+	isTypeNameStart() {
+		const typeKeywords = ['INT', 'CHAR', 'FLOAT', 'DOUBLE', 'VOID', 'LONG', 'SHORT',
+			'SIGNED', 'UNSIGNED', 'BOOL', 'STRUCT', 'UNION', 'ENUM'];
+		const special = ['device', 'content_t', 'null_t', 'item_t', 'liquid_t', 'unit_t', 'block_t'];
+		const token = this.getCurrentToken();
+		if (!token) return false;
+		if (typeKeywords.includes(token.type)) return true;
+		return token.type === 'IDENTIFIER' && special.includes(token.value);
+	}
+
+	/**
+	 * Collect the tokens that make up a type name.
+	 *
+	 * @param {boolean} parenthesized Stop at the closing parenthesis
+	 * @returns {string}
+	 */
+	readTypeName(parenthesized) {
+		const parts = [];
+		while (true) {
+			const token = this.getCurrentToken();
+			if (!token) break;
+			if (parenthesized && token.type === 'RIGHT_PAREN') break;
+			if (token.type === 'LEFT_PAREN' || token.type === 'SEMICOLON' || token.type === 'COMMA') break;
+			parts.push(token.value ?? String(token.type).toLowerCase());
+			this.consumeToken();
+			// `struct pt` / `union u`: the tag belongs to the name
+			if ((token.type === 'STRUCT' || token.type === 'UNION')
+				&& this.getCurrentToken()?.type === 'IDENTIFIER') {
+				parts.push(this.getCurrentToken().value);
+				this.consumeToken();
+				break;
+			}
+			if (token.type === 'IDENTIFIER') break;
+			if (token.type === 'INT' || token.type === 'CHAR' || token.type === 'FLOAT'
+				|| token.type === 'DOUBLE' || token.type === 'VOID' || token.type === 'BOOL') break;
+		}
+		return parts.join(' ').trim();
+	}
+
     parsePrimaryExpression() {
         const token = this.getCurrentToken();
 
         switch (token.type) {
 			// These cases handles builtin functions.
 			// Why aren't they identifiers?
+			// These cases handles builtin functions.
+			// Why aren't they identifiers?
+			case TokenType.SIZEOF: {
+				return this.parseSizeof(token);
+			}
+
 			case TokenType.ASM:
 			case TokenType.DRAW:
 			case TokenType.PRINT:
@@ -2171,6 +2264,24 @@ export class Parser {
             case TokenType.IDENTIFIER: {
                 this.consumeToken();
                 return ASTBuilder.identifier(token.value).setAttribute('location', token.location);
+            }
+			/*
+			`byname` is a reserved word so that `int *byname q` needs no
+			lookahead -- but it is also the pseudo function `byname(&c)`, so in
+			expression position it is handed over as the identifier it looks
+			like. The postfix parser then turns `byname(` into a builtin call.
+			*/
+            case TokenType.BYNAME: {
+                this.consumeToken();
+                return ASTBuilder.identifier('byname').setAttribute('location', token.location);
+            }
+			/*
+			Same for `remote`: a reserved word, but `remote(dev, var)` is a call,
+			so in expression position it is handed over as an identifier.
+			*/
+            case TokenType.REMOTE: {
+                this.consumeToken();
+                return ASTBuilder.identifier('remote').setAttribute('location', token.location);
             }
             
             case TokenType.NUMBER: {
@@ -2233,7 +2344,7 @@ export class Parser {
 			'draw', 'print', 'drawflush', 'printflush', 'getlink', 'ceil', 'floor', 'sqrt', 'rand', 'abs', 'memcpy', 'pow',
 			'control', 'radar', 'sensor', 'set', 'op', 'lookup', 'ubind', 'ulocate', 'ucontrol', 'uradar', 'min', 'max',
 			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'adiff',
-			'memsp', 'printchar', 'format', ...(this.extraFunctions.map(func => func.name))
+			'memsp', 'printchar', 'format', 'stricteq', 'byname', ...(this.extraFunctions.map(func => func.name))
 		];
         return builtins.includes(name);
     }

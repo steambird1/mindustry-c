@@ -30,6 +30,9 @@ export const TokenType = {
     LONG: 'LONG',
 	NEAR: 'NEAR',
     REGISTER: 'REGISTER',
+	REMOTE: 'REMOTE',
+	BYNAME: 'BYNAME',
+	REMOTE: 'REMOTE',
     RETURN: 'RETURN',
     SHORT: 'SHORT',
     SIGNED: 'SIGNED',
@@ -206,6 +209,8 @@ export const KEYWORDS = {
     'auto': TokenType.AUTO,
     'break': TokenType.BREAK,
 	'bool': TokenType.BOOL,
+	'byname': TokenType.BYNAME,
+	'remote': TokenType.REMOTE,
     'case': TokenType.CASE,
     'char': TokenType.CHAR,
     'const': TokenType.CONST,
@@ -1079,9 +1084,11 @@ export class Lexer {
     
     // 处理 #pragma - 收集指令内容
     handlePragma(args, location) {
+        const fullPragma = `#pragma ${args}`.trim();
+        
         this.tokens.push(new Token(TokenType.PREPROCESSOR_PRAGMA, fullPragma, location));
         if (this.skipping) return;
-        const fullPragma = `#pragma ${args}`.trim();
+        
         this.pragmas.push(fullPragma);
     }
     

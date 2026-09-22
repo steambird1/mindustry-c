@@ -53,16 +53,47 @@ export class InstructionReferrer {
 /*
 Instruction input must be done by instruction builder!
 */
+/**
+ * Flatten a list of instructions.
+ *
+ * Several call sites build an instruction as `[other.instructions, more]`,
+ * which nests a plain ARRAY inside the list. Such an element carries neither
+ * `content` nor `referrer` and blows up while the code is being printed.
+ * Empty slots are dropped for the same reason.
+ *
+ * @param {Iterable<any>} list
+ * @returns {any[]}
+ */
+function flattenInstructions(list) {
+	const result = [];
+	for (const item of list) {
+		if (item == null) continue;
+		if (Array.isArray(item)) {
+			result.push(...flattenInstructions(item));
+		} else {
+			result.push(item);
+		}
+	}
+	return result;
+}
+
 export class Instruction extends AttributeClass {
 	constructor(instructSequence = [], instructionReturn = null, attributes = new Map()) {
 		super();
 		this.isDebug = false;
 		this.isInstructionGroup = true;
+		let sequence;
 		if (instructSequence.length !== undefined) {
-			this.instructions = instructSequence;
+			sequence = instructSequence;
 		} else {
-			this.instructions = [instructSequence];
+			sequence = [instructSequence];
 		}
+		/*
+		Keep the very same array when there is nothing to fix, so that call sites
+		relying on sharing it keep working exactly as before.
+		*/
+		const needsFix = sequence.some(item => item == null || Array.isArray(item));
+		this.instructions = needsFix ? flattenInstructions(sequence) : sequence;
 		this.instructionReturn = instructionReturn;	// What this instruction returns
 		
 		if (this.instructionReturn && (typeof this.instructionReturn === 'object')) {
@@ -84,6 +115,20 @@ export class Instruction extends AttributeClass {
 	 @remark This copies the object.
 	*/
 	concat(other) {
+		/*
+		An instruction object is mutable and shared by reference: pushing the very
+		same object twice (a declaration reached through two lists, say) would
+		emit it twice. Identical neighbours are always a mistake.
+		*/
+		if (other && other.isInstructionGroup
+			&& this.instructions[this.instructions.length - 1] === other) {
+			return this;
+		}
+		if (Array.isArray(other)) {
+			// A bare list is not an instruction: splice it in item by item
+			flattenInstructions(other).forEach(item => this.instructions.push(item));
+			return this;
+		}
 		/*
 		const currentLength = this.instructions.length;
 		other.instructions.forEach(stmt => {
@@ -143,11 +188,24 @@ export class Instruction extends AttributeClass {
 	 */
 	set_returns_type(typeInfo) {
 		if (!typeInfo) return this;
+		/*
+		Two DIFFERENT notions are mixed up by `TypeInfo.isPointerImpl()`:
+		  - "this value IS a pointer"  -> it takes two words (P_block / P_pos).
+		    true only for pointer / array / memory-implemented struct-union.
+		  - "this value lives in memory and is talked about THROUGH a pointer"
+		    -> `volatile` scalars belong here as well, since `volatile` means
+		       "this variable MUST be kept in memory". The value itself is still
+		       a single word; only the access goes through `X.__pointer`.
+		`isPointer` must mean the former (width!), `isPointerAccess` the latter.
+		*/
+		const isRealPointer = (typeInfo.kind === 'pointer' || typeInfo.kind === 'array')
+			|| ((typeInfo.kind === 'struct' || typeInfo.kind === 'union') && typeInfo.isPointerImpl());
+		const throughPointer = isRealPointer || typeInfo.isVolatile();
 		this.setAttribute('isRegStruct', typeInfo.isRegStruct());
 		this.setAttribute('isStructRet', ['struct', 'union'].includes(typeInfo.kind));
-		this.setAttribute('isNearPointer', (this.getAttribute('isNearPointer') === true) || (typeInfo.isNear() && typeInfo.isPointerImpl()));
-		this.setAttribute('isPointer', typeInfo.isPointerImpl());
-		this.setAttribute('isPointerAccess', (this.getAttribute('isPointerAccess') === true) || (typeInfo.isPointerImpl() && !typeInfo.isStrictPointerImpl()));
+		this.setAttribute('isNearPointer', (this.getAttribute('isNearPointer') === true) || (typeInfo.isNear() && isRealPointer));
+		this.setAttribute('isPointer', (this.getAttribute('isPointer') === true) || isRealPointer);
+		this.setAttribute('isPointerAccess', (this.getAttribute('isPointerAccess') === true) || (throughPointer && !typeInfo.isStrictPointerImpl()));
 		return this;
 	}
 	
@@ -504,6 +562,21 @@ export class InstructionBuilder {
 			referrer: []
 		});
 	}
+	/**
+	 * `draw triangle`, used only to DECLARE variables: in mlog a name becomes a
+	 * variable by being used, and this one takes six operands at a time.
+	 *
+	 * @param {string[]} names Up to six variable names
+	 * @returns {SingleInstruction}
+	 */
+	static drawTriangle(names) {
+		const six = [];
+		for (let i = 0; i < 6; i++) six.push(names[i] ?? '0');
+		return new SingleInstruction({
+			content: `draw triangle ${six.join(' ')}`,
+			referrer: []
+		});
+	}
 	static drawflush(target) {
 		return new SingleInstruction({
 			content: `drawflush ${target}`,
@@ -534,12 +607,116 @@ export class InstructionBuilder {
  * @typedef {{body: Instruction, scope: Scope, preservedStack: SymbolEntry,
  * 			stackSymbols: SymbolEntry[], stackTotal: number, specialBuiltin: boolean, recursive: boolean | undefined, calls: number}} functionInfo
  */
+/**
+ * How much stack a symbol needs in a recursive function.
+ *
+ * An ordinary symbol needs room for its value. A POINTER-VALUED one
+ * (`implementAsPointer` without `accessThroughPointer`: an array, or a pointer)
+ * needs two words *more*: its value is the pair `X_block` / `X_pos`, and that
+ * pair lives in registers, so a nested call would overwrite it. The extra two
+ * words are the slot `X.__pointer` where the pair is stashed and restored.
+ *
+ * @param {SymbolEntry} symbol
+ * @returns {number}
+ */
+export function stackFrameSizeOf(symbol) {
+	return (symbol.size != null) ? symbol.size : 0;
+}
+/**
+ * Whether the symbol's value has to be written to (and read back from) a save
+ * slot when a recursive call happens.
+ *
+ * A symbol whose value *is* an address into the frame (`implementAsPointer`
+ * without `accessThroughPointer`: an array, say) needs nothing: after the frame
+ * pointer has been rolled back, walking the frame again yields exactly the same
+ * address. Everything else lives in a register that the nested call overwrites,
+ * so it has to be saved.
+ *
+ * @param {SymbolEntry} symbol
+ * @returns {boolean}
+ */
+export function needsSaveSlot(symbol) {
+	/*
+	Only an ARRAY / STRUCT / UNION is laid out inside the frame: its `X_block` /
+	`X_pos` *are* its address, so walking the frame again reproduces them
+	exactly. A POINTER symbol is different -- its two words hold a VALUE (the
+	thing it points at), which is not recoverable and must be saved.
+	*/
+	const kind = symbol.myType?.()?.kind ?? null;
+	/*
+	An array's value IS its address, so walking the frame reproduces it -- even
+	when the array is marked "accessed through a pointer" (taking `&a[1]` does
+	that), `X.__pointer` is only a slot for that address, not the data itself.
+	*/
+	if (kind === 'array') return false;
+	if (['struct', 'union'].includes(kind) && !symbol.accessThroughPointer) return false;
+	return true;
+}
+
+/**
+ * Read or write the cell that `outputPointerForwardCall(..., doSet = false)`
+ * left behind.
+ *
+ * That call leaves its result in `__ptrblock` / `__ptrpos` -- note there is NO
+ * underscore before "block". `outputPointerFetchOf('__ptr', ...)` would look
+ * for `__ptr_block` / `__ptr_pos`, which nothing ever writes, so the advanced
+ * address has to be used through these helpers instead.
+ *
+ * @param {string} data
+ * @returns {Instruction}
+ */
+export function readAtAdvancedPointer(data) {
+	return InstructionBuilder.reads(data, '__ptrblock', '__ptrpos');
+}
+
+/**
+ * @param {string} data
+ * @returns {Instruction}
+ */
+export function writeAtAdvancedPointer(data) {
+	return InstructionBuilder.writes(data, '__ptrblock', '__ptrpos');
+}
+
+/**
+ * What to do when the stack cannot grow any further.
+ *
+ * @param {string|boolean|undefined} stackCheck
+ * @returns {Instruction[]}
+ */
+function overflowHandlerOf(stackCheck) {
+	if (typeof stackCheck === 'string' && stackCheck.length > 0) {
+		return callHandlerOf(stackCheck);
+	}
+	return [
+		// Nothing is printed: whether a message board is connected is unknown
+		InstructionBuilder.set('__error', '"stack overflow"'),
+		InstructionBuilder.end()
+	];
+}
+
+/**
+ * Call `handler` and then leave the walker, whatever it returned.
+ *
+ * @param {string} handler
+ * @returns {Instruction[]}
+ */
+function callHandlerOf(handler) {
+	return [
+		InstructionBuilder.set('__stackcheck_return', '__stackpos'),
+		InstructionBuilder.op('add', '__stackpos', '@counter', 1),
+		InstructionBuilder.set('@counter', '_' + handler),
+		InstructionBuilder.set('@counter', '__stackcheck_return')
+	];
+}
+
 export class FunctionRegisterer {
 	/**
 	 * 
 	 * @param {MemoryManager} memoryObject 
 	 */
-	constructor(memoryObject) {
+	constructor(memoryObject, stackCheck = undefined, stackUnderflow = undefined) {
+		this.stackCheck = stackCheck;
+		this.stackUnderflow = stackUnderflow;
 		/**
 		 * @type {Map<string, functionInfo>}
 		 */
@@ -548,8 +725,14 @@ export class FunctionRegisterer {
 		this.memoryObject = memoryObject;
 
 		if (this.memoryObject.memoryBlocks.length > 0) {
-			memoryObject.outputPointerForwardFunction(this, '__stackframe_forward', '__stackframe_', false);
-			memoryObject.outputPointerBackwardFunction(this, '__stackframe_backward', '__stackframe_', false);
+			/*
+			All three are registered as removable: a program whose functions keep
+			nothing on the stack never calls them, and they are then dropped
+			instead of being emitted as dead code.
+			*/
+			memoryObject.outputPointerForwardFunction(this, '__stackframe_forward', '__stackframe_', true, stackCheck);
+			memoryObject.outputPointerBackwardFunction(this, '__stackframe_backward', '__stackframe_', true, stackUnderflow);
+			memoryObject.outputNearFitFunction(this, '__nearFit', '__ptr', true, stackCheck);
 		}
 	}
 	
@@ -576,7 +759,7 @@ export class FunctionRegisterer {
 			stackSymbols.push(new SymbolEntry('__stackpos', '__builtin_int', scope, 'variable', null, 1));
 		}
 		stackSymbols.forEach(element => {
-			if (element.size != null) stackTotal += element.size;
+			stackTotal += stackFrameSizeOf(element);
 		});
 		let preservedStack = null;
 		// Meaningless:
@@ -622,11 +805,12 @@ export class FunctionRegisterer {
 		 */
 		const mapper = symbol => {
 				if (symbol.name === '__stackpos') return [];
+				if (!needsSaveSlot(symbol)) return [];	// Re-derived from the frame
 				if (symbol.implementAsPointer) {
 					return [
 						this.memoryObject.outputPointerStorageOf(`${symbol.getAssemblySymbol()}.__pointer`, `${symbol.getAssemblySymbol()}_block`),
 						this.memoryObject.outputPointerForwardCall(1, `${symbol.getAssemblySymbol()}.__pointer`, this, false, false),
-						this.memoryObject.outputPointerStorageOf('__ptr', `${symbol.getAssemblySymbol()}_pos`)
+						writeAtAdvancedPointer(`${symbol.getAssemblySymbol()}_pos`)
 					];
 				} else {
 					return [this.memoryObject.outputPointerStorageOf(`${symbol.getAssemblySymbol()}.__pointer`, symbol.getAssemblySymbol())];
@@ -665,12 +849,33 @@ export class FunctionRegisterer {
 			*/
 		refFunction.stackSymbols.forEach(symbol => {
 			// So pointer-forward and -backward can't have stack symbols!
-			totalStackframeSize += symbol.size;
+			totalStackframeSize += stackFrameSizeOf(symbol);
 			const memFwdCall = this.getFunctionCall('__stackframe_forward', new Map([['__step', symbol.size]]), null);
+			/*
+			A `near` symbol must lie completely inside ONE block, so the frame is
+			first walked forward to a position that can hold all of it. The walk
+			lands on a stack overflow when no block is large enough.
+			*/
+			if (symbol.isNearPointer === true) {
+				const nearFit = this.getFunctionCall('__nearFit', new Map([
+					['__ptrblock', '__stackframe_block'],
+					['__ptrpos', '__stackframe_pos'],
+					['__step', symbol.size]
+				]), null);
+				nearFit.concat(new Instruction([
+					InstructionBuilder.set('__stackframe_block', '__ptrblock'),
+					InstructionBuilder.set('__stackframe_pos', '__ptrpos')
+				]));
+				heapPreparation.concat(nearFit);
+			}
 			//memoryObject.outputPointerForwardCall(symbol.size, '__stackframe', this);
 			// This has even taken array into account
-			if (symbol.implementAsPointer && !symbol.accessThroughPointer) {
-				// Already pointer, simply assigning memory space
+			if (!needsSaveSlot(symbol)) {
+				/*
+				An array / struct / union: its two words ARE its address, so they
+				are simply recomputed here. Everything else gets a save slot
+				(`X.__pointer`) whose address is recorded the same way.
+				*/
 				heapPreparation.concat(new Instruction([
 					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_block`, '__stackframe_block'),
 					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_pos`, '__stackframe_pos')
@@ -707,7 +912,21 @@ export class FunctionRegisterer {
 			// Requires something more for resetting
 			refFunction.stackSymbols.forEach(symb => {
 				if (symb.name === '__stackpos') return;	// Already considered
-				temp.concat(this.memoryObject.outputPointerFetchOf(`${symb.getAssemblySymbol()}.__pointer`, symb.getAssemblySymbol()));
+				if (!needsSaveSlot(symb)) return;		// Re-derived from the frame
+				const name = symb.getAssemblySymbol();
+				if (symb.implementAsPointer) {
+					/*
+					Two words, matching what `getFunctionStackStorage` wrote:
+					`X_block` at `X.__pointer`, `X_pos` one cell further on. This
+					is true for a pointer stored in memory as well, whose value is
+					also the pair `X_block` / `X_pos`.
+					*/
+					temp.concat(this.memoryObject.outputPointerFetchOf(`${name}.__pointer`, `${name}_block`));
+					temp.concat(this.memoryObject.outputPointerForwardCall(1, `${name}.__pointer`, this, false, false));
+					temp.concat(readAtAdvancedPointer(`${name}_pos`));
+				} else {
+					temp.concat(this.memoryObject.outputPointerFetchOf(`${name}.__pointer`, name));
+				}
 			});
 			return temp;
 		};
@@ -792,14 +1011,79 @@ export class FunctionRegisterer {
 	 * @param {MemoryManager} memoryObject 
 	 * @returns 
 	 */
+	/**
+	 * Mark the stack helpers as used whenever some function keeps anything on
+	 * the stack, so that "drop it when unused" does not drop a helper that is
+	 * called later in the same pass.
+	 *
+	 * @returns {void}
+	 */
+	markStackHelpersUsed() {
+		const helpers = new Set(['__stackframe_forward', '__stackframe_backward',
+			'__nearFit', '__pointerForward', '__pointerBackward']);
+		let anyStack = false, anyNear = false;
+		this.functionCollection.forEach((func, name) => {
+			if (helpers.has(name)) return;
+			func.stackTotal = 0;
+			func.stackSymbols.forEach(symb => {
+				func.stackTotal += stackFrameSizeOf(symb);
+				if (symb.isNearPointer === true) anyNear = true;
+			});
+			// The roll-back is only emitted for a function that owns stack space
+			if (func.stackTotal > 0) anyStack = true;
+		});
+		const bump = name => {
+			const helper = this.functionCollection.get(name);
+			if (helper) helper.calls = Math.max(helper.calls, 1);
+		};
+		if (anyStack) {
+			bump('__stackframe_forward');
+			bump('__stackframe_backward');
+		}
+		if (anyNear) {
+			bump('__nearFit');
+		}
+		/*
+		A handler named by `#pragma stackcheck(fn)` / `#pragma stackunderflow(fn)`
+		is only ever reached through the walker, so nothing marks it as called and
+		it would be dropped -- leaving `set @counter _fn` pointing nowhere.
+		*/
+		[this.stackCheck, this.stackUnderflow].forEach(handler => {
+			if (typeof handler === 'string' && handler.length > 0) bump(handler);
+		});
+	}
+
 	getAllFunctionDecl(memoryObject) {
 		
 		let result = new Instruction();
-		this.functionCollection.forEach((func, name) => {
+		/*
+		A removable helper is dropped when `calls` is still 0 by the time the loop
+		reaches it -- and the helpers below are called while a LATER function is
+		being emitted, so they would be dropped even though they are used. Decide
+		first, from the stack layout, whether anybody needs them.
+		*/
+		this.markStackHelpersUsed();
+		/*
+		`main` must come out LAST.
+
+		The chunk of every function ends with a `jump` that skips its body, and
+		that jump is resolved while the whole program is being scanned -- so it
+		points at whatever follows that chunk. Anything emitted after `main`
+		therefore lands between `main` and the little wrapper that calls it, and
+		the wrapper is never reached.
+
+		Functions are normally declared before `main`, so this never showed up;
+		but an extension may register a helper while `main` is being generated,
+		which puts it after `main` in the collection.
+		*/
+		const orderedNames = [...this.functionCollection.keys()];
+		orderedNames.sort((a, b) => (a === 'main' ? 1 : 0) - (b === 'main' ? 1 : 0));
+		orderedNames.forEach(name => {
+			const func = this.functionCollection.get(name);
 			// Re-evaluate the size!
 			func.stackTotal = 0;
 			func.stackSymbols.forEach(symb => {
-				func.stackTotal += symb.size;
+				func.stackTotal += stackFrameSizeOf(symb);
 			});
 
 			if (func.specialBuiltin && func.calls <= 0) return;
@@ -959,8 +1243,17 @@ export class FunctionRegisterer {
 // This class also generates a few pieces
 // It is recommended to use scope path to describe variable 
 // This will raise exception for failed memory allocation
-export class MemoryAllocationException {
+export class MemoryAllocationException extends Error {
 	constructor(varName = null, maxRemaining = null) {
+		/*
+		It used to be a bare object: reaching the top level it produced
+		"Internal parser error: undefined" with no clue at all. Being a real
+		Error gives it a readable message and a stack.
+		*/
+		super(`Not enough memory${varName ? ` to hold ${varName}` : ''}` +
+			`${maxRemaining === 0 ? ' (no memory is available at all)' : ''}` +
+			`${(maxRemaining !== null && maxRemaining > 0) ? ` (largest free block: ${maxRemaining})` : ''}`);
+		this.name = 'MemoryAllocationException';
 		this.varName = varName;
 		this.maxRemaining = maxRemaining;
 	}
@@ -998,22 +1291,30 @@ export class MemoryBlockInfo {
 	 */
 	currentRemain() {
 		if (this.parent) {
-			return this.parent.memoryBlocks[this.block].size - this.position;
+			/*
+			With no memory configured at all there is no such block, and asking
+			for its size used to crash. There is nothing left in it either.
+			*/
+			const block = this.parent.memoryBlocks[this.block];
+			if (!block) return 0;
+			return block.size - this.position;
 		}
 		else return Infinity;
 	}
 
 	isAvailable() {
 		if (this.parent) {
-			return (this.currentRemain() > 0) &&
-				(!this.parent.memoryBlocks[this.block].occupation[this.position]);
+			const block = this.parent.memoryBlocks[this.block];
+			if (!block) return false;
+			return (this.currentRemain() > 0) && (!block.occupation[this.position]);
 		}
 		else return true;
 	}
 
 	skipToNextPage() {
 		if (this.parent) {
-			if (this.block === this.parent.memoryBlocks.length - 1) {
+			// `>=` also covers "there is no block at all", which must end the walk
+			if (this.block >= this.parent.memoryBlocks.length - 1) {
 				this.full = true;
 			} else {
 				this.block++;
@@ -1128,7 +1429,13 @@ export class MemoryManager {
 		this.memoryBlocks = memoryBlocks;
 		//this.memoryLinker = new BuildingLinker(memoryBlocks.map(block => block.name));
 		this.reservedSize = MEMORY_RESERVE_SIZE;
-		this.memoryPositionStack = [new MemoryBlockInfo(0, this.reservedSize, false, this)];
+		/*
+		No memory block linked at all: there is nowhere to allocate, so the stack
+		starts out full and every allocation fails loudly (instead of pretending
+		to succeed on a block that does not exist).
+		*/
+		const hasMemory = this.memoryBlocks.length > 0;
+		this.memoryPositionStack = [new MemoryBlockInfo(0, this.reservedSize, !hasMemory, this)];
 		this.variableReference = new Map();
 		this.memoryBlocks.forEach(single => {
 			for (let i = 0; i < 4; i++) {
@@ -1160,6 +1467,9 @@ export class MemoryManager {
 	}
 	
 	assign(name, size) {
+		if (this.memoryBlocks.length === 0) {
+			throw new MemoryAllocationException(name, size);
+		}
 		if (this.currentState().full) {
 			throw new MemoryAllocationException(name, 0);
 		}
@@ -1226,33 +1536,91 @@ export class MemoryManager {
 	// This is a function for pointer, satisfying cdecl standard.
 	// Tested to be OK
 	// These two functions directly modify the pointers, so we don't use a 'ret'.
-	outputPointerForwardFunction(funcReg, name = '__pointerForward', target = '__ptr', removable = true) {
-		/*
-		Logic: First read the remaining number and compare current step and the previous pointer. Add if not exceeding, or jump to next page.
-		*/
+		/**
+	 * Advance a pointer by `__step` cells, crossing into the next memory block
+	 * when the current one cannot hold them.
+	 *
+	 * Blocks form a chain (slot 0 = previous, slot 1 = next, slot 2 = capacity)
+	 * and are laid out back to back in the address space, so crossing simply
+	 * consumes what is left of the current block and continues at `reservedSize`
+	 * of the next one -- no extra `+1`, and nothing is wasted.
+	 *
+	 * @param {FunctionRegisterer} funcReg
+	 * @param {string} name
+	 * @param {string} target
+	 * @param {boolean} removable Drop the helper when nothing calls it
+	 * @param {string|boolean|undefined} stackCheck
+	 *        undefined -- write a fixed message to __error and stop
+	 *        false    -- `#pragma stackcheck()`: no capacity check
+	 *        string   -- call that function, then leave the walker
+	 * @returns {void}
+	 */
+	/**
+	 * Advance a pointer by `__step` cells, crossing into the next memory block
+	 * when the current one cannot hold them.
+	 *
+	 * Blocks form a chain (slot 0 = previous, slot 1 = next, slot 2 = capacity)
+	 * and are laid out back to back in the address space, so crossing simply
+	 * consumes what is left of the current block and continues at `reservedSize`
+	 * of the next one. No extra `+1` is added: the cells left at the tail of a
+	 * block are exactly the ones the retreat walks back over.
+	 *
+	 * @param {FunctionRegisterer} funcReg
+	 * @param {string} name
+	 * @param {string} target
+	 * @param {boolean} removable Drop the helper when nothing calls it
+	 * @param {string|boolean|undefined} stackCheck
+	 *        undefined -- write a fixed message to __error and stop
+	 *        false    -- `#pragma stackcheck()`: no capacity check at all
+	 *        string   -- call that function, then leave the walker
+	 * @returns {void}
+	 */
+	outputPointerForwardFunction(funcReg, name = '__pointerForward', target = '__ptr', removable = true, stackCheck = undefined) {
+		const noCheck = (stackCheck === false);
+		const overflow = noCheck ? [] : overflowHandlerOf(stackCheck);
+		const guardLength = noCheck ? 0 : 1;
+		const OVF = 11 + guardLength + 3;
+		const RET = OVF + overflow.length;
+		const guard = noCheck ? [] : [
+			InstructionBuilder.jump('{0}', 'lessThanEq', `${target}block`, 0, [OVF])
+		];
 		funcReg.addFunction(name, new Instruction([
 			InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),			// 0
 			InstructionBuilder.end(),														// 1
 			InstructionBuilder.getlink('__curptrblock', `${target}block`),					// 2
-			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [15]),				// 3
-			InstructionBuilder.read('__block', '__curptrblock', 2),							// 4
-			InstructionBuilder.op('sub', '__mxstep', '__block', `${target}pos`),				// 5
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [RET]),				// 3
+			InstructionBuilder.read('__block', '__curptrblock', 2),							// 4 capacity
+			InstructionBuilder.op('sub', '__mxstep', '__block', `${target}pos`),				// 5 remaining
 			InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [10]),	// 6
-			InstructionBuilder.op('add', `${target}pos`, `${target}pos`, '__step'),					// 7
+			InstructionBuilder.op('add', `${target}pos`, `${target}pos`, '__step'),			// 7 fits
 			InstructionBuilder.set('__step', 0),											// 8
-			InstructionBuilder.jump('{0}', 'always', null, null, [15]),						// 9
-			InstructionBuilder.read(`${target}block`, '__curptrblock', 1),						// 10
-			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),					// 11
-			InstructionBuilder.op('add', '__step', '__step', 1),							// 12
-			InstructionBuilder.set(`${target}pos`, this.reservedSize),							// 13
-			InstructionBuilder.jump('{0}', 'always', null, null, [0])						// 14
+			InstructionBuilder.jump('{0}', 'always', null, null, [RET]),					// 9
+			InstructionBuilder.read(`${target}block`, '__curptrblock', 1),					// 10 next block
+			...guard,
+			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),					// consume the tail
+			InstructionBuilder.set(`${target}pos`, this.reservedSize),
+			InstructionBuilder.jump('{0}', 'always', null, null, [0]),
+			...overflow
 		]), null, [], true, false, removable);
 	}
-	
+
 	/**
-	 * 
-	 * @param {string} variable 
-	 * @param {FunctionRegisterer} funcReg 
+	 * Retreat a pointer by `__step` cells, walking the chain backwards.
+	 *
+	 * A block that has been left behind is always full from the address point of
+	 * view, so landing in the previous block only needs its CAPACITY (slot 2);
+	 * from there the loop walks the remaining cells down inside it. That is why
+	 * nothing but the chain has to be saved: the position is rebuilt from the
+	 * pointer itself.
+	 *
+	 * @param {FunctionRegisterer} funcReg
+	 * @param {string} name
+	 * @param {string} target
+	 * @param {boolean} removable
+	 * @param {string|boolean|undefined} stackUnderflow
+	 *        undefined or false -- no check (this is the default)
+	 *        string            -- call that function, then leave the walker
+	 * @returns {void}
 	 */
 	outputPointerForwardCall(step, variable, funcReg, doReset = false, doSet = true, isNear = false) {
 		if (doReset) isNear = false;
@@ -1260,7 +1628,12 @@ export class MemoryManager {
 		if (doReset) {
 			process.concat(InstructionBuilder.set(variable + '_pos', this.reservedSize));
 			process.concat(InstructionBuilder.set(variable + '_block', `${this.memoryBlocks[0].name}_id`));
-		} else if (step === 0) {
+		} else if (Number(step) === 0) {
+			/*
+			Stepping by nothing is nothing. This has to come before the `isNear`
+			branch below, which used to emit `op add X X 0` -- one pointless
+			instruction at EVERY constant subscript.
+			*/
 			if (!doSet) {
 				return new Instruction([
 					InstructionBuilder.set('__ptrblock', variable + '_block'),
@@ -1288,16 +1661,6 @@ export class MemoryManager {
 		return process;
 	}
 
-	/**
-	 * 
-	 * @param {*} step 
-	 * @param {SymbolEntry} symbol 
-	 * @param {FunctionRegisterer} funcReg 
-	 * @param {boolean} doReset 
-	 * @param {boolean} doSet 
-	 * @param {boolean} [doCopy=true] 
-	 * @returns {Instruction}
-	 */
 	outputSymbolForwardCall(step, symbol, funcReg, doReset = false, doSet = true, doCopy = true) {
 		const translation = symbol.accessThroughPointer ? `${symbol.getAssemblySymbol()}.__pointer` : `${symbol.getAssemblySymbol()}`;
 		if (doReset || !symbol.isNearPointer) {
@@ -1317,27 +1680,89 @@ export class MemoryManager {
 			], '__ptr');
 		}
 	}
-	
-	outputPointerBackwardFunction(funcReg, name = '__pointerBackward', target = '__ptr', removable = true) {
+
+	outputPointerBackwardFunction(funcReg, name = '__pointerBackward', target = '__ptr', removable = true, stackUnderflow = undefined) {
+		const handler = (typeof stackUnderflow === 'string' && stackUnderflow.length > 0)
+			? stackUnderflow : null;
+		const underflow = handler ? callHandlerOf(handler) : [];
+		const guardLength = handler ? 1 : 0;
+		const cross = [
+			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),					// step -= used
+			InstructionBuilder.read(`${target}block`, '__curptrblock', 0)					// previous block
+		];
+		const land = [
+			InstructionBuilder.getlink('__curptrblock', `${target}block`),
+			InstructionBuilder.read(`${target}pos`, '__curptrblock', 2),					// capacity
+			InstructionBuilder.jump('{0}', 'always', null, null, [0])
+		];
+		const UF = 9 + cross.length + guardLength + land.length;
+		const RET = UF + underflow.length;
+		const guard = handler ? [
+			InstructionBuilder.jump('{0}', 'lessThanEq', `${target}block`, 0, [UF])
+		] : [];
 		funcReg.addFunction(name, new Instruction([
 			InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),			// 0
 			InstructionBuilder.end(),														// 1
-			InstructionBuilder.getlink('__curptrblock', `${target}block`),						// 2
-			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [14]),				// 3
-
-			InstructionBuilder.op('sub', '__mxstep', `${target}pos`, this.reservedSize),		// 4
+			InstructionBuilder.getlink('__curptrblock', `${target}block`),					// 2
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [RET]),				// 3
+			InstructionBuilder.op('sub', '__mxstep', `${target}pos`, this.reservedSize),		// 4 used
 			InstructionBuilder.jump('{0}', 'greaterThan', '__step', '__mxstep', [9]),		// 5
-			InstructionBuilder.op('sub', `${target}pos`, `${target}pos`, '__step'),					// 6
+			InstructionBuilder.op('sub', `${target}pos`, `${target}pos`, '__step'),			// 6 fits
 			InstructionBuilder.set('__step', 0),											// 7
-			InstructionBuilder.jump('{0}', 'always', null, null, [14]),						// 8
-			InstructionBuilder.read(`${target}block`, '__curptrblock', 0),						// 9
-			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),					// 10
-
-			InstructionBuilder.getlink('__curptrblock', `${target}block`),						// 11
-			InstructionBuilder.read(`${target}pos`, '__curptrblock', 4),						// 12
-			InstructionBuilder.jump('{0}', 'always', null, null, [0])						// 13
+			InstructionBuilder.jump('{0}', 'always', null, null, [RET]),					// 8
+			...cross, ...guard, ...land, ...underflow
 		]), null, [], true, false, removable);
 	}
+
+
+	/**
+	 * Move a pointer forward until the whole `__step` cells fit inside ONE block.
+	 * Used for `near` symbols on the stack: they must not be split across blocks.
+	 * Running out of blocks is a stack overflow.
+	 *
+	 * @param {FunctionRegisterer} funcReg
+	 * @param {string} name
+	 * @param {string} target
+	 * @param {boolean} removable
+	 * @param {string|boolean|undefined} stackCheck
+	 * @returns {void}
+	 */
+	/**
+	 * Move a pointer forward until the whole `__step` cells fit inside ONE block.
+	 *
+	 * Used for `near` symbols living on the stack: they must never be split
+	 * across two blocks. Running out of blocks is a stack overflow.
+	 *
+	 * @param {FunctionRegisterer} funcReg
+	 * @param {string} name
+	 * @param {string} target
+	 * @param {boolean} removable
+	 * @param {string|boolean|undefined} stackCheck
+	 * @returns {void}
+	 */
+	outputNearFitFunction(funcReg, name = '__nearFit', target = '__ptr', removable = true, stackCheck = undefined) {
+		const noCheck = (stackCheck === false);
+		const overflow = noCheck ? [] : overflowHandlerOf(stackCheck);
+		const guardLength = noCheck ? 0 : 1;
+		const OVF = 5 + guardLength + 2;
+		const RET = OVF + overflow.length;
+		const guard = noCheck ? [] : [
+			InstructionBuilder.jump('{0}', 'lessThanEq', `${target}block`, 0, [OVF])
+		];
+		funcReg.addFunction(name, new Instruction([
+			InstructionBuilder.getlink('__curptrblock', `${target}block`),					// 0
+			InstructionBuilder.read('__block', '__curptrblock', 2),							// 1 capacity
+			InstructionBuilder.op('sub', '__mxstep', '__block', `${target}pos`),				// 2 remaining
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', '__mxstep', [RET]),		// 3 fits
+			InstructionBuilder.read(`${target}block`, '__curptrblock', 1),					// 4 next block
+			...guard,
+			InstructionBuilder.set(`${target}pos`, this.reservedSize),
+			InstructionBuilder.jump('{0}', 'always', null, null, [0]),
+			...overflow
+		]), null, [], true, false, removable);
+	}
+
+
 	
 	/**
 	 * 

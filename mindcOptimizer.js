@@ -37,6 +37,191 @@ class ReturnRegistry {
 	}
 }
 
+/**
+ * Compatibility problem exists when array B is assigned to array A (explicitly, or implicity by function call)
+ * 
+ * @typedef {{type: 'traditional' | 'embedded' | 'encoded', mutable: boolean, implement: null | 'regular' | 'divided' | 'lookup'}} arrayStyle
+ */
+export class ArrayStateReferrer {
+	constructor() {
+		/**
+		 * @type {Map<string, string>}
+		 */
+		this.arrayParent = new Map();
+		/**
+		 * @type {Map<string, arrayStyle>}
+		 */
+		this.arrayState = new Map();
+
+		/**
+		 * @type {arrayStyle}
+		 */
+		this.defaultState = {
+			type: 'traditional',
+			mutable: true,
+			implement: null
+		};
+	}
+
+	/**
+	 * 
+	 * @param {arrayStyle?} x 
+	 * @param {arrayStyle?} y 
+	 * @returns {arrayStyle?}
+	 */
+	static compatibleOf(x, y) {
+		if ((!x) && (!y)) return undefined;
+		if (!x) return y;
+		if (!y) return x;
+		if (x.type === 'traditional' || y.type === 'traditional') return {
+			type: 'traditional',
+			mutable: x.mutable || y.mutable,
+			implement:	null
+		};
+		if (x.type == 'embedded' || y.type == 'embedded') return {
+			type: 'embedded',
+			mutable: x.mutable || y.mutable,
+			implement: (x.type == y.type) ? x.type.implement : 'divided'
+		};
+		return x.type;
+	}
+
+	/**
+	 * 
+	 * @param {string} x 
+	 * @param {arrayStyle} style 
+	 * @param {boolean} [compatible=false] 
+	 */
+	load(x, style, compatible = false) {
+		const head = this.query(x);
+		this.arrayState.set(head.root, compatible ? ArrayStateReferrer.compatibleOf(style, head.status) : style);
+	}
+
+	/**
+	 * 
+	 * @param {string} x 
+	 */
+	downgrade(x) {
+		this.load(x, {
+			type: 'traditional',
+			mutable: false,
+			implement: null
+		}, true);
+	}
+
+	/**
+	 * @param {string} x 
+	 * @param {arrayStyle | undefined} [defaults=undefined] 
+	 * @returns {{root: string, status: arrayStyle?}}
+	 */
+	query(x, defaults = undefined) {
+		if (!this.arrayParent.has(x)) {
+			this.arrayParent.set(x, x);
+		} else if (this.arrayParent.get(x) !== x) {
+			this.arrayParent.set(x, this.query(this.arrayParent.get(x)).root);
+		}
+		return {
+			root: this.arrayParent.get(x), status: this.arrayState.get(x) ?? (defaults === undefined ? this.defaultState : defaults)
+		};
+	}
+
+	/**
+	 * 
+	 * @param {string} x 
+	 * @param {string} y 
+	 */
+	assign(x, y) {
+		const rx = this.query(x, null), ry = this.query(y, null);
+		this.arrayParent.set(ry.root, rx.root);
+		this.arrayState.set(rx.root, ArrayStateReferrer.compatibleOf(rx.status, ry.status));
+	}
+
+	clear() {
+		this.arrayParent.clear();
+		this.arrayState.clear();
+	}
+
+	/**
+	 * The style recorded for an array symbol, falling back to the default
+	 * (traditional) layout when nothing has been recorded.
+	 * 
+	 * @param {import('./mindcSemantic.js').SymbolEntry | string} symbol 
+	 * @returns {arrayStyle}
+	 */
+	styleOf(symbol) {
+		const name = (typeof symbol === 'string') ? symbol
+			: (symbol && typeof symbol.getAssemblySymbol === 'function') ? symbol.getAssemblySymbol() : `${symbol}`;
+		return this.query(name).status ?? this.defaultState;
+	}
+}
+
+/* ------------------------------------------------------------------ *
+ * Array representations -- classification
+ *
+ * The array styles above only say *which* layout an array has been
+ * given; the table below says what that means for the code generator
+ * (see the `ArrayRet` family in mindcInfrastructure.js).
+ * ------------------------------------------------------------------ */
+
+/**
+ * Every representation an array can have.
+ *
+ * `supportsPointer` tells whether the array may be converted into a
+ * pointer -- only the traditional layout lives in memory, so it is the
+ * only one that can.
+ *
+ * @type {Map<string, {type: string, implement: string?, representation: string, supportsPointer: boolean}>}
+ */
+export const ARRAY_IMPLEMENTATIONS = new Map([
+	['traditional', { type: 'traditional', implement: null, representation: 'TraditionalArrayRet', supportsPointer: true }],
+	['embedded.regular', { type: 'embedded', implement: 'regular', representation: 'PseudoListArrayRet', supportsPointer: false }],
+	['embedded.divided', { type: 'embedded', implement: 'divided', representation: 'PackedArrayRet', supportsPointer: false }],
+	['embedded.lookup', { type: 'embedded', implement: 'lookup', representation: 'ConstantArrayRet', supportsPointer: false }],
+	['encoded', { type: 'encoded', implement: null, representation: 'ConstantArrayRet', supportsPointer: false }]
+]);
+
+/**
+ * The key of an array style inside `ARRAY_IMPLEMENTATIONS`.
+ * 
+ * @param {arrayStyle?} style 
+ * @returns {string}
+ */
+export function keyOfArrayStyle(style) {
+	if (!style || !style.type) return 'traditional';
+	return style.implement ? `${style.type}.${style.implement}` : style.type;
+}
+
+/**
+ * Decide which representation an array symbol should get.
+ *
+ * This is a pure mirror of `loadArrayForSymbol` (which writes into the
+ * referrer): the same conditions, but returning the style instead of
+ * storing it. It exists so that the code generator can ask "how is this
+ * array represented?" without running a full analysis pass.
+ *
+ * @param {import('./mindcSemantic.js').SymbolEntry} symbol
+ * @param {any?} optimizeConfig The `optimizeConfig` of the optimizer
+ * @returns {arrayStyle}
+ */
+export function classifyArrayStyle(symbol, optimizeConfig = null) {
+	const traditional = { type: 'traditional', mutable: !symbol.isConst, implement: null };
+	const extracted = symbol.extractType();
+	// Arrays that are "no longer pointerImpl() but still have pointerTo"
+	if (!extracted.pointerTo) return traditional;
+	// Volatile arrays must stay in memory
+	if (extracted.isVolatile()) return traditional;
+	// Only arrays of simple (one word) elements can use the special layouts
+	if ((!['basic', 'device', 'null'].includes(extracted.pointerTo.kind)) || extracted.pointerTo.isPointerImpl()) {
+		return traditional;
+	}
+	const config = optimizeConfig ?? {};
+	if (!config["doArrayOptimize"]) return traditional;
+	if (symbol.isConst) {
+		return config["constArrayOptimize"] ?? config["arrayOptimize"] ?? { type: 'encoded', mutable: false, implement: null };
+	}
+	return config["arrayOptimize"] ?? { type: 'embedded', mutable: true, implement: null };
+}
+
 export class Optimizer extends ASTVisitor {
 	/**
 		 * @typedef {{
@@ -67,6 +252,19 @@ export class Optimizer extends ASTVisitor {
         this.warnings = [];
 		this.inlinedScopeId = 0;
 		this.inlineCounter = 0;
+		/**
+		 * Functions that must not be inlined AUTOMATICALLY.
+		 *
+		 * `soft` holds what `#pragma noinline` asked for, which the `inline`
+		 * keyword outranks. `hard` holds what correctness requires (a function
+		 * the generated stack walker jumps to, say) and nothing outranks it.
+		 * `all` means "every function".
+		 *
+		 * @type {{soft: Set<string>, hard: Set<string>, all: boolean, allHard: boolean}}
+		 */
+		this.autoInlineForbidden = {
+			soft: new Set(), hard: new Set(), all: false, allHard: false
+		};
         
         // 优化状态
         this.functionCallGraph = new Map();
@@ -102,8 +300,38 @@ export class Optimizer extends ASTVisitor {
 		 */
 		this.callStack = [];
         this.analyzedScopes = new Set();
+
+		this.arrayState = new ArrayStateReferrer();
+
+		this.optimizeConfig = {};
     }
 
+	/**
+	 * An optimization NOTE -- what the optimizer DID: inlined a call, removed
+	 * a variable, deleted dead code, unrolled a loop, ...
+	 *
+	 * These are not remarks about the program (the way "condition is always
+	 * true" is), but a trace of the compilation, so they belong on the console
+	 * instead of in the warning list a user is supposed to read.
+	 *
+	 * @param {string} message
+	 */
+	logOptimization(message) {
+		console.log(`[Optimizer] ${message}`);
+	}
+
+	/**
+	 * 
+	 * @param {{
+	 * 	globalScope: Scope,
+	 *  typeTable: Map<string, TypeInfo>,
+	 *  symbolTable: *,
+	 *  structTable: *,
+	 *  typedefTable: *
+	 * }} analysisResult 
+	 * @param {ProgramNode} ast 
+	 * @returns 
+	 */
     optimize(analysisResult, ast) {
         const { globalScope, symbolTable, typeTable, structTable, typedefTable } = analysisResult;
         
@@ -121,7 +349,17 @@ export class Optimizer extends ASTVisitor {
         this.errors = [];
         this.warnings = [];
         this.analyzedScopes.clear();
+
+		if (this.compiler && this.compiler.extraConfig) {
+			this.optimizeConfig = this.compiler.extraConfig.getAttribute('optimizeOption') ?? {};
+		}
         
+		/*
+		Every `for` becomes a `while` before anything looks at the program, so
+		that there is only one kind of loop to reason about.
+		*/
+		this.convertForLoopsToWhile();
+
         // 多轮优化
         let iteration = 0;
         const maxIterations = 10;
@@ -137,7 +375,10 @@ export class Optimizer extends ASTVisitor {
 			//console.log(iteration + ' -th optimize:');
 			//console.log(this);
         } while (this.modified && iteration < maxIterations);
-        
+
+		// Once everything is known, promote fully determined arrays
+		this.finalizeConstantArrays();
+
         return {
             success: this.errors.length === 0,
             ast: this.ast,
@@ -149,6 +390,10 @@ export class Optimizer extends ASTVisitor {
     }
 
     optimizationPass() {
+		this.arrayState.clear();
+		// A fresh simulation budget for this round
+		this.grossSimulationBudget = null;
+
         // 1. 收集全局信息（函数调用图等）
 		this.visitedFunction = new Set();
 		/**
@@ -169,6 +414,12 @@ export class Optimizer extends ASTVisitor {
 
         // 3. 按作用域递归分析
         this.analyzeScope(this.globalScope);
+
+		// 4. Decide which pointers may store a NAME instead of an address
+		this.analyzeNamePointers();
+		// Needs the verdict of the pass above: `int *p = &x` is fine only when p
+		// is a name pointer.
+		this.markBuiltinOutputTargets();
 
 		// Scope optimizing done in global analyses
 		/*
@@ -194,6 +445,620 @@ export class Optimizer extends ASTVisitor {
 
 	// ! Manually adjusted !
 	// This actually direct finds program entry
+	/**
+	 * Decide which pointers may store the NAME of what they point at
+	 * (`read`/`write @this <name>`) instead of a `block`/`pos` pair.
+	 *
+	 * Off unless `#pragma optimize(pointer)` is given, and it needs v150.
+	 * Even then a pointer only qualifies when
+	 *
+	 *  - everything ever stored into it is the address of a plain register
+	 *    variable, or of a member of a register struct (which is a register
+	 *    too), or of another qualifying pointer;
+	 *  - what it points at fits in ONE register -- a traditional pointer takes
+	 *    two, so `&p` is only allowed when p is itself a name pointer;
+	 *  - it is never involved in pointer arithmetic (`p + 2`, `p[2]`, `p++`),
+	 *    which only makes sense for arrays;
+	 *  - it is never assigned from an array, nor into an array;
+	 *  - and it does not live inside a recursive function, where a register
+	 *    would not survive the nested call.
+	 *
+	 * Pointers that are assigned to one another share a verdict, so a pointer
+	 * can never end up holding a name while a related one holds an address.
+	 */
+	/**
+	 * Find every variable whose address is only ever taken by a builtin that
+	 * WRITES through it -- `ulocate` and `ucontrol` take their output
+	 * parameters as register NAMES (`ulocate ... outx outy found building`).
+	 *
+	 * For such a variable the name is all that is needed, so it can stay a
+	 * register. This is not the name pointer optimisation: nothing is stored
+	 * anywhere and no `read @this` is involved, so it applies at every version,
+	 * with or without `#pragma optimize(pointer)` -- which only governs
+	 * pointers that keep a name in a variable.
+	 *
+	 * One ordinary `&x` (`int *p = &x`, say) needs a real address, and then x
+	 * goes to memory as usual.
+	 */
+	markBuiltinOutputTargets() {
+		/** @type {Map<string, {total: number, builtin: number, symbol: any}>} */
+		const uses = new Map();
+		const isOutputBuiltin = name => name === 'ulocate' || name === 'ucontrol';
+		const symbolOf = (expr, scope) => {
+			if (!expr || expr.type !== 'Identifier') return null;
+			return scope?.lookup?.(expr.name) ?? null;
+		};
+		const note = (symbol, builtin, pointerSymbol = null, label = '?') => {
+			if (!symbol) return;
+			const key = symbol.getAssemblySymbol?.() ?? symbol.name ?? null;
+			if (!key) return;
+			if (!uses.has(key)) uses.set(key, { occurrences: [], symbol });
+			uses.get(key).occurrences.push({
+				builtin: builtin === true,
+				pointerSymbol,
+				label: arguments.length > 3 ? arguments[3] : '?'
+			});
+		};
+
+		const walk = (node, scope) => {
+			if (!node || typeof node !== 'object') return;
+			if (Array.isArray(node)) { node.forEach(child => walk(child, scope)); return; }
+			if (node.type === 'FunctionCall' || node.type === 'BuiltinCall') {
+				// A builtin keeps its name on `functionName`, a user call on `callee`
+				const callee = node.callee?.name ?? node.functionName ?? node.name ?? null;
+				for (const arg of node.arguments ?? []) {
+					if (arg && arg.type === 'UnaryExpression' && arg.operator === '&') {
+						/*
+						The walk reaches this node again when it descends into
+						`arguments`; that pass must not count it a second time as
+						an ordinary address use.
+						*/
+						arg.__outputParameter = true;
+						note(symbolOf(arg.argument, scope), isOutputBuiltin(callee), null, 'call:' + callee);
+					}
+				}
+			} else if (node.type === 'UnaryExpression' && node.operator === '&'
+				&& !node.__outputParameter) {
+				note(symbolOf(node.argument, scope), false, null, 'bare:' + node.argument?.type);
+			}
+			/*
+			`int *p = &x` and `p = &x`: whether x needs a REAL address depends on
+			whether p keeps names, which the pointer pass above has just decided
+			-- so remember the pointer and judge it afterwards.
+			*/
+			const pointerTarget = name => {
+				if (!name || typeof name !== 'string') return null;
+				const target = scope?.lookup?.(name) ?? null;
+				if (!target) return null;
+				const kind = target.myType?.()?.kind ?? target.type?.type?.kind ?? null;
+				return kind === 'pointer' ? target : null;
+			};
+			if (node.type === 'VariableDeclarator' && node.initializer
+				&& node.initializer.type === 'UnaryExpression'
+				&& node.initializer.operator === '&') {
+				const target = pointerTarget(node.name);
+				if (target) {
+					node.initializer.__outputParameter = true;
+					note(symbolOf(node.initializer.argument, scope), false, target, 'decl');
+				}
+			}
+			if (node.type === 'AssignmentExpression' && node.left?.type === 'Identifier'
+				&& node.right?.type === 'UnaryExpression' && node.right.operator === '&') {
+				const target = pointerTarget(node.left);
+				if (target) {
+					node.right.__outputParameter = true;
+					note(symbolOf(node.right.argument, scope), false, target);
+				}
+			}
+			if (node.children) node.children.forEach(child => walk(child, scope));
+			const fields = ['functions', 'globalDeclarations', 'typeDefinitions', 'statements',
+				'expression', 'test', 'consequent', 'alternate', 'body', 'init', 'update',
+				'argument', 'left', 'right', 'declarators', 'arguments', 'callee', 'initializer'];
+			for (const field of fields) {
+				if (Array.isArray(node[field])) node[field].forEach(child => walk(child, scope));
+				else if (node[field] && typeof node[field] === 'object') walk(node[field], scope);
+			}
+		};
+		this.ensureFunctionDeclarations();
+
+		const walkScope = scope => {
+			if (scope?.astNode) walk(scope.astNode, scope);
+			scope?.children?.forEach(walkScope);
+		};
+		walkScope(this.globalScope);
+
+		this.recursiveFunctions ??= this.findRecursiveFunctions?.(this.functionCallGraph) ?? new Set();
+		for (const use of uses.values()) {
+			/*
+			Every single `&x` has to be nameable: either a builtin output
+			parameter (the instruction takes the name anyway), or stored into a
+			pointer that itself keeps names (then the name is what p holds and
+			nothing needs a real address).
+			*/
+			const nameable = use.occurrences.every(o =>
+				o.builtin
+				// The pointer never survived (dead code) -- nothing reads the address
+				|| o.pointerSymbol === null && o.dead === true
+				|| o.pointerSymbol?.usesNamePointer === true);
+			if (!nameable) continue;
+			const symbol = use.symbol;
+			const type = symbol?.myType?.() ?? symbol?.type?.type ?? null;
+			if (!type) continue;
+			// Only something that fits a single register can be named
+			if (['pointer', 'array', 'struct', 'union'].includes(type.kind)) continue;
+			// These have to live in memory, so there is no register to name
+			if (symbol.isVolatile || symbol.isExtern || symbol.isStatic) continue;
+			if (this.isRecursiveSymbol?.(symbol)) continue;
+			symbol.addressedAsBuiltinOutput = true;
+		}
+	}
+
+	/**
+	 * Index every function declaration by name, so a call site can find the
+	 * PARAMETER symbol an argument lands in.
+	 */
+	ensureFunctionDeclarations() {
+		if (this.functionDeclarations) return this.functionDeclarations;
+		/** @type {Map<string, any>} */
+		this.functionDeclarations = new Map();
+		const collect = node => {
+			if (!node || typeof node !== 'object') return;
+			if (Array.isArray(node)) { node.forEach(collect); return; }
+			if (node.type === 'FunctionDeclaration' && node.name) {
+				this.functionDeclarations.set(node.name, node);
+			}
+			for (const key of ['functions', 'globalDeclarations', 'statements',
+				'declarations', 'children', 'body']) {
+				const child = node[key];
+				if (Array.isArray(child)) child.forEach(collect);
+				else if (child && typeof child === 'object') collect(child);
+			}
+		};
+		collect(this.ast ?? this.globalScope?.astNode ?? null);
+		const collectFromScope = scope => {
+			if (scope?.astNode?.type === 'FunctionDeclaration' && scope.astNode.name) {
+				this.functionDeclarations.set(scope.astNode.name, scope.astNode);
+			}
+			scope?.children?.forEach(collectFromScope);
+		};
+		collectFromScope(this.globalScope);
+		return this.functionDeclarations;
+	}
+
+	analyzeNamePointers() {
+		const config = this.optimizeConfig ?? {};
+		if (config.doPointerOptimize !== true) return;
+		const version = this.compiler?.config?.getAttribute('targetVersion') ?? 0;
+		if (version < 150) return;
+		// Which functions call themselves (directly or not)? Nothing local to
+		// one can be kept in a register.
+		this.recursiveFunctions = this.findRecursiveFunctions?.(this.functionCallGraph) ?? new Set();
+
+		/** @type {Map<string, any>} */
+		const pointers = new Map();
+		/** @type {Map<string, Set<string>>} */
+		const addressTaken = new Map();
+
+		/**
+		 * Does a value of this type fit in a single register?
+		 * @param {any} type
+		 * @returns {boolean}
+		 */
+		const isSingleRegister = (type) => {
+			if (!type || !type.isTypeInfo) return false;
+			switch (type.kind) {
+				case 'pointer':
+					// A traditional pointer takes two words (`_block` / `_pos`);
+					// only a name pointer takes one.
+					return false;
+				case 'array':
+				case 'struct':
+				case 'union':
+					return false;
+				default:
+					return true;
+			}
+		};
+
+		const keyOf = symbol => symbol?.getAssemblySymbol?.() ?? symbol?.name ?? null;
+
+		/**
+		 * Look a name up in `scope`, falling back to a search over every scope:
+		 * the pass runs on a scope tree where a call site may be visited from a
+		 * scope that does not chain up to the one the variable lives in.
+		 * @param {any} scope
+		 * @param {string?} name
+		 */
+		const lookupName = (scope, name) => {
+			if (!name) return null;
+			const direct = scope?.lookup?.(name) ?? null;
+			if (direct) return direct;
+			let found = null;
+			const visit = sc => {
+				if (found) return;
+				sc?.symbols?.forEach(sym => {
+					if (!found && (sym.name === name)) found = sym;
+				});
+				if (!found) sc?.children?.forEach(visit);
+			};
+			visit(this.globalScope);
+			return found;
+		};
+
+		const typeOfSymbol = symbol => symbol?.myType?.() ?? symbol?.type?.type ?? null;
+
+		const isPointerSymbol = symbol => typeOfSymbol(symbol)?.kind === 'pointer';
+
+		const isArraySymbol = symbol => {
+			const type = typeOfSymbol(symbol);
+			return !!type && (type.kind === 'array');
+		};
+
+		/**
+		 * @param {any} symbol
+		 * @returns {any} the entry describing this pointer
+		 */
+		const register = symbol => {
+			const key = keyOf(symbol);
+			if (!key) return null;
+			if (!pointers.has(key)) {
+				pointers.set(key, {
+					key, symbol,
+					sources: new Set(),	// what may be stored into it
+					peers: new Set(),	// pointers assigned to / from it
+					bad: false
+				});
+			}
+			return pointers.get(key);
+		};
+
+		/**
+		 * Classify `&expr`, i.e. whether the target is a single register whose
+		 * name can be stored.
+		 * @param {any} expr
+		 * @param {any} scope
+		 * @returns {{kind: string, target: string?, targetSymbol: any?}}
+		 */
+		const classifyAddress = (expr, scope) => {
+			if (!expr) return { kind: 'invalid', target: null, targetSymbol: null };
+			if (expr.type === 'UnaryExpression' && expr.operator === '*') {
+				// `&*q` is just `q`
+				return classify(expr, scope);
+			}
+			if (expr.type === 'Identifier') {
+				const symbol = lookupName(scope, expr.name);
+				if (!symbol) return { kind: 'invalid', target: null, targetSymbol: null };
+				if (isPointerSymbol(symbol)) {
+					// Pointing at a pointer: only allowed if that one is a name pointer
+					return { kind: 'pointer', target: keyOf(symbol), targetSymbol: symbol };
+				}
+				if (isArraySymbol(symbol)) return { kind: 'invalid', target: null, targetSymbol: symbol };
+				volatileGuard(symbol);
+				if (symbol.isVolatile || symbol.isExtern || symbol.isStatic) {
+					return { kind: 'invalid', target: null, targetSymbol: symbol };
+				}
+				if (!isSingleRegister(typeOfSymbol(symbol))) {
+					return { kind: 'invalid', target: null, targetSymbol: symbol };
+				}
+				return { kind: 'register', target: keyOf(symbol), targetSymbol: symbol };
+			}
+			if (expr.type === 'MemberExpression') {
+				// `&s.m`: allowed when s is a register struct, because then the
+				// member is a register of its own
+				const object = expr.children?.[0] ?? expr.object ?? null;
+				if (!object || object.type !== 'Identifier') {
+					return { kind: 'invalid', target: null, targetSymbol: null };
+				}
+				const owner = scope?.lookup(object.name) ?? null;
+				if (!owner) return { kind: 'invalid', target: null, targetSymbol: null };
+				const type = typeOfSymbol(owner);
+				if (!type || !['struct', 'union'].includes(type.kind)) {
+					return { kind: 'invalid', target: null, targetSymbol: null };
+				}
+				if (type.isPointerImpl?.()) return { kind: 'invalid', target: null, targetSymbol: owner };
+				return { kind: 'register', target: null, targetSymbol: owner };
+			}
+			return { kind: 'invalid', target: null, targetSymbol: null };
+		};
+
+		/**
+		 * Classify a value that is stored into a pointer.
+		 * @param {any} expr
+		 * @param {any} scope
+		 * @returns {{kind: string, target: string?, targetSymbol: any?}}
+		 */
+		const classify = (expr, scope) => {
+			if (!expr) return { kind: 'invalid', target: null, targetSymbol: null };
+			switch (expr.type) {
+				case 'UnaryExpression':
+					if (expr.operator !== '&') return { kind: 'invalid', target: null, targetSymbol: null };
+					return classifyAddress(expr.argument, scope);
+				case 'Identifier': {
+					const symbol = scope?.lookup(expr.name) ?? null;
+					if (!symbol) return { kind: 'invalid', target: null, targetSymbol: null };
+					if (isPointerSymbol(symbol)) {
+						return { kind: 'pointer', target: keyOf(symbol), targetSymbol: symbol };
+					}
+					// `p = arr` : an array decays to a real address
+					return { kind: 'invalid', target: null, targetSymbol: symbol };
+				}
+				case 'BinaryExpression':
+				case 'MemberExpression':
+				case 'FunctionCall':
+				case 'CastExpression':
+				default:
+					// Arithmetic on a pointer walks an array; anything unknown is
+					// refused rather than guessed at.
+					return { kind: 'invalid', target: null, targetSymbol: null };
+			}
+		};
+
+		const volatileGuard = symbol => { };
+
+		/**
+		 * Note that `expr` is stored into `pointerSymbol`.
+		 * @param {any} pointerSymbol
+		 * @param {any} expr
+		 * @param {any} scope
+		 * @param {boolean} [extraBad]
+		 */
+		const note = (pointerSymbol, expr, scope, extraBad = false) => {
+			const entry = register(pointerSymbol);
+			if (!entry) return;
+			if (extraBad) entry.bad = true;
+			// Anything inside a recursive function must live in memory
+			if (this.isRecursiveSymbol?.(pointerSymbol)) entry.bad = true;
+			const info = classify(expr, scope);
+			entry.sources.add(info.kind);
+			if (info.kind === 'pointer' && info.target) {
+				entry.peers.add(info.target);
+			} else if (info.kind !== 'register') {
+				entry.bad = true;
+			}
+			if (info.kind === 'register' && info.target) {
+				if (!addressTaken.has(info.target)) addressTaken.set(info.target, new Set());
+				addressTaken.get(info.target).add(entry.key);
+			}
+			if (info.kind === 'register' && info.targetSymbol && this.isRecursiveSymbol?.(info.targetSymbol)) {
+				// The target itself lives in a recursive function: not a register
+				entry.bad = true;
+			}
+		};
+
+		/**
+		 * @param {any} node
+		 * @param {any} scope
+		 */
+		const walk = (node, scope) => {
+			if (!node || typeof node !== 'object') return;
+			if (Array.isArray(node)) { node.forEach(child => walk(child, scope)); return; }
+			switch (node.type) {
+				case 'AssignmentExpression': {
+					const left = node.left;
+					if (left && left.type === 'Identifier') {
+						const symbol = scope?.lookup(left.name) ?? null;
+						if (isPointerSymbol(symbol)) {
+							note(symbol, node.right, scope, node.operator !== '=');
+						} else if (isArraySymbol(symbol)) {
+							// `arr = p` : the pointer has to be a real address
+							const source = scope?.lookup(node.right?.name ?? '') ?? null;
+							if (isPointerSymbol(source)) register(source).bad = true;
+						}
+					}
+					break;
+				}
+				case 'VariableDeclarator': {
+					if (node.name && node.initializer) {
+						const symbol = scope?.lookup(node.name) ?? null;
+						if (isPointerSymbol(symbol)) note(symbol, node.initializer, scope);
+					}
+					break;
+				}
+				case 'FunctionCall': {
+					/*
+					`oper(&x)` stores the address into the PARAMETER. The
+					parameter is a pointer too, so it is judged by the same rules
+					-- if it can hold a name, x never needs a real address.
+					*/
+					const declaration = this.ensureFunctionDeclarations()
+						.get(node.functionName ?? node.callee?.name ?? null) ?? null;
+					if (declaration) {
+						(declaration.parameters ?? []).forEach((parameter, i) => {
+							const argument = node.arguments?.[i];
+							if (!argument) return;
+							const name = parameter?.name?.name ?? parameter?.name ?? parameter;
+							const symbol = declaration.scope?.lookup?.(name)
+								?? declaration.body?.scope?.lookup?.(name) ?? null;
+							if (isPointerSymbol(symbol)) note(symbol, argument, scope);
+						});
+					}
+					break;
+				}
+				case 'BinaryExpression': {
+					/*
+					`p + 1` (and `p - q`) need a real ADDRESS to move. A pointer
+					that holds a name has none, so such a pointer must not be
+					given the name representation -- otherwise the emitted code
+					copies its (never assigned) `_block` / `_pos` and walks off
+					to a link that does not exist.
+					*/
+					const op = node.operator;
+					if (op === '+' || op === '-') {
+						for (const side of [node.left, node.right]) {
+							if (!side || side.type !== 'Identifier') continue;
+							const symbol = scope?.lookup(side.name) ?? null;
+							if (isPointerSymbol(symbol)) register(symbol).bad = true;
+						}
+					}
+					break;
+				}
+				case 'AssignmentExpression': {
+					/*
+					`p += 1` is the same thing written another way.
+					*/
+					if (node.operator === '+=' || node.operator === '-=') {
+						const left = node.left;
+						if (left && left.type === 'Identifier') {
+							const symbol = scope?.lookup(left.name) ?? null;
+							if (isPointerSymbol(symbol)) register(symbol).bad = true;
+						}
+					}
+					break;
+				}
+				case 'MemberExpression': {
+					// `p[i]` is pointer arithmetic
+					const object = node.children?.[0] ?? node.object ?? null;
+					if (object && object.type === 'Identifier') {
+						const symbol = scope?.lookup(object.name) ?? null;
+						if (isPointerSymbol(symbol)) register(symbol).bad = true;
+					}
+					break;
+				}
+				case 'UnaryExpression': {
+					if ((node.operator === '++' || node.operator === '--') && node.argument) {
+						const symbol = scope?.lookup(node.argument.name) ?? null;
+						if (isPointerSymbol(symbol)) register(symbol).bad = true;
+					}
+					break;
+				}
+				default: break;
+			}
+			if (node.children) node.children.forEach(child => walk(child, scope));
+			const fields = ['functions', 'globalDeclarations', 'typeDefinitions', 'statements',
+				'expression', 'test', 'consequent', 'alternate', 'body', 'init', 'update',
+				'argument', 'left', 'right', 'declarators', 'arguments', 'callee', 'initializer'];
+			for (const field of fields) {
+				if (Array.isArray(node[field])) node[field].forEach(child => walk(child, scope));
+				else if (node[field] && typeof node[field] === 'object') walk(node[field], scope);
+			}
+		};
+
+		const walkScope = scope => {
+			if (scope?.astNode) walk(scope.astNode, scope);
+			scope?.children?.forEach(walkScope);
+		};
+		walkScope(this.globalScope);
+
+		/*
+		`&x` handed straight to a builtin that writes through it (`ulocate`,
+		`ucontrol "within"`). The processor can write into the register a name
+		pointer names, so x may stay a register -- as long as EVERY `&x` in the
+		program is such an output parameter.
+		*/
+		if (pointers.size === 0) return;
+
+		/* Group pointers that are assigned to one another: they share a verdict. */
+		const byName = new Map();
+		for (const [key, entry] of pointers) byName.set(entry.symbol?.name ?? key, key);
+		const groups = [];
+		const seen = new Set();
+		const collect = (key, group) => {
+			if (group.has(key)) return;
+			group.add(key);
+			const entry = pointers.get(key);
+			if (!entry) return;
+			for (const peer of entry.peers) {
+				const peerKey = byName.get(peer) ?? peer;
+				if (pointers.has(peerKey)) collect(peerKey, group);
+			}
+			// Anything pointing AT this pointer shares its fate too
+			for (const [otherKey, other] of pointers) {
+				if (other.peers.has(key)) collect(otherKey, group);
+			}
+		};
+		for (const key of pointers.keys()) {
+			if (seen.has(key)) continue;
+			const group = new Set();
+			collect(key, group);
+			group.forEach(k => seen.add(k));
+			groups.push(group);
+		}
+
+		/* Fixpoint: a group qualifies only if every source of every member is a
+		   register or an already qualified pointer. */
+		const eligible = new Set();
+		let changed = true;
+		while (changed) {
+			changed = false;
+			for (const group of groups) {
+				if (group.size === 0) continue;
+				let ok = true;
+				for (const key of group) {
+					const entry = pointers.get(key);
+					/*
+					`auto` version made for real addresses: it must not be given
+					the name representation, even if every call site would allow
+					it -- the body may move the pointer.
+					*/
+					if (entry?.symbol?.noNamePointer === true) { ok = false; break; }
+					if (!entry || entry.bad) { ok = false; break; }
+					for (const source of entry.sources) {
+						if (source !== 'register' && source !== 'pointer') { ok = false; break; }
+					}
+					if (!ok) break;
+					for (const peer of entry.peers) {
+						const peerKey = byName.get(peer) ?? peer;
+						if (!pointers.has(peerKey)) continue;
+						// A peer inside the same group shares this group's verdict,
+						// so it cannot block it -- otherwise `int **pp = &p` and
+						// `int *p = &x` would deadlock.
+						if (group.has(peerKey)) continue;
+						if (!eligible.has(peerKey)) { ok = false; break; }
+					}
+					if (!ok) break;
+				}
+				if (ok && ![...group].every(k => eligible.has(k))) {
+					group.forEach(k => eligible.add(k));
+					changed = true;
+				}
+			}
+		}
+
+		for (const key of eligible) {
+			const entry = pointers.get(key);
+			if (entry) entry.symbol.usesNamePointer = true;
+		}
+
+		/*
+		A variable whose address is only ever taken by name pointers does not
+		have to live in memory at all -- that is the whole point.
+		*/
+		for (const [target, takers] of addressTaken) {
+			if (takers.size === 0) continue;
+			const allNames = [...takers].every(t => eligible.has(t));
+			if (allNames) this.markNameOnlyTarget(target);
+		}
+	}
+
+	/**
+	 * Whether the symbol belongs to a recursive function.
+	 * @param {any} symbol
+	 * @returns {boolean}
+	 */
+	isRecursiveSymbol(symbol) {
+		if (!symbol || symbol.isStatic) return false;
+		const region = symbol.getFunctionRegion?.() ?? null;
+		return !!region && this.recursiveFunctions?.has(region);
+	}
+
+	/**
+	 * Record that the variable called `assemblyName` is only ever reached
+	 * through name pointers, so it may stay in a register.
+	 * @param {string} assemblyName
+	 */
+	markNameOnlyTarget(assemblyName) {
+		const visitScope = scope => {
+			if (!scope) return;
+			scope.symbols?.forEach(symbol => {
+				if ((symbol.getAssemblySymbol?.() ?? null) === assemblyName) {
+					symbol.namePointersOnly = true;
+				}
+			});
+			scope.children?.forEach(visitScope);
+		};
+		visitScope(this.globalScope);
+	}
+
     analyzeScope(scope) {
         if (this.analyzedScopes.has(scope)) {
             return;
@@ -358,6 +1223,18 @@ export class Optimizer extends ASTVisitor {
 					}
 					if (node.functions) {
 						node.functions.forEach(func => {
+							if (func.scope) {
+								func.scope.recursivelyGetAllSymbols().forEach(
+									/**
+									 * 
+									 * @param {SymbolEntry} symb 
+									 */
+								symb => {
+									if (symb.isArray()) this.loadArrayForSymbol(symb);	// Do this first, and sth else later!
+								});
+							}
+						});
+						node.functions.forEach(func => {
 							if (func.name === 'main') {
 								this.analyzeNode(func, {
 									actualCalling: true,
@@ -368,6 +1245,13 @@ export class Optimizer extends ASTVisitor {
 						const recursiveGraph = this.findRecursiveFunctions(this.functionCallGraph);
 						node.functions.forEach(func => {
 							const relevantSymbol = this.globalScope.lookup(func.name);
+							/*
+							Gone means it was inlined everywhere and dropped:
+							there is nothing left to analyse. (A function built
+							by the compiler -- an `auto` instantiation -- is
+							dropped the same way once every call was inlined.)
+							*/
+							if (!relevantSymbol) return;
 							if (relevantSymbol.isAddressed || recursiveGraph.has(func.name)) {
 								this.analyzeNode(func, {
 									actualCalling: false,
@@ -478,12 +1362,8 @@ export class Optimizer extends ASTVisitor {
 			this.analyzeVariableDeclaration(node, info);
 		}
 		if (node.children) {
-			node.children.forEach(child => this.analyzeNode(child, {
-				parentInfo: info,
-				disposeReturn: (node.type === 'ExpressionStatement' 
-					&& child != node.children[node.children.length - 1]
-				)
-			}));
+			this.analyzeStatementList(node, node.children, info,
+				node.type === 'ExpressionStatement');
 		}
 		if (info && info.parentInfo) {
 			for (const att of inheritances) {
@@ -494,6 +1374,36 @@ export class Optimizer extends ASTVisitor {
 
     // =============== 具体分析函数 ===============
 	
+	/**
+	 * Analyse a list of child nodes.
+	 *
+	 * The list is snapshotted first: analysing a statement can REMOVE it (a
+	 * folded `if`, a dead assignment) and `replaceNode` splices the array we
+	 * are iterating. Iterating the live array then skips the statement that
+	 * moved into the removed one's place -- which is how the `while (true)` in
+	 * `main` of example7a went unanalysed, leaving the call graph empty and
+	 * every other function looking unused.
+	 *
+	 * @param {ASTNode} owner
+	 * @param {ASTNode[]} list
+	 * @param {any} info
+	 * @param {boolean} [disposeReturnAllButLast]
+	 */
+	analyzeStatementList(owner, list, info, disposeReturnAllButLast = false) {
+		if (!list) return;
+		const snapshot = [...list];
+		const last = snapshot[snapshot.length - 1];
+		for (const child of snapshot) {
+			if (!child) continue;
+			// Gone in the meantime (removed, or replaced by something else)
+			if (!list.includes(child)) continue;
+			this.analyzeNode(child, {
+				parentInfo: info,
+				disposeReturn: disposeReturnAllButLast && child !== last
+			});
+		}
+	}
+
 	// These functions are manually implemented as I have reached maximum conversation length of Deepseek:
 	
 	// ! Manually added scope entrance !
@@ -504,10 +1414,7 @@ export class Optimizer extends ASTVisitor {
 			this.enterScope(node.scope);
 		}
 		if (node.statements) {
-			node.statements.forEach(child => this.analyzeNode(child, {
-				parentInfo: info,
-				disposeReturn: true
-			}));
+			this.analyzeStatementList(node, node.statements, info);
 		}
 		if (enteredScope) {
 			this.exitScope();
@@ -545,6 +1452,16 @@ export class Optimizer extends ASTVisitor {
 		//const localConstants = this.localConstants.get(scopePath);
 		this.analyzeNode(node.left, info);
 		this.analyzeNode(node.right, info);
+
+		const downgradeArray = subNode => {
+			if (subNode.symbol && subNode.symbol.isArray()) {
+				this.arrayState.downgrade(subNode.symbol.getAssemblySymbol());
+			}
+		};
+
+		downgradeArray(node.left);
+		downgradeArray(node.right);
+
 		if (node.operator.includes('=') && node.operator !== '==' && node.operator !== '>=' && node.operator !== '<=' && node.operator !== '!=') {
 			// Assignment
 			if (node.left.type === 'Identifier') {
@@ -568,34 +1485,158 @@ export class Optimizer extends ASTVisitor {
 	 * @param {SymbolEntry?} [symbol=null] 
 	 * @returns {boolean?} `null` means 'do not make changes on variable states'.
 	 */
-	shouldRunEvaluation(node, info = null, symbol = null) {
+	/**
+	 * --------------------------------------------------------------------
+	 * How much is known about an expression?
+	 * --------------------------------------------------------------------
+	 *
+	 * Every place that decides "may I rely on what this expression does?"
+	 * answers one of exactly three things:
+	 *
+	 *   EVAL_DEFINITE -- the value is known for sure, and recording it is safe.
+	 *                    Constant folding, branch pruning, loop unrolling.
+	 *
+	 *   EVAL_TRACKED  -- the VALUE is not known, but the ACCESSES are: we know
+	 *                    that a read/write happens and to which symbol. Good
+	 *                    enough for usage counting and dead-store removal, NOT
+	 *                    good enough to write a value into the constant table.
+	 *
+	 *   EVAL_UNKNOWN  -- nothing can be relied upon at all: the code may not
+	 *                    even run (an unsure branch), or it runs an unknown
+	 *                    number of times (a loop). Not even "this variable is
+	 *                    written here" is trustworthy.
+	 *
+	 * `shouldRunEvaluation` below answers with one of these; the helpers
+	 * `isDefinite` / `isTracked` are what callers should test with, so that the
+	 * three states are never conflated with true/false.
+	 */
+	static EVAL_DEFINITE = 'definite';
+	static EVAL_TRACKED = 'tracked';
+	static EVAL_UNKNOWN = 'unknown';
+
+	/**
+	 * @param {any} state One of EVAL_DEFINITE / EVAL_TRACKED / EVAL_UNKNOWN
+	 * @returns {boolean} Whether the value is known and may be recorded.
+	 */
+	isDefinite(state) {
+		return state === Optimizer.EVAL_DEFINITE;
+	}
+
+	/**
+	 * @param {any} state One of EVAL_DEFINITE / EVAL_TRACKED / EVAL_UNKNOWN
+	 * @returns {boolean} Whether the accesses are known, even if the value is not.
+	 */
+	isTracked(state) {
+		return state === Optimizer.EVAL_DEFINITE || state === Optimizer.EVAL_TRACKED;
+	}
+
+	/**
+	 * Turn an evaluation state into the `doUpdate` argument of
+	 * `addWrittenSymbol`: DEFINITE records the value, TRACKED records only that
+	 * a write happens, UNKNOWN records nothing at all.
+	 *
+	 * @param {any} state
+	 * @returns {boolean?}
+	 */
+	updateFlagFor(state) {
+		if (state === Optimizer.EVAL_DEFINITE) return true;
+		if (state === Optimizer.EVAL_TRACKED) return null;
+		return false;
+	}
+
+	/**
+	 * How much may be relied upon for `node`.
+	 *
+	 * @param {ASTNode} node
+	 * @param {any} info The analysis context (loop / unsure / function state)
+	 * @param {SymbolEntry?} symbol The symbol being touched, if any -- a symbol
+	 *        declared *outside* the unsure region keeps its state even inside one
+	 * @returns {string} EVAL_DEFINITE, EVAL_TRACKED or EVAL_UNKNOWN
+	 */
+	evaluationState(node, info = null, symbol = null) {
+		const state = Optimizer;
 		if (info) {
+			/*
+			Inside an "unsure" region (a branch we cannot decide): we know the
+			code may run, so accesses to symbols declared OUTSIDE the region are
+			still known -- but nothing has a definite value.
+			*/
 			if (info.isUnsure) {
-				if (symbol && symbol.scope.isParent(info.atUnsure)) {
-					return true;
-				}
-				return false;
+				if (symbol && symbol.scope.isParent(info.atUnsure)) return state.EVAL_DEFINITE;
+				return state.EVAL_UNKNOWN;
 			}
+			/*
+			A function that is not actually called (or is called from somewhere
+			we do not track): accesses inside it are known, values are not --
+			unless the symbol lives outside that function.
+			*/
 			if (info.inFunction && !info.actualCalling) {
-				if (symbol && symbol.scope.isParent(info.atFunction)) {
-					return true;
-				}
-				return false;	// i.e. uncertain calls
+				if (symbol && symbol.scope.isParent(info.atFunction)) return state.EVAL_DEFINITE;
+				return state.EVAL_UNKNOWN;	// i.e. uncertain calls
 			}
-			if (info.optimizingLoop) return true;	// High proiority!
+			if (info.optimizingLoop) return state.EVAL_DEFINITE;	// High priority!
+			/*
+			Inside a loop: a symbol declared outside survives every iteration,
+			so its accesses are known; on the first run we can even fold values,
+			afterwards nothing is definite.
+			*/
 			if (info.isLoop) {
-				if (symbol && symbol.scope.isParent(info.atLoop)) {
-					return true;
+				/*
+				A symbol declared outside the loop survives every iteration, so
+				its ACCESSES are known -- but its VALUE is not, as soon as the
+				loop writes to it: `i = i + 1` is not `i = 1`. Matching by name as
+				well as by symbol, because a body moved here by inlining may
+				still name the symbol it used to have.
+				*/
+				if (symbol && this.loopModifies(info, symbol)) {
+					return info.firstLoopRun ? state.EVAL_TRACKED : state.EVAL_UNKNOWN;
 				}
-				if (info.firstLoopRun) {
-					return null;	// Priority relevantly lower
-				}
-				return false;
+				if (symbol && symbol.scope.isParent(info.atLoop)) return state.EVAL_DEFINITE;
+				if (info.firstLoopRun) return state.EVAL_TRACKED;	// Priority relevantly lower
+				return state.EVAL_UNKNOWN;
 			}
 		}
-		return true;
+		return state.EVAL_DEFINITE;
 	}
-	
+
+	/**
+	 * Whether this loop writes to `symbol`.
+	 *
+	 * @param {any} info the analysis context of the loop
+	 * @param {import('./mindcSemantic.js').SymbolEntry} symbol
+	 * @returns {boolean}
+	 */
+	loopModifies(info, symbol) {
+		const modified = info?.modifiedVars;
+		if (!modified || !symbol) return false;
+		for (const entry of modified) {
+			if (!entry || typeof entry !== 'object') continue;
+			if (entry.symbol === symbol) return true;
+			// Fall back on the name: an inlined body may carry a stale symbol
+			if (entry.varName && symbol.name && entry.varName === symbol.name) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Legacy boolean entry point, kept because it is used in many places:
+	 * `true` means "the value can be trusted".
+	 *
+	 * @param {ASTNode} node
+	 * @param {any} [info]
+	 * @param {SymbolEntry?} [symbol]
+	 * @returns {boolean}
+	 */
+	shouldRunEvaluation(node, info = null, symbol = null) {
+		const state = this.evaluationState(node, info, symbol);
+		/*
+		`EVAL_TRACKED` used to come back as `null` from here, and several callers
+		distinguish it from `false` (see `addWrittenSymbol`). Keep that: return
+		the flag that says how much may be recorded.
+		*/
+		return this.updateFlagFor(state);
+	}
+
 	// Some unary expressions have side	effects of writing (++ and --):
 	// ! Manually adjusted !
 	analyzeUnaryExpression(node, info = null) {
@@ -624,8 +1665,13 @@ export class Optimizer extends ASTVisitor {
 					}
 					this.addWriteForCurrentScope(node.argument.name, null, curStat);
 				}
+				if (node.symbol && node.symbol.isArray()) {
+					this.arrayState.downgrade(node.symbol.getAssemblySymbol());
+				}
 			}
 		} else {
+			// Using '*' toward a simple array will be considered fetching its first element, so this won't
+			// result in downgrading.
 			this.analyzeNode(node.argument, info);
 		}
 	}
@@ -696,10 +1742,35 @@ export class Optimizer extends ASTVisitor {
 		
 		if (analyzedBody) {
 			if (!this.functionInfo.get(funcName).isAddressed) {
-				if (funcInfo.returnCount.counter > 1) {
+				/*
+				Counting through `info.returnCount` MISSES the returns that sit
+				inside a nested block (`if`, `while`): those are analysed with a
+				child `info`, and the child's registry never merges back. A
+				function whose only *counted* return is the one at the end then
+				looks inlinable -- and inlining it drops the earlier exits,
+				which is exactly what cannot be reproduced without a goto.
+
+				So count them by looking at the body itself.
+				*/
+				const returns = [];
+				const seenReturns = new Set();
+				const collectReturns = node => {
+					if (!node || typeof node !== 'object' || seenReturns.has(node)) return;
+					seenReturns.add(node);
+					if (node.type === 'ReturnStatement') { returns.push(node); return; }
+					for (const key of Object.keys(node)) {
+						if (key === 'parent') continue;	// back edge
+						const child = node[key];
+						if (Array.isArray(child)) child.forEach(collectReturns);
+						else if (child && typeof child === 'object' && child.type) collectReturns(child);
+					}
+				};
+				collectReturns(funcNode.body);
+				if (returns.length > 1) {
 					this.functionInfo.get(funcName).canInline = false;
-				} else if (funcInfo.returnCount.counter == 1) {
-					this.functionInfo.get(funcName).canInline = funcNode.body.statements[funcNode.body.statements.length - 1].type === 'ReturnStatement';
+				} else if (returns.length === 1) {
+					const last = funcNode.body.statements[funcNode.body.statements.length - 1];
+					this.functionInfo.get(funcName).canInline = returns[0] === last;
 				} else {
 					this.functionInfo.get(funcName).canInline = true;
 				}
@@ -709,6 +1780,48 @@ export class Optimizer extends ASTVisitor {
 		
 		this.exitFunction();
     }
+
+	/**
+	 * 
+	 * @param {SymbolEntry} symbol 
+	 */
+	loadArrayForSymbol(symbol) {
+		let arrPrototype = this.arrayState.defaultState;
+		
+		const extracted = symbol.extractType();
+		// This might happen as those arrays are "no longer pointerImpl() but still have pointerTo" -- so we have to be ready.
+		if (!extracted.pointerTo) {
+			return;
+		}
+		if (extracted.isVolatile()) {
+			return;
+		}
+		if ((!['basic', 'device', 'null'].includes(extracted.pointerTo.kind)) || extracted.pointerTo.isPointerImpl()) {
+			this.arrayState.load(symbol.getAssemblySymbol(), {
+				type: 'traditional',
+				mutable: !symbol.isConst,
+				implement: null
+			});
+			return;
+		}
+
+		if (this.optimizeConfig["doArrayOptimize"]) {
+			if (symbol.isConst) {
+				arrPrototype = this.optimizeConfig["constArrayOptimize"] ?? this.optimizeConfig["arrayOptimize"] ?? {
+					type: 'encoded',
+					mutable: false,
+					implement: null
+				};
+			} else {
+				arrPrototype = this.optimizeConfig["arrayOptimize"] ?? {
+					type: 'embedded',
+					mutable: true,
+					implement: null
+				};
+			}
+		} 
+		this.arrayState.load(symbol.getAssemblySymbol(), arrPrototype);
+	}
 
 	/**
 	 * 
@@ -734,7 +1847,8 @@ export class Optimizer extends ASTVisitor {
 			const localConstants = this.localConstants.get(scopePath);
 			const variableUses = this.variableUses.get(scopePath);
 			
-			const canOptimizeThis = !(symbol.isVolatile || symbol.isStatic || symbol.isExtern);
+			const canOptimizeThis = !(symbol.isVolatile || symbol.isStatic || symbol.isExtern
+				|| symbol.isRemoteTarget);
             symbol.variableReferrer.rejecting = !canOptimizeThis;
 
             // 初始化使用统计
@@ -749,6 +1863,17 @@ export class Optimizer extends ASTVisitor {
             // 检查常量初始化
             if (declarator.initializer) {
                 this.analyzeNode(declarator.initializer, info);
+				/*
+				An array initialised with constants: remember every element, so
+				that a constant subscript can be folded later.
+				*/
+				this.discardArrayGivenToPointer(declarator, declarator.initializer);
+				if (canOptimizeThis && this.isFoldableArray(symbol)
+					&& declarator.initializer.type === 'InitializerList') {
+					const elements = (declarator.initializer.children ?? []).map(
+						item => this.evaluateConstantExpression(item));
+					this.recordConstantArray(symbol, elements);
+				}
                 if (canOptimizeThis && this.shouldRunEvaluation(node, info, symbol)) {
 					const constValue = this.evaluateConstantExpression(declarator.initializer);
 					if (constValue !== undefined) {
@@ -758,7 +1883,9 @@ export class Optimizer extends ASTVisitor {
 						// 标记符号为常量
 						// symbol.markAsConstant(constValue);
 
-						if (shouldEval) {
+						// Same reasoning: a simulation knowing the value is no
+						// reason to delete the declaration.
+						if (shouldEval && !(info && info.optimizingLoop)) {
 							declarator.setAttribute('candidateRemoval', 1);
 						}
 						
@@ -771,8 +1898,45 @@ export class Optimizer extends ASTVisitor {
 						}
 					}
 				}
-                
-            }
+                // Regardless of whether the assignment really occurs:
+				/**
+				 * @type {string?}
+				 */
+				let arrayRooted = null, arrayMutable = true;
+				if (declarator.initializer.type === 'Identifier' || declarator.initializer.type === 'InitializerList') {
+					if (declarator.initializer.symbol && declarator.initializer.symbol.isArray()) {
+						arrayRooted = declarator.initializer.symbol.getAssemblySymbol();
+					}
+				}
+				/**
+				 * @type {TypeInfo?}
+				 */
+				const initType = declarator.initializer.dataType;
+				if (symbol.isArray()) {
+					/**
+					 * @type {arrayStyle}
+					 */
+					let arrPrototype = {
+						type: 'traditional',
+						mutable: !symbol.isConst,
+						implement: null
+					};
+					if (arrayRooted) {
+						this.arrayState.assign(symbol.getAssemblySymbol(), arrayRooted);
+					} else if ((initType && initType.annotations.getAttribute('hasArrayState'))) {
+						arrPrototype = initType.annotations.getAttribute('arrayState');
+						arrPrototype.mutable = arrPrototype.mutable || (!symbol.isConst);
+					}
+					
+					if (!arrayRooted)
+						this.arrayState.load(symbol.getAssemblySymbol(), arrPrototype);
+					
+				} else if (arrayRooted) {
+					this.arrayState.downgrade(arrayRooted);
+				}
+            } else if (symbol.isArray()) {
+				this.loadArrayForSymbol(symbol);
+			}
         });
     }
 
@@ -787,7 +1951,18 @@ export class Optimizer extends ASTVisitor {
 		if (node.name.length && node.name[0] === '@') {
 			return;
 		}
-        const scopePath = this.currentScope.lookupScopeOf(node.name).getPath();
+        /*
+        A name the scope chain cannot resolve is not ours to complain about:
+        semantic analysis reports undeclared identifiers, and by this point a
+        block may already have been rewritten (an empty inlined function, a
+        folded-away `if`), which can leave a reference whose scope is gone.
+        Crashing here only produced an internal error with no message at all.
+        */
+        const owningScope = this.currentScope.lookupScopeOf(node.name);
+        if (!owningScope) {
+            return;
+        }
+        const scopePath = owningScope.getPath();
         const variableUses = this.variableUses.get(scopePath);
         
         // 记录变量读取
@@ -814,9 +1989,83 @@ export class Optimizer extends ASTVisitor {
         }
     }
 
+	/**
+	 * `p = a` (or `int *p = a`): the array's address escapes into a pointer, so
+	 * it can be written through `p[i]` with any subscript. Forget its contents.
+	 *
+	 * @param {ASTNode} left
+	 * @param {ASTNode} right
+	 * @returns {void}
+	 */
+	discardArrayGivenToPointer(left, right) {
+		// Only when the destination is (or holds) a pointer
+		const leftSymbol = this.baseSymbolOf(left);
+		const leftType = leftSymbol?.myType?.() ?? left?.dataType ?? null;
+		const leftIsPointer = !!leftType && (leftType.kind === 'pointer'
+			|| (left.dataType && left.dataType.kind === 'pointer'));
+		if (!leftIsPointer) return;
+		const source = this.baseSymbolOf(right);
+		if (this.isFoldableArray(source)) this.invalidateConstantArray(source);
+	}
+
+	/**
+	 * Apply the effect of an assignment on a constant array: update one element
+	 * when both subscript and value are known, forget everything otherwise.
+	 *
+	 * @param {ASTNode} node An AssignmentExpression
+	 * @param {any} info
+	 * @returns {void}
+	 */
+	applyArrayWrite(node, info) {
+		const left = node.left;
+		if (!left || left.type !== 'MemberExpression') return;
+		const owner = left.children?.[0] ?? left.object ?? null;
+		const subscript = left.children?.[1] ?? left.property ?? null;
+		if (!owner || owner.type !== 'Identifier' || !subscript) return;
+		const symbol = this.currentScope.lookup(owner.name);
+		if (!symbol || !this.isFoldableArray(symbol)) return;
+		if (!this.getConstantArray(symbol)) return;
+
+		// `+=` and friends: evaluate the whole expression; `=`: just the value
+		const plain = !node.operator || node.operator === '=';
+		const value = this.evaluateConstantExpression(plain ? node.right : node);
+		const index = this.evaluateConstantExpression(subscript);
+		const definite = this.isDefinite(this.evaluationState(node, info, symbol));
+		if (definite && value !== undefined && typeof index === 'number' && Number.isInteger(index)) {
+			const elements = this.getConstantArray(symbol);
+			if (elements && index >= 0 && index < elements.length) {
+				this.writeConstantArrayElement(symbol, index, value);
+				/*
+				The element is known now, but a real `write` instruction is still
+				emitted for it. Remember that, so the array is not later turned
+				into an immutable constant -- that would leave the write with
+				nowhere to go.
+				*/
+				symbol.arrayHasRuntimeWrite = true;
+				return;
+			}
+		}
+		// Unknown subscript, unknown value, or an unsure write
+		this.invalidateConstantArray(symbol);
+	}
+
 	// !! This has manual changes !!
     analyzeAssignmentExpression(node, info = null) {
-        
+		/*
+		An array handed to a pointer escapes our tracking: from now on the
+		array can be written through `p[anything]`, so its contents are unknown.
+		*/
+		this.discardArrayGivenToPointer(node.left, node.right);
+
+		/*
+		Writing into an array. When BOTH the subscript and the value are known
+		at compile time the element is simply updated -- that is what makes
+		`a[2] = 7; print(a[2]);` fold. Anything else (an unknown subscript, an
+		unknown value, or a write we are not sure even happens) throws the known
+		contents away.
+		*/
+		this.applyArrayWrite(node, info);
+
         // 分析右值
         this.analyzeNode(node.right, info);
 		
@@ -832,7 +2081,19 @@ export class Optimizer extends ASTVisitor {
 				const localConstants = this.localConstants.get(scopePath);
 				const variableUses = this.variableUses.get(scopePath);
 				const usage = variableUses.get(node.left.name);
-				if (usage && usage.canOptimize) {
+				/*
+				Fold the assignment when the variable may be tracked -- or when
+				we are SIMULATING a loop. There the constants were planted by
+				`simulateLoop` on purpose, and these writes are exactly what
+				computes the final values the loop is then replaced by.
+
+				`canOptimize` is false for anything written inside a loop body
+				(`evaluationState` returns TRACKED there, so that `i = i + 1` is
+				not folded into `i = 1`). That is right for ordinary analysis but
+				must not stop the simulation, which runs in a `optimizingLoop`
+				context where every value really is known.
+				*/
+				if (usage && (usage.canOptimize || (info && info.optimizingLoop))) {
 					// ! Manually modified (now constant expression also consider '+=') !
 					let constValue = undefined;
 					if (node.operator && node.operator !== '=') {
@@ -846,7 +2107,17 @@ export class Optimizer extends ASTVisitor {
 						if (symbol && this.shouldRunEvaluation(node, info, symbol)) {	// Not considering symbol currently!
 							// symbol.markAsConstant(constValue);
 							this.addWrittenSymbol(symbol, constValue, true);
-							if (this.shouldRunEvaluation(node, info))
+							/*
+							The write folded, so the assignment looks redundant
+							-- but NOT while we are SIMULATING a loop. There the
+							constants describe one imagined iteration, while the
+							statement has to survive for the real loop (which is
+							only replaced when it can be fully optimized).
+							Dropping `i = i + 1` here is what left a loop that
+							never advanced.
+							*/
+							if (this.shouldRunEvaluation(node, info)
+								&& !(info && info.optimizingLoop))
 								node.setAttribute('candidateRemoval', 1);
 						}
 						
@@ -863,15 +2134,57 @@ export class Optimizer extends ASTVisitor {
 						(info.isUnsure || !info.actualCalling) ? null : constValue, 
 						this.shouldRunEvaluation(node, info));
 				}
+				/*
+				When the write could NOT be folded at all (inside a loop, or in a
+				branch we cannot decide) nothing above recorded it -- so an alias
+				established earlier, `int t = b;`, would survive a later write to
+				`b` and make `a = t` compile into `a = b`. Record the write
+				anyway; its VALUE stays unknown, only the access is known.
+				*/
+				if (!(usage && usage.canOptimize)) {
+					const written = this.currentScope.lookup(node.left.name);
+					if (written) {
+						this.addWrittenSymbol(written, null,
+							this.evaluationState(node, info, written));
+					}
+				}
 				
+				if (symbol.isArray()) {
+					if (node.right.symbol && node.right.symbol.isArray()) {
+						this.arrayState.assign(symbol.getAssemblySymbol(), node.right.symbol.getAssemblySymbol());
+					} else {
+						this.arrayState.downgrade(symbol.getAssemblySymbol());
+					}
+				}
 			}
 		} else {
 			this.analyzeNode(node.left, info);
+			// If the right side is array
+			if (node.right.symbol && node.right.symbol.isArray()) {
+				this.arrayState.downgrade(node.right.symbol.getAssemblySymbol());
+			}
 		}
 		if (node.right.type === 'Identifier' && node.right.symbol && node.right.symbol.kind === 'function') {
 			this.recordFunctionCall(this.currentFunction, node.right.name);
 		}
     }
+
+	/**
+	 * Functions that must be kept even when no call to them is visible: the
+	 * stack helpers reach them through `#pragma stackcheck(fn)` /
+	 * `#pragma stackunderflow(fn)`, which is not a call the optimizer can see.
+	 *
+	 * @returns {Set<string>}
+	 */
+	protectedHandlerNames() {
+		const config = this.optimizeConfig ?? {};
+		const names = new Set();
+		['stackCheck', 'stackUnderflow'].forEach(key => {
+			const value = config[key];
+			if (typeof value === 'string' && value.length > 0) names.add(value);
+		});
+		return names;
+	}
 
 	recordFunctionCall(callerName, funcName) {
 		if (!this.functionCallGraph.has(callerName)) {
@@ -883,10 +2196,42 @@ export class Optimizer extends ASTVisitor {
     analyzeFunctionCall(node, info = null) {
 		const shouldRun = this.shouldRunEvaluation(node, info);
 		const valid = shouldRun || (info && (info.firstLoopRun || info.isUnsure || info.inFunction));
+
+		/**
+		 * @type {string?[]}
+		*/
+		let arrCallMapper = [];
+		let arrCallFail = false;
+
+		/*
+		An array handed to a function may be written there. So may a GLOBAL one:
+		the callee can name it directly without it appearing in the argument
+		list. Since we do not analyse what a call does to globals, every global
+		array becomes unknown at every call site; locals are only affected when
+		they are actually passed.
+		*/
+		(node.arguments ?? []).forEach(argument => {
+			const argumentSymbol = this.baseSymbolOf(argument);
+			if (this.isFoldableArray(argumentSymbol)) this.invalidateConstantArray(argumentSymbol);
+		});
+		if (this.constantArrays && this.constantArrays.size > 0) {
+			const visit = scope => {
+				if (!scope) return;
+				(scope.getAllSymbols?.() ?? []).forEach(symbol => {
+					if (symbol.isGlobal && this.isFoldableArray(symbol)) this.invalidateConstantArray(symbol);
+				});
+				scope.children?.forEach(visit);
+			};
+			visit(this.globalScope);
+		}
+
         if (node.callee.type === 'Identifier') {
             const funcName = node.callee.name;
             
             // 更新函数调用计数
+			/**
+			 * @type {functionInfoEntry?}
+			 */
 			let funinfo;
 			if (this.functionInfo.has(funcName)) {
 				funinfo = this.functionInfo.get(funcName);
@@ -899,14 +2244,32 @@ export class Optimizer extends ASTVisitor {
 					//}
 				}
 			} else {
+				// When function call is being analyzed, it is possible that the function body hasn't undergone
+				// optimizer's analysis!
+				let foundNode = null;
+				this.ast.functions.forEach(func => {
+					if (func.name === funcName) {
+						foundNode = func;
+					}
+				});
+				/*
+				`foundNode` is null when the name is not one of this program's
+				functions -- a builtin that the parser left as a plain call, or
+				a function that has already been taken out of the AST.
+				Registering `scope: foundNode.scope` then threw much later, in a
+				completely unrelated place. Keep the entry (so the call is
+				counted) but make it plainly unusable.
+				*/
 				this.functionInfo.set(funcName, {
 					calls: valid ? 1 : 0,
 					hasSideEffects: false,
 					isAddressed: false,
 					isDefinition: false,
-					canInline: true,
+					canInline: false,
 					writtenVarsUnknown: true,
-					writtenVars: []
+					writtenVars: [],
+					node: foundNode,
+					scope: foundNode ? foundNode.scope : null
 				});	// Other information given as undefined
 				funinfo = this.functionInfo.get(funcName);
 			}
@@ -915,15 +2278,43 @@ export class Optimizer extends ASTVisitor {
 				const callerName = this.currentFunction || 'anonymous';
 				this.recordFunctionCall(callerName, funcName);
 			}
-			this.analyzeNode(funinfo.node, {
-				actualCalling: Boolean(info.actualCalling && (shouldRun || info.optimizingLoop)),
-				fromCallNodeAnalysis: true,
-				parentInfo: info
+
+			// [TODO: Consider recursive functions ...?]
+			if (funinfo.node) {
+				this.analyzeNode(funinfo.node, {
+					actualCalling: Boolean(info.actualCalling && (shouldRun || info.optimizingLoop)),
+					fromCallNodeAnalysis: true,
+					parentInfo: info
+				});
+			}
+
+			const funcSymbol = this.currentScope.lookup(funcName);
+			const parameters = funcSymbol?.type?.parameters ?? null;
+			(parameters ?? []).forEach(param => {
+				const resolvedType = this.semantic.getTypeInfo(param.type);
+				const resolvedSymbol = funinfo.scope?.lookupCurrent(param.name);
+				if (resolvedType.kind === 'array') {
+					arrCallMapper.push(resolvedSymbol.getAssemblySymbol());
+				} else {
+					arrCallMapper.push(null);
+				}
 			});
-        }
-        
-        // 分析参数
-        node.arguments.forEach(arg => this.analyzeNode(arg, info));
+			
+        } else {
+			arrCallFail = true;
+		}
+
+		for (let i = 0; i < node.arguments.length; i++) {
+			this.analyzeNode(node.arguments[i], info);
+			if (node.arguments[i].symbol) {
+				const assemblyName = node.arguments[i].symbol.getAssemblySymbol();
+				if (arrCallFail) {
+					this.arrayState.downgrade(assemblyName);
+				} else if (arrCallMapper.length > i && arrCallMapper[i]) {
+					this.arrayState.assign(assemblyName, arrCallMapper[i]);
+				}
+			}
+		}
     }
 	// ! Manually updated !
 	analyzeIfStatement(node, info = null) {
@@ -954,7 +2345,7 @@ export class Optimizer extends ASTVisitor {
 			
 			
 			// 检查条件是否有副作用
-			if (this.hasSideEffects(node.test)) {
+			if (this.hasSideEffects(node.test) || this.controlExpressionHasCall(node.test)) {
 				node.setAttribute('conditionHasSideEffects', true);
 			}
 		}
@@ -1082,7 +2473,16 @@ export class Optimizer extends ASTVisitor {
 			if ((!node.getAttribute('bodyHasSideEffects')) && (!node.getAttribute('conditionHasSideEffects'))
 				&& (!node.getAttribute('infiniteLoop'))) {
 				if (!info || !info.isLoop) {
-					if (this.analyzeWhileLoopForOptimization(node, info)) {
+					/*
+					An "endless" loop is worth a try too: `while (true) { ...;
+					if (done) break; }` does end, it just does not say where. The
+					simulation finds the `break`. Nothing observable happens here
+					(the body was checked to be free of side effects), so a loop
+					that never reaches its `break` may simply be dropped.
+					*/
+					const tried = this.analyzeWhileLoopForOptimization(node, info)
+						|| this.analyzeEndlessLoopForOptimization(node, info);
+					if (tried) {
 						if ((!info || !info.optimizingLoop) && this.optimizeDeterministicWhileLoop(node)) {
 							this.modified = true;
 							optimized = true;
@@ -1129,12 +2529,12 @@ export class Optimizer extends ASTVisitor {
 			let comparisonOp = null;
 			let constValue = null;
 			
-			if (whileNode.test.left.type === 'Identifier' &&
-				whileNode.test.right.type === 'Identifier') {
-				// 两边都是变量，难以优化
-				return;
-			}
-			
+			/*
+			Both sides being identifiers used to be given up on at once. It
+			should not be: the other side may still be a variable whose value is
+			known here (`while (i < sum)` with `sum` folded to 5). Only the VALUE
+			matters, and `evaluateConstantExpression` below answers that.
+			*/
 			if (whileNode.test.left.type === 'Identifier') {
 				loopVarName = whileNode.test.left.name;
 				comparisonOp = whileNode.test.operator;
@@ -1145,7 +2545,7 @@ export class Optimizer extends ASTVisitor {
 				constValue = this.evaluateConstantExpression(whileNode.test.left);
 			}
 			
-			if (loopVarName && constValue !== undefined) {
+			if (loopVarName) {
 				// 检查循环体中是否对循环变量有简单修改
 				const updateInfo = this.findLoopVariableUpdateInBody(whileNode.body, loopVarName);
 				
@@ -1159,40 +2559,37 @@ export class Optimizer extends ASTVisitor {
 						// Successful to make registrations
 						whileNode.setAttribute('loopVarName', loopVarName);
 						const conditionInfo = { comparisonOp, constValue };
-						// 尝试计算循环次数
-						const iterationCount = this.calculateLoopIterations(
-							initValue,
-							conditionInfo,
-							updateInfo
-						);
-						
+						/*
+						The bound need not be a compile-time constant. When it
+						is not, the loop is still simulated -- the simulation
+						stops by itself when the condition becomes false.
+						*/
+						const iterationCount = (constValue === undefined) ? null
+							: this.calculateLoopIterations(initValue, conditionInfo, updateInfo);
+						const MAX_OPTIMIZE_ITERATIONS = 250; // 最大优化循环次数
+
 						if (iterationCount !== null && iterationCount >= 0) {
 							whileNode.setAttribute('iterationCount', iterationCount);
-							const MAX_OPTIMIZE_ITERATIONS = 250; // 最大优化循环次数
 							if (iterationCount === 0) {
 								whileNode.setAttribute('neverExecuted', true);
 								return true;
 							} else if (iterationCount <= MAX_OPTIMIZE_ITERATIONS) {
-								// 可以优化
-								whileNode.setAttribute('iteration', {
-									node: whileNode,
-									type: 'while',
-									varName: loopVarName,
-									varInit: initValue,
-									condition: conditionInfo,
-									update: updateInfo,
-									count: iterationCount,
-									info: info
-								});
-								whileNode.setAttribute('canOptimize', true);
-								if (info && info.noRunning) return true;
-								if (!this.simulateLoop(whileNode, loopVarName, initValue, conditionInfo, updateInfo, iterationCount, info)) {
-									whileNode.setAttribute('optimized', false);
-									return false;
-								}
-								whileNode.setAttribute('optimized', true);
+								return this.runWhileSimulation(whileNode, loopVarName, initValue,
+									conditionInfo, updateInfo, iterationCount, info);
+							}
+						} else if (constValue === undefined) {
+							/*
+							Unknown bound (`while (i < f())`, or a bound that is
+							only known while simulating). Give the simulation a
+							budget and let the condition decide when it ends.
+							*/
+							const nowFalse = this.evaluateConstantExpression(whileNode.test);
+							if (nowFalse === 0) {
+								whileNode.setAttribute('neverExecuted', true);
 								return true;
 							}
+							return this.runWhileSimulation(whileNode, loopVarName, initValue,
+								conditionInfo, updateInfo, MAX_OPTIMIZE_ITERATIONS, info);
 						}
 					}
 				}
@@ -1226,6 +2623,25 @@ export class Optimizer extends ASTVisitor {
 							type: 'assignment',
 							operator: node.operator,
 							step: node.operator === '+=' ? stepValue : -stepValue
+						};
+					}
+				} else if (node.operator === '=' && node.right
+					&& node.right.type === 'BinaryExpression'
+					&& node.right.left && node.right.left.type === 'Identifier'
+					&& node.right.left.name === loopVarName
+					&& (node.right.operator === '+' || node.right.operator === '-')) {
+					/*
+					`i = i + 1` (and `i = i - 1`): the same thing as `i += 1`,
+					just written out. `analyzeLoopUpdate` (used by `for`) already
+					knows this shape; a `while` body needs it too, or
+					`while (i < n) { ... i = i + 1; }` is never optimized.
+					*/
+					const stepValue = this.evaluateConstantExpression(node.right.right);
+					if (stepValue !== undefined) {
+						updateInfo = {
+							type: 'binary',
+							operator: node.right.operator,
+							step: node.right.operator === '+' ? stepValue : -stepValue
 						};
 					}
 				}
@@ -1342,7 +2758,13 @@ export class Optimizer extends ASTVisitor {
 			}
 			
 			// 检查条件是否有副作用
-			node.setAttribute('conditionHasSideEffects', this.hasSideEffects(node.test));
+			/*
+			A call in the condition counts as a side effect even when the call
+			looks harmless: if it were inlined, the loop simulator would count
+			iterations without ever running what it does.
+			*/
+			node.setAttribute('conditionHasSideEffects',
+				Boolean(this.hasSideEffects(node.test) || this.controlExpressionHasCall(node.test)));
 		} else {
 			// 没有条件表达式，是无限循环 (for(;;))
 			// ! Notice that there might be 'break' !
@@ -1354,7 +2776,8 @@ export class Optimizer extends ASTVisitor {
 			this.analyzeNode(node.update, testInfo);
 			
 			// 检查更新是否有副作用
-			node.setAttribute('updateHasSideEffects', this.hasSideEffects(node.update));
+			node.setAttribute('updateHasSideEffects',
+				Boolean(this.hasSideEffects(node.update) || this.controlExpressionHasCall(node.update)));
 		}
 		
 		// 分析循环体
@@ -1797,6 +3220,16 @@ export class Optimizer extends ASTVisitor {
 		const configuredMaxSimulation = 300;
 		const configuredMaxGrossSimulation = 50000;
 		// End
+		/*
+		`configuredMaxGrossSimulation` bounds how many rounds are simulated in
+		total over one optimization round. Without it, a program with several
+		(or nested) loops of 300 rounds each spends a long time simulating. When
+		the budget is gone the simulation reports that it did not finish and the
+		loop is left alone.
+		*/
+		if (this.grossSimulationBudget === undefined || this.grossSimulationBudget === null) {
+			this.grossSimulationBudget = configuredMaxGrossSimulation;
+		}
 		
 		const loopVarSymbol = this.currentScope.lookup(loopVarName);
 		const scopePath = this.currentScope.lookupScopeOf(loopVarName).getPath();
@@ -1805,6 +3238,24 @@ export class Optimizer extends ASTVisitor {
 		
 		// 保存循环前的常量状态
 		const savedConstants = new Map(localConstants);
+		/*
+		If the simulation does NOT end in the loop being replaced (the body
+		reads memory, say, so no final value is known), these imagined constants
+		must not survive: a later pass would then treat `i` as a compile-time
+		constant and delete the very `i = i + 1` that advances the real loop.
+		*/
+		loopNode.setAttribute('savedConstants', savedConstants);
+		loopNode.setAttribute('savedConstantsScopePath', scopePath);
+		/*
+		Ordinary analysis marks everything written inside a loop as not
+		foldable (`canOptimize` false, see `evaluationState`). That is what stops
+		`i = i + 1` from being folded into `i = 1`. Here, though, it would also
+		stop the simulation after zero rounds. Lift it for the loop variable
+		while we simulate; if the loop is not replaced afterwards,
+		`markLoopAsPotentiallyWithSideEffects` puts the mark back.
+		*/
+		const loopUsage = variableUses.get(loopVarName);
+		if (loopUsage) loopUsage.canOptimize = true;
 		
 		// ! Currently, new information might override old ones in combined loop !
 		const info = {
@@ -1829,7 +3280,11 @@ export class Optimizer extends ASTVisitor {
 		// 如果有循环体，尝试分析它
 		if (loopNode.body && iterationCount > 0) {
 			// 对于简单循环，我们可以模拟少量迭代来传播常量
-			const maxSimulatedIterations = Math.min(iterationCount, configuredMaxSimulation);
+			let maxSimulatedIterations = Number.isFinite(iterationCount)
+				? Math.min(iterationCount, configuredMaxSimulation)
+				: configuredMaxSimulation;
+			maxSimulatedIterations = Math.max(0,
+				Math.min(maxSimulatedIterations, this.grossSimulationBudget ?? 0));
 			let i = 0;
 			let broken = false, continuing = false;
 			for (i = 0; i < maxSimulatedIterations; i++) {
@@ -1884,13 +3339,27 @@ export class Optimizer extends ASTVisitor {
 				}
 			}
 			
+			/*
+			Did the simulation actually reach the end of the loop? Only then may
+			its results be used. `broken` (a `break` we ran into) and a condition
+			that has become false both count as reaching the end; running out of
+			iterations does not.
+			*/
+			let completed = broken;
 			if ((!broken) && loopNode.test) {
 				const testEval = this.evaluateConstantExpression(loopNode.test);
 				if (testEval != 0) {
 					// Still can be evaluated!!!
 					loopNode.setAttribute('maybeHasSideEffects', true);
+				} else {
+					completed = true;
 				}
+			} else if (!broken && !loopNode.test) {
+				// `while (true)`: never ends by itself
+				completed = false;
 			}
+			this.grossSimulationBudget = (this.grossSimulationBudget ?? 0) - i;
+			loopNode.setAttribute('simulationComplete', completed);
 			
 			// 设置循环后的变量值
 			// const finalValue = initValue + (iterationCount * updateInfo.step);
@@ -2169,6 +3638,23 @@ export class Optimizer extends ASTVisitor {
 	}
 
 	/**
+	 * Undo what `simulateLoop` planted, when the loop turned out not to be
+	 * replaceable after all.
+	 *
+	 * @param {ASTNode} loopNode
+	 */
+	restoreLoopConstants(loopNode) {
+		const saved = loopNode?.getAttribute?.('savedConstants');
+		const scopePath = loopNode?.getAttribute?.('savedConstantsScopePath');
+		if (!saved || !scopePath) return;
+		const live = this.localConstants.get(scopePath);
+		if (!live) return;
+		live.clear();
+		for (const [key, value] of saved) live.set(key, value);
+		loopNode.setAttribute('savedConstants', null);	// only once
+	}
+
+	/**
 	 * 优化可确定的for循环
 	 * @param {ASTNode} forNode - for语句节点
 	 * @returns {boolean} - 是否进行了优化
@@ -2198,11 +3684,15 @@ export class Optimizer extends ASTVisitor {
 		// 如果循环有副作用，不能完全删除
 		if (hasSideEffects || forNode.getAttribute('maybeHasSideEffects')) {
 			// 检查是否可以部分优化（减少循环次数）
-			return this.partiallyOptimizeLoop(forNode, loopVarName, iterationCount);
+			const done = this.partiallyOptimizeLoop(forNode, loopVarName, iterationCount);
+			if (!done) this.restoreLoopConstants(forNode);
+			return done;
 		}
 		
 		// 完全可优化的循环
-		return this.fullyOptimizeDeterministicLoop(forNode, iterationCount);
+		const done = this.fullyOptimizeDeterministicLoop(forNode, iterationCount);
+		if (!done) this.restoreLoopConstants(forNode);
+		return done;
 	}
 
 	/**
@@ -2245,7 +3735,7 @@ export class Optimizer extends ASTVisitor {
 		
 		// 替换循环
 		this.replaceNode(forNode, replacementNode);
-		this.addWarning(`Replaced never-executed loop with initialization only`);
+		this.logOptimization(`Replaced never-executed loop with initialization only`);
 		return true;
 	}
 
@@ -2291,11 +3781,15 @@ export class Optimizer extends ASTVisitor {
 		// 如果循环有副作用，不能完全删除
 		if (hasSideEffects || whileNode.getAttribute('maybeHasSideEffects')) {
 			// 检查是否可以部分优化（减少循环次数）
-			return this.partiallyOptimizeLoop(whileNode, loopVarName, iterationCount);
+			const done = this.partiallyOptimizeLoop(whileNode, loopVarName, iterationCount);
+			if (!done) this.restoreLoopConstants(whileNode);
+			return done;
 		}
 		
 		// 完全可优化的循环
-		return this.fullyOptimizeDeterministicLoop(whileNode, iterationCount);
+		const done = this.fullyOptimizeDeterministicLoop(whileNode, iterationCount);
+		if (!done) this.restoreLoopConstants(whileNode);
+		return done;
 	}
 
 	/**
@@ -2338,6 +3832,16 @@ export class Optimizer extends ASTVisitor {
 			const varName = varInfo.varName;
 
 			const varSymbol = varInfo.symbol ?? this.currentScope.lookup(varName);
+			/*
+			A variable the outside world can also reach must not be pinned to a
+			value: it may be changed by another processor (`extern`), it has to
+			be stored in memory (`volatile`), it keeps its value between calls
+			(`static`), or somebody took its address.
+			*/
+			if (varSymbol && (varSymbol.isVolatile || varSymbol.isExtern
+				|| varSymbol.isStatic || varSymbol.isAddressed)) {
+				return false;
+			}
 			const scopePath = (varInfo.scope ?? this.currentScope.lookupScopeOf(varName)).getPath();
 			const localConstants = this.localConstants.get(scopePath);
 			const variableUses = this.variableUses.get(scopePath);
@@ -2346,10 +3850,13 @@ export class Optimizer extends ASTVisitor {
 				// 变量没有确定的最终值，不能完全优化
 				return false;
 			}
-			if (scopePath == loopNode.scope.getPath()) {
-				// Inside variables are ignored
-				varFinalValues.set(varName, finalValue);
-			}
+			/*
+			Emit the assignment for EVERY variable the loop writes, not only for
+			those declared in the loop's own scope. Skipping the others used to
+			drop writes to outer/global variables silently: `while (i < 10) {
+			sid++; i++; }` was replaced by nothing at all, leaving `sid` at 0.
+			*/
+			varFinalValues.set(varName, finalValue);
 			
 			// 检查变量的使用情况
 			const usage = variableUses.get(varName);
@@ -2402,7 +3909,7 @@ export class Optimizer extends ASTVisitor {
 		// 替换循环节点
 		this.replaceNode(loopNode, replacementNode);
 		
-		this.addWarning(`Optimized deterministic loop with ${iterationCount} iterations to direct assignments`);
+		this.logOptimization(`Optimized deterministic loop with ${iterationCount} iterations to direct assignments`);
 		return true;
 	}
 
@@ -2510,7 +4017,7 @@ export class Optimizer extends ASTVisitor {
 				replacementStatements.push(exprStmt);
 			}
 			*/
-			this.addWarning(`Partially unrolled loop: ${firstSideEffect} side-effect-free iterations converted to direct assignments`);
+			this.logOptimization(`Partially unrolled loop: ${firstSideEffect} side-effect-free iterations converted to direct assignments`);
 		}
 		
 		// 修改原循环，减少迭代次数
@@ -2682,67 +4189,351 @@ export class Optimizer extends ASTVisitor {
 	 * @param {*} value
 	 * @param {boolean} doUpdate null: Record write count only; true: Try no side effect value; false: Label as with side effect
 	 */
-	addWrittenSymbol(varSymbol, value, doUpdate = true) {
-		const isNoSideEffect = val => (val != null && val != undefined);
-
-		const currentFuncScope = this.currentFunction ? (this.functionInfo.get(this.currentFunction).node.scope) : this.globalScope;
-		//doUpdate = doUpdate;	// By default suppress cross-function optimization
-		let noSideEffectValue = value;
+	/**
+	 * Record that `varSymbol` is written, and how much we know about it.
+	 *
+	 * The third argument is one of the three evaluation states
+	 * (`Optimizer.EVAL_*`), or the booleans that used to stand for them:
+	 *
+	 *   DEFINITE (true)  -- the value is known; it goes into the constant table.
+	 *   TRACKED  (null)  -- only the WRITE is known: count it, but do not touch
+	 *                       the constant table in either direction (leaving a
+	 *                       stale constant would be wrong, deleting a good one
+	 *                       would be pessimistic).
+	 *   UNKNOWN  (false) -- nothing is reliable; drop whatever we thought we knew.
+	 *
+	 * A `value` of `null`/`undefined` means "the value is not known", which
+	 * forces the pessimistic path even when the state is DEFINITE.
+	 *
+	 * @param {SymbolEntry} varSymbol
+	 * @param {any} value The value written, or null/undefined if unknown
+	 * @param {string|boolean?} [state] EVAL_DEFINITE / EVAL_TRACKED / EVAL_UNKNOWN
+	 * @returns {void}
+	 */
+	addWrittenSymbol(varSymbol, value, state = Optimizer.EVAL_DEFINITE) {
+		if (!varSymbol) return;
 		/*
-		if (!varSymbol.belongingTo(currentFuncScope)) {
-			doUpdate = false;
-			noSideEffectValue = null;
-		}
+		A write to an array destroys whatever we knew about its elements: the
+		subscript may be anything, and even a known one invalidates the rest.
 		*/
+		if (this.isFoldableArray(varSymbol)) this.invalidateConstantArray(varSymbol);
+		// Accept the old `doUpdate` booleans: true -> DEFINITE, false -> UNKNOWN
+		const resolved = this.resolveWriteState(state);
+		const state_ = Optimizer;
+		const valueKnown = (value != null && value != undefined);
+
 		const varName = varSymbol.name;
 		const scopePath = varSymbol.scope.getPath();
 		const variableUses = this.variableUses.get(scopePath);
 		const localConstants = this.localConstants.get(scopePath);
-		
+
+		if (!variableUses || !localConstants) return;
+
+		/* ---- 1. The write itself is known, whatever the state ---- */
 		const usage = variableUses.get(varName);
 		if (usage) {
 			usage.writes++;
-			if (doUpdate != null) {
-				if (isNoSideEffect(value)) {
-					usage.canOptimize = true;
-				} else {
-					usage.canOptimize = false;
-				}
+			if (resolved !== state_.EVAL_UNKNOWN) {
+				// A known value may be folded; an unknown one forbids it
+				usage.canOptimize = valueKnown;
 			}
-			
 		}
-	
+
 		// Record variable access in it
 		if (this.currentFunction && this.functionInfo.has(this.currentFunction)) {
-			let target = this.functionInfo.get(this.currentFunction);
+			const target = this.functionInfo.get(this.currentFunction);
 			target.writtenVars.push(varSymbol);
 		}
 
-		// 赋值会改变变量值，从常量表中移除
-		// TODO: Consider removal only if the
-		// assigned value is NOT a constant or
-		// inside a conditional statement !!
-		if (doUpdate != null) {
-			if (!isNoSideEffect(value) || doUpdate == false) {
-				localConstants.delete(varName);
-				varSymbol.isConstant = false;
-				varSymbol.constantValue = null;
-			} else if (doUpdate) {	// This branch is probably a must-go (i.e. "else,") but I don't want to change it. Zauber!
-				const varType = varSymbol.myType();
-				if (this.semantic.isTypeCompatibleForAny(varType, ['int', 'long', 'unsigned', 'signed'], true)) {
-					if (typeof noSideEffectValue === 'number') {
-						noSideEffectValue = Math.floor(noSideEffectValue);
-					}
-				}
-				if (this.semantic.isSameType(varType, this.semantic.getTypeInfo('bool'))) {
-					noSideEffectValue = Boolean(noSideEffectValue);
-				}
-				localConstants.set(varName, noSideEffectValue);
-				varSymbol.markAsConstant(noSideEffectValue);
-			}
-			varSymbol.variableReferrer.modify();
+		/* ---- 2. What does this do to the constant table? ---- */
+		if (resolved === state_.EVAL_TRACKED) {
+			// Only the access is known: leave the constant table alone
+			varSymbol.variableReferrer?.modify();
+			return;
 		}
-		
+		if (resolved === state_.EVAL_UNKNOWN || !valueKnown) {
+			// The value is gone (or was never known): forget any constant
+			localConstants.delete(varName);
+			varSymbol.isConstant = false;
+			varSymbol.constantValue = null;
+			varSymbol.variableReferrer?.modify();
+			return;
+		}
+
+		/* ---- 3. DEFINITE with a known value: record it ---- */
+		let recorded = value;
+		const varType = varSymbol.myType();
+		if (this.semantic.isTypeCompatibleForAny(varType, ['int', 'long', 'unsigned', 'signed'], true)) {
+			if (typeof recorded === 'number') recorded = Math.floor(recorded);
+		}
+		if (this.semantic.isSameType(varType, this.semantic.getTypeInfo('bool'))) {
+			recorded = Boolean(recorded);
+		}
+		localConstants.set(varName, recorded);
+		varSymbol.markAsConstant(recorded);
+		varSymbol.variableReferrer?.modify();
+	}
+
+	/* ------------------------------------------------------------------ *
+	 * Constant arrays
+	 *
+	 * An array whose every element is a compile-time constant, and that is
+	 * never written again, can be folded at compile time just like a plain
+	 * constant: `a[2]` becomes a number. The elements are kept per scope, and
+	 * any write to the array (or taking its address) throws them away.
+	 * ------------------------------------------------------------------ */
+
+	/**
+	 * The variable an lvalue ultimately refers to: `a` for `a`, `a` for `a[i]`
+	 * and `a.b.c`, `p` for `*p`.
+	 *
+	 * @param {any} expr
+	 * @returns {SymbolEntry?}
+	 */
+	baseSymbolOf(expr) {
+		let current = expr;
+		while (current) {
+			if (current.type === 'Identifier') {
+				return this.currentScope.lookup(current.name) ?? null;
+			}
+			if (current.type === 'MemberExpression') {
+				current = current.children?.[0] ?? current.object ?? null;
+				continue;
+			}
+			if (current.type === 'UnaryExpression' && current.operator === '*') {
+				current = current.argument ?? null;
+				continue;
+			}
+			return null;
+		}
+		return null;
+	}
+
+	/**
+	 * @param {SymbolEntry} symbol
+	 * @returns {string}
+	 */
+	constantArrayKey(symbol) {
+		return `${symbol.scope.getPath()}|${symbol.name}`;
+	}
+
+	/**
+	 * @param {SymbolEntry} symbol
+	 * @returns {number[]?} The elements, or null when they are not known
+	 */
+	getConstantArray(symbol) {
+		if (!symbol) return null;
+		this.constantArrays = this.constantArrays ?? new Map();
+		return this.constantArrays.get(this.constantArrayKey(symbol)) ?? null;
+	}
+
+	/**
+	 * Remember the elements of an array.
+	 * @param {SymbolEntry} symbol
+	 * @param {any[]} values
+	 * @returns {void}
+	 */
+	recordConstantArray(symbol, values) {
+		if (!symbol || !Array.isArray(values) || values.length === 0) return;
+		this.constantArrays = this.constantArrays ?? new Map();
+		this.constantArrays.set(this.constantArrayKey(symbol), values.slice());
+	}
+
+	/**
+	 * Update ONE element of an array whose value we know.
+	 *
+	 * This is what makes `a[2] = 7;` followed by `print(a[2])` fold, instead of
+	 * throwing the whole array away.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @param {number} index
+	 * @param {any} value
+	 * @returns {void}
+	 */
+	writeConstantArrayElement(symbol, index, value) {
+		const elements = this.getConstantArray(symbol);
+		if (!elements) return;
+		if (!Number.isInteger(index) || index < 0 || index >= elements.length) {
+			// Out of bounds or not a constant: nothing can be assumed any more
+			this.invalidateConstantArray(symbol);
+			return;
+		}
+		if (value === undefined || value === null) {
+			elements[index] = undefined;
+			return;
+		}
+		elements[index] = value;
+	}
+
+	/**
+	 * Whether every element of the array is known.
+	 * @param {SymbolEntry} symbol
+	 * @returns {boolean}
+	 */
+	constantArrayComplete(symbol) {
+		const elements = this.getConstantArray(symbol);
+		if (!elements) return false;
+		const length = this.arrayLengthOf(symbol);
+		if (length > 0 && elements.length !== length) return false;
+		return elements.every(item => item !== undefined && item !== null);
+	}
+
+	/**
+	 * How many elements the array symbol has.
+	 * @param {SymbolEntry} symbol
+	 * @returns {number}
+	 */
+	arrayLengthOf(symbol) {
+		const type = symbol.myType?.() ?? null;
+		const sizes = (type && type.arraySize) ? type.arraySize : null;
+		const asNumber = item => {
+			if (item === null || item === undefined) return null;
+			if (typeof item === 'number') return item;
+			if (typeof item.value === 'number') return item.value;
+			return null;
+		};
+		const list = Array.isArray(sizes) ? sizes : [sizes];
+		const numbers = list.map(asNumber).filter(n => n !== null && n > 0);
+		if (numbers.length > 0) return numbers.reduce((a, b) => a * b, 1);
+		return type && type.size ? type.size : 0;
+	}
+
+	/**
+	 * Promote arrays whose every element turned out to be a compile-time constant.
+	 *
+	 * After all the analysis rounds, an array may be left with a complete set of
+	 * known elements -- because it was initialised with constants, or because
+	 * every write to it could be folded (including writes that appeared inside an
+	 * unrolled loop). Such an array IS a constant array, and is treated as one:
+	 *
+	 *  - its values are handed to the code generator, so a constant subscript
+	 *    needs no memory access at all;
+	 *  - when nothing writes to it at run time any more, it is stored the way a
+	 *    `const` array is (a single encoded string instead of memory cells).
+	 *
+	 * An array that still has real `write` instructions is left in its current
+	 * storage: it is the values that are known, not the array that is immutable.
+	 *
+	 * @returns {void}
+	 */
+	/**
+	 * Turn one tracked constant into a number.
+	 *
+	 * @param {any} value
+	 * @returns {number?} null when it is not a compile time number
+	 */
+	numberOfTrackedValue(value) {
+		if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+		if (value && typeof value === 'object' && value.isBuiltinConstant && typeof value.name === 'string') {
+			const table = this.contentTable;
+			if (!table) return null;
+			for (const category of ['item', 'liquid', 'unit', 'block']) {
+				const id = table.idOf(category, value.name);
+				if (id !== undefined) return (id === null) ? null : id;
+			}
+			return null;
+		}
+		if (typeof value === 'boolean') return value ? 1 : 0;
+		return null;
+	}
+
+	finalizeConstantArrays() {
+		if (!this.constantArrays || this.constantArrays.size === 0) return;
+		const visit = scope => {
+			if (!scope) return;
+			(scope.getAllSymbols?.() ?? []).forEach(symbol => {
+				if (!this.isFoldableArray(symbol)) return;
+				if (!this.constantArrayComplete(symbol)) return;
+				const elements = this.getConstantArray(symbol);
+				if (!elements) return;
+				symbol.isConstantArray = true;
+				/*
+				The tracked values are optimizer objects: a content constant such
+				as `@lead` is `{isBuiltinConstant: ...}`, not a number. Turning an
+				array into an encoded table needs real numbers, so translate (and
+				when that is impossible, keep whatever the semantic pass recorded
+				rather than overwriting it with garbage).
+				*/
+				const numbers = elements.map(v => this.numberOfTrackedValue(v));
+				if (numbers.every(v => v !== null && Number.isFinite(v))) {
+					symbol.arrayInitialValues = numbers;
+				}
+				if (!symbol.arrayHasRuntimeWrite) {
+					/*
+					Nothing writes to it any more, so it can live in the cheapest
+					constant representation instead of in memory.
+					*/
+					if (!symbol.requestedArrayImplementation) {
+						symbol.requestedArrayImplementation = 'encoded';
+					}
+					symbol.isConst = true;
+				}
+			});
+			scope.children?.forEach(visit);
+		};
+		visit(this.globalScope);
+	}
+
+	/**
+	 * Forget the elements of an array: it has been written (or its address has
+	 * been taken), so nothing about its contents is reliable any more.
+	 * @param {SymbolEntry} symbol
+	 * @returns {void}
+	 */
+	invalidateConstantArray(symbol) {
+		if (!symbol) return;
+		this.constantArrays = this.constantArrays ?? new Map();
+		this.constantArrays.delete(this.constantArrayKey(symbol));
+	}
+
+	/**
+	 * Whether an array symbol may be folded at compile time at all.
+	 *
+	 * Excluded are the arrays whose contents somebody else may change behind our
+	 * back:
+	 *  - `volatile` and `extern` are read and written by OTHER PROCESSORS, so
+	 *    not even a single read can be folded -- `extern` says so explicitly;
+	 *  - an array whose address is taken can be reached through a pointer we do
+	 *    not track.
+	 *
+	 * A global array is allowed: it is only visible to this program. What makes
+	 * it delicate is that any call may write it, so every call site throws the
+	 * known contents away (see `analyzeFunctionCall`).
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @returns {boolean}
+	 */
+	isFoldableArray(symbol) {
+		if (!symbol) return false;
+		const type = symbol.myType?.() ?? null;
+		if (!type || type.kind !== 'array') return false;
+		/*
+		A remote target is written by the OTHER processor, which this program
+		cannot see -- so its elements are never known constants.
+		*/
+		if (symbol.isVolatile || symbol.isExtern || symbol.isRemoteTarget) return false;
+		if (symbol.isAddressed) return false;
+		/*
+		Passed to a function: the callee may write into it at any time, so its
+		contents are not known constants any more.
+		*/
+		if (symbol.arrayEscapes === true) return false;
+		return true;
+	}
+
+	/**
+	 * Normalise the third argument of `addWrittenSymbol` into an evaluation
+	 * state, accepting the legacy booleans.
+	 *
+	 * @param {string|boolean?} state
+	 * @returns {string}
+	 */
+	resolveWriteState(state) {
+		const state_ = Optimizer;
+		if (state === true) return state_.EVAL_DEFINITE;
+		if (state === false) return state_.EVAL_UNKNOWN;
+		if (state === null || state === undefined) return state_.EVAL_TRACKED;
+		return state;
 	}
 
 	addWriteForCurrentScope(varName, noSideEffectValue, doUpdate = true) {
@@ -2795,7 +4586,26 @@ export class Optimizer extends ASTVisitor {
 		}
 		const varState = this.variableUses.get(symbol.scope.getPath()).get(varName);
 		const varOk = varState && (varState.reads == 0 && varState.canOptimize);
-		return  (!symbol.isVolatile) && (!symbol.isExtern) && (!symbol.isStatic) && (!symbol.isAddressed) && varOk;
+		/*
+		A remote target is only mentioned by `remote(...)`, which is consumed in
+		the semantic pass -- so it looks unused here, while the other processor
+		does read it.
+		*/
+		/*
+		A name-based struct pointer looks unused: the members are reached as
+		`p.m` registers, so nothing ever reads `p` itself. Removing the
+		declaration would drop the instructions that STORE those names, leaving
+		every member pointing at an undefined register.
+		*/
+		if (symbol.addressedByName === true) return false;
+		/*
+		A `remote` variable is an import of another processor's state: writing it
+		IS the side effect (the other processor sees it), even when this program
+		never reads it back. Deleting the write would delete the message.
+		*/
+		if (symbol.isRemote) return false;
+		return  (!symbol.isVolatile) && (!symbol.isExtern) && (!symbol.isStatic)
+			&& (!symbol.isAddressed) && (!symbol.isRemoteTarget) && varOk;
 	}
 
 	/**
@@ -2829,8 +4639,7 @@ export class Optimizer extends ASTVisitor {
                 if (astNode && astNode.parent) {
                     this.removeNodeFromParent(astNode);
                     this.modified = true;
-					if (this.extraConfig.getAttribute('warningAll'))
-                    	this.addWarning(`Removed unused variable '${symbol.name}' in scope ${scope.getPath()}`);
+                    this.logOptimization(`Removed unused variable '${symbol.name}' in scope ${scope.getPath()}`);
                 }
             }
         });
@@ -2972,6 +4781,34 @@ export class Optimizer extends ASTVisitor {
 				modified = modified || this.replaceAliasAt(node);
                 break;
                 
+			case 'MemberExpression': {
+				/*
+				`a[3]` where every element of `a` is known becomes a literal --
+				the array version of constant folding. Never on the left of an
+				assignment: there the subscript is a destination, not a value.
+				*/
+				if (!node.getAttribute || !node.getAttribute('computed')) break;
+				const owner = node.parent ?? null;
+				const isTarget = owner && (
+					(owner.type === 'AssignmentExpression' && owner.left === node) ||
+					(owner.type === 'BinaryExpression' && owner.operator.includes('=')
+						&& !['==', '!=', '>=', '<=', '>', '<'].includes(owner.operator) && owner.left === node));
+				if (!isTarget) {
+					const elementValue = this.evaluateConstantExpression(node);
+					if (elementValue !== undefined) {
+						const replacement = this.getLiteral(elementValue);
+						replacement.location = node.location;
+						replacement.dataType = node.dataType;
+						this.replaceNode(node, replacement);
+						modified = true;
+						break;
+					}
+				}
+				// The subscript itself may still contain constants
+				const subscriptNode = node.children ? node.children[1] : null;
+				if (subscriptNode) modified = this.replaceConstantsAt(subscriptNode, constants, restrictions) || modified;
+				break;
+			}
             case 'BinaryExpression':
                 // 常量折叠
                 const leftValue = this.evaluateConstantExpression(node.left);
@@ -3241,6 +5078,12 @@ export class Optimizer extends ASTVisitor {
 	// ! Has manual changes !
     removeUnusedFunctions() {
         const usedFunctions = new Set(['main']);
+        /*
+        Nothing recorded a single call: the bodies have not been looked at yet.
+        Going on would delete every function but main and leave the call sites
+        dangling, so wait for a round that knows something.
+        */
+        if (this.functionCallGraph.size === 0) return;
         
         // 从main函数开始标记使用的函数
         const markUsed = (funcName) => {
@@ -3281,15 +5124,17 @@ export class Optimizer extends ASTVisitor {
 						funcNode.body) {
 						// For functions we use 'body (=== null)' instead of 'isDefinition'
 						
+						// Never drop a stack handler: the walker calls it
+						if (this.protectedHandlerNames().has(funcName)) {
+							return;
+						}
 						// Manually added: also remove symbols
 						this.globalScope.removeSymbol(funcName);
 						
 						// 从AST中删除函数定义
 						this.removeNodeFromParent(funcNode);
 						this.modified = true;
-						if (this.extraConfig.getAttribute('warningAll')) {
-							this.addWarning(`Removed unused function '${funcName}'`);
-						}
+						this.logOptimization(`Removed unused function '${funcName}'`);
 						
 					}
 				}
@@ -3298,45 +5143,497 @@ export class Optimizer extends ASTVisitor {
         });
     }
 
+	/**
+	 * Whether this expression (a loop condition or a for-update) contains a
+	 * function call.
+	 *
+	 * @param {ASTNode?} node
+	 * @returns {boolean}
+	 */
+	controlExpressionHasCall(node) {
+		if (!node) return false;
+		let found = false;
+		const walk = n => {
+			if (!n || typeof n !== 'object' || found) return;
+			if (Array.isArray(n)) { n.forEach(walk); return; }
+			if (n.type === 'FunctionCall') { found = true; return; }
+			for (const key of ['children', 'test', 'update', 'argument', 'left', 'right',
+				'expression', 'arguments', 'callee', 'consequent', 'alternate']) {
+				const c = n[key];
+				if (Array.isArray(c)) c.forEach(walk);
+				else if (c && typeof c === 'object') walk(c);
+			}
+		};
+		walk(node);
+		return found;
+	}
+
+	/**
+	 * Call nodes that sit in a loop's controlling position: the `test` of a
+	 * while/for, or the `update` of a for.
+	 *
+	 * These decide how often the body runs. The loop simulator (`simulateLoop`)
+	 * evaluates the condition to count iterations, but it does NOT re-run
+	 * whatever the condition does -- so if a call with side effects were
+	 * inlined there, the compiled loop would run it once per iteration while
+	 * the simulation counted as if it never ran. Inlining at these positions is
+	 * therefore simply not done.
+	 *
+	 * @returns {Set<ASTNode>}
+	 */
+	loopControlCallSites() {
+		if (this._loopControlCallSites) return this._loopControlCallSites;
+		/** @type {Set<ASTNode>} */
+		const found = new Set();
+		const isLoop = node => ['WhileStatement', 'DoWhileStatement', 'ForStatement']
+			.includes(node?.type);
+		const walk = (node, root) => {
+			if (!node || typeof node !== 'object') return;
+			if (Array.isArray(node)) { node.forEach(n => walk(n, root)); return; }
+			if (isLoop(node)) {
+				for (const field of ['test', 'update']) walk(node[field], node);
+				walk(node.body, null);
+				walk(node.init, null);
+				return;
+			}
+			if (root && node.type === 'FunctionCall') {
+				found.add(node);
+				root.setAttribute('controlHasCall', true);
+			}
+			for (const key of ['children', 'statements', 'body', 'consequent', 'alternate',
+				'test', 'init', 'update', 'expression', 'argument', 'left', 'right',
+				'initializer', 'declarators', 'arguments', 'callee']) {
+				const c = node[key];
+				if (Array.isArray(c)) c.forEach(x => walk(x, root));
+				else if (c && typeof c === 'object') walk(c, root);
+			}
+		};
+		walk(this.ast, null);
+		this._loopControlCallSites = found;
+		return found;
+	}
+
+	/**
+	 * Whether this call sits in a loop's controlling position, where inlining
+	 * would break the loop computation.
+	 *
+	 * @param {ASTNode} callNode
+	 * @returns {boolean}
+	 */
+	isLoopControlCall(callNode) {
+		return this.loopControlCallSites().has(callNode);
+	}
+
+	/**
+	 * `while (true) { ... }` -- a loop without a condition that names a
+	 * variable. There is nothing to compute an iteration count from, so the
+	 * body is simply simulated until it either hits a `break` or runs out of
+	 * budget.
+	 *
+	 * Only attempted when the body is free of side effects, which the caller
+	 * has already checked.
+	 *
+	 * @param {ASTNode} whileNode
+	 * @param {any} info
+	 * @returns {boolean}
+	 */
+	analyzeEndlessLoopForOptimization(whileNode, info) {
+		const test = whileNode.test;
+		// Only for a condition that is plainly true (or absent)
+		if (test) {
+			/*
+			`true` may arrive as a keyword-like identifier, as `1`, or as
+			something the constant folder already knows.
+			*/
+			const plainlyTrue = (test.type === 'Identifier' && test.name === 'true')
+				|| (test.type === 'NumericLiteral' && test.value !== 0 && test.value !== null);
+			const value = this.evaluateConstantExpression(test);
+			const foldedTrue = (value !== undefined && value !== null && value !== 0 && value !== false);
+			if (!plainlyTrue && !foldedTrue) return false;
+		}
+		const modifiedVars = this.collectModifiedVariablesInLoop(whileNode);
+		// Pick any variable the body writes and whose value is known: it stands
+		// in for the (missing) loop variable.
+		let loopVarName = null, initValue = undefined;
+		for (const varInfo of modifiedVars) {
+			if (varInfo === 'unrecognized') return false;
+			const scopePath = (varInfo.scope ?? this.currentScope.lookupScopeOf(varInfo.varName)).getPath();
+			const value = this.localConstants.get(scopePath)?.get(varInfo.varName);
+			if (value !== undefined) {
+				loopVarName = varInfo.varName;
+				initValue = value;
+				break;
+			}
+		}
+		if (!loopVarName) return false;
+
+		const MAX_OPTIMIZE_ITERATIONS = 250;
+		return this.runWhileSimulation(whileNode, loopVarName, initValue,
+			{ comparisonOp: null, constValue: undefined },
+			{ type: 'none', step: 0 }, MAX_OPTIMIZE_ITERATIONS, info);
+	}
+
+	/**
+	 * Simulate a `while` loop and decide whether the result may be used.
+	 *
+	 * A `while` loop is flexible enough that a simulation which did NOT reach
+	 * the end tells us nothing: the remaining rounds are exactly the ones we
+	 * could not run. So when the simulation runs out of budget without the
+	 * condition turning false, nothing is kept -- the loop is left as it was
+	 * and the constants planted by the simulation are rolled back.
+	 *
+	 * @returns {boolean}
+	 */
+	runWhileSimulation(whileNode, loopVarName, initValue, conditionInfo, updateInfo,
+		iterationCount, info) {
+		whileNode.setAttribute('iterationCount', iterationCount);
+		whileNode.setAttribute('iteration', {
+			node: whileNode,
+			type: 'while',
+			varName: loopVarName,
+			varInit: initValue,
+			condition: conditionInfo,
+			update: updateInfo,
+			count: iterationCount,
+			info: info
+		});
+		whileNode.setAttribute('canOptimize', true);
+		if (info && info.noRunning) return true;
+		if (!this.simulateLoop(whileNode, loopVarName, initValue, conditionInfo, updateInfo,
+			iterationCount, info)) {
+			whileNode.setAttribute('optimized', false);
+			return false;
+		}
+		if (whileNode.getAttribute('simulationComplete') === false) {
+			// Ran out of budget: keep the loop, forget the imagined values
+			whileNode.setAttribute('optimized', false);
+			whileNode.setAttribute('canOptimize', false);
+			this.restoreLoopConstants(whileNode);
+			return false;
+		}
+		whileNode.setAttribute('optimized', true);
+		return true;
+	}
+
+	/**
+	 * Rewrite every `for` loop into the `while` loop it means:
+	 *
+	 *     for (init; test; update) body
+	 *   -->
+	 *     init; while (test) { body; update; }
+	 *
+	 * Done once, before any analysis, so that the whole optimizer, the loop
+	 * simulator and the generator only ever see one kind of loop. It also gets
+	 * rid of the separate `for` code paths (whose `update` sits outside the
+	 * body and is therefore easy to forget when the loop is replaced).
+	 *
+	 * A body containing `continue` is left alone: in a `for`, `continue` jumps
+	 * to `update`, in a `while` it jumps to the test -- and there is no `goto`
+	 * to repair that with.
+	 */
+	convertForLoopsToWhile() {
+		if (this._forLoopsConverted) return;
+		this._forLoopsConverted = true;
+		let converted = 0;
+
+		const containsContinue = (node, stopAt) => {
+			let found = false;
+			const walk = n => {
+				if (!n || typeof n !== 'object' || found) return;
+				if (Array.isArray(n)) { n.forEach(walk); return; }
+				if (n.type === 'ContinueStatement') { found = true; return; }
+				// A nested loop keeps its own `continue`
+				if (n !== node && ['WhileStatement', 'ForStatement', 'DoWhileStatement'].includes(n.type)) return;
+				for (const key of ['children', 'statements', 'body', 'consequent', 'alternate',
+					'test', 'update', 'init', 'expression', 'argument', 'left', 'right']) {
+					const c = n[key];
+					if (Array.isArray(c)) c.forEach(walk);
+					else if (c && typeof c === 'object') walk(c);
+				}
+			};
+			walk(node);
+			return found;
+		};
+
+		const scopeOf = node => node?.scope ?? node?.parent?.scope ?? this.globalScope;
+
+		const walkStatements = node => {
+			if (!node || typeof node !== 'object') return;
+			if (Array.isArray(node)) { node.forEach(walkStatements); return; }
+
+			// Depth first, so nested `for` loops are converted from the inside out
+			for (const key of ['statements', 'body', 'consequent', 'alternate', 'functions']) {
+				const c = node[key];
+				if (Array.isArray(c)) c.forEach(walkStatements);
+				else if (c && typeof c === 'object') walkStatements(c);
+			}
+
+			if (!Array.isArray(node.statements)) return;
+			for (let i = 0; i < node.statements.length; i++) {
+				const stmt = node.statements[i];
+				if (!stmt || stmt.type !== 'ForStatement') continue;
+				if (containsContinue(stmt.body ?? stmt)) {
+					this.logOptimization(`Left a 'for' loop alone because its body uses 'continue'`);
+					continue;
+				}
+				this.replaceForWithWhile(node, i, stmt, scopeOf);
+				converted++;
+			}
+		};
+
+		walkStatements(this.ast);
+		// New scopes were introduced: make sure they get their constant tables
+		if (converted > 0) this.modified = true;
+	}
+
+	/**
+	 * Replace `statements[index]` (a ForStatement) with the equivalent
+	 * `while` form.
+	 *
+	 * @param {ASTNode} holder the compound statement holding the loop
+	 * @param {number} index
+	 * @param {ASTNode} forNode
+	 * @param {(node: ASTNode) => Scope} scopeOf
+	 */
+	replaceForWithWhile(holder, index, forNode, scopeOf) {
+		const outerScope = scopeOf(forNode);
+		const update = forNode.update;
+		const body = forNode.body;
+
+		// `body; update;` -- keep the body's own compound when there is one, so
+		// that its scope (and any symbols in it) survive untouched.
+		let newBody = body;
+		if (body && body.type === 'CompoundStatement') {
+			if (update) {
+				const updStmt = new ASTNode('ExpressionStatement');
+				updStmt.addChild(update);
+				update.parent = updStmt;
+				updStmt.parent = body;
+				body.statements.push(updStmt);
+			}
+		} else {
+			const compound = ASTBuilder.compoundStatement();
+			if (body) { compound.statements.push(body); body.parent = compound; }
+			if (update) {
+				const updStmt = new ASTNode('ExpressionStatement');
+				updStmt.addChild(update);
+				update.parent = updStmt;
+				updStmt.parent = compound;
+				compound.statements.push(updStmt);
+			}
+			const bodyScope = new Scope(outerScope, 'l', compound, 'forbody');
+			compound.scope = bodyScope;
+			outerScope.children.push(bodyScope);
+			newBody = compound;
+		}
+
+		/*
+		`for (;;)` has no test at all, which is an INFINITE loop. The `while`
+		it becomes must say so explicitly: a missing test is not the same as
+		`true` to the code generator, which asks for the condition's type and
+		crashes on a null node.
+		*/
+		const whileTest = forNode.test ?? ASTBuilder.numericLiteral(true);
+		const whileNode = new WhileStatementNode(whileTest, newBody);
+		whileNode.parent = holder;
+		// A statement's scope is the one holding it (the `for` had the same)
+		whileNode.scope = outerScope;
+		if (newBody) newBody.parent = whileNode;
+		whileTest.parent = whileNode;
+
+		let replacement = whileNode;
+		if (forNode.init) {
+			const compound = ASTBuilder.compoundStatement();
+			const initStmt = forNode.init.type === 'ExpressionStatement'
+				? forNode.init
+				: (() => {
+					const st = new ASTNode('ExpressionStatement');
+					st.addChild(forNode.init);
+					forNode.init.parent = st;
+					return st;
+				})();
+			initStmt.parent = compound;
+			compound.statements.push(initStmt);
+			whileNode.parent = compound;
+			compound.statements.push(whileNode);
+			const scope = new Scope(outerScope, 'l', compound, 'forinit');
+			compound.scope = scope;
+			outerScope.children.push(scope);
+			compound.parent = holder;
+			replacement = compound;
+		}
+
+		holder.statements[index] = replacement;
+		this.modified = true;
+	}
+
+	/**
+	 * Register that a function must not be inlined automatically.
+	 *
+	 * @param {string?} name null means "every function"
+	 * @param {boolean} [soft=true] true when the request comes from
+	 *        `#pragma noinline`, which the `inline` keyword outranks
+	 */
+	forbidAutoInline(name = null, soft = true) {
+		const state = this.autoInlineForbidden;
+		if (name === null) {
+			if (soft) state.all = true;
+			else state.allHard = true;
+			return;
+		}
+		(soft ? state.soft : state.hard).add(name);
+	}
+
+	/**
+	 * Whether automatic inlining of this function is allowed AT ALL.
+	 *
+	 * This is the "has anybody forbidden it" question. It says nothing about
+	 * whether inlining is possible or worthwhile.
+	 *
+	 * @param {string} name
+	 * @param {boolean} [declaredInline=false] whether `inline` was written
+	 * @returns {boolean}
+	 */
+	autoInlineAllowed(name, declaredInline = false) {
+		const state = this.autoInlineForbidden;
+		if (state.allHard || state.hard.has(name)) return false;
+		// An explicit `inline` outranks the pragma, but never a hard veto
+		if (declaredInline) return true;
+		if (state.all || state.soft.has(name)) return false;
+		return true;
+	}
+
+	/**
+	 * Apply the `#pragma noinline` requests of this program.
+	 */
+	applyNoInlinePragmas() {
+		const config = this.optimizeConfig ?? {};
+		if (config.noInlineAll === true) this.forbidAutoInline(null, true);
+		for (const name of config.noInlineList ?? []) this.forbidAutoInline(name, true);
+		/*
+		The stack walkers jump to these with `set @counter`, so they must stay
+		real functions: inlining them away would leave the jump with no target.
+		*/
+		for (const key of ['stackCheck', 'stackUnderflow']) {
+			const handler = config[key];
+			if (typeof handler === 'string' && handler) this.forbidAutoInline(handler, false);
+		}
+	}
+
+	/**
+	 * Whether inlining this function is POSSIBLE. Structure only: nothing here
+	 * depends on whether it would be a good idea, and nothing depends on side
+	 * effects -- moving a write from the function body to the call site is
+	 * exactly what inlining means.
+	 *
+	 * @param {string} funcName
+	 * @returns {boolean}
+	 */
+	canInlineFunction(funcName) {
+		const info = this.functionInfo.get(funcName);
+		if (!info) return false;
+		if (funcName === 'main') return false;
+		if (!info.node || !info.node.body) return false;
+		// Reachable through a function pointer: the call sites are not all known
+		if (info.isAddressed) return false;
+		if (this.recuriveInfo?.has(funcName)) return false;
+		// The body shape: no `return`, or a single one at the very end.
+		// (No goto, so a `return` in the middle cannot be reproduced.)
+		if (!info.canInline) return false;
+		return true;
+	}
+
+	/**
+	 * Whether the function is STRICTLY free of side effects, meaning a call to
+	 * it may be deleted when the result is unused.
+	 *
+	 * Deliberately a separate question from `canInlineFunction`: a function that
+	 * writes to a variable can be inlined perfectly well, it just cannot be
+	 * thrown away.
+	 *
+	 * @param {string} funcName
+	 * @returns {boolean}
+	 */
+	isStrictlyPureFunction(funcName) {
+		const info = this.functionInfo.get(funcName);
+		if (!info || !info.node || !info.node.body) return false;
+		if (info.strictlyPure !== undefined) return info.strictlyPure;
+		info.strictlyPure = !this.hasSideEffects(info.node.body, {
+			inFunction: true,
+			atFunction: info.node
+		});
+		return info.strictlyPure;
+	}
+
+	/**
+	 * Whether inlining is worth the code it duplicates.
+	 * @param {string} funcName
+	 * @returns {boolean}
+	 */
+	worthInlining(funcName) {
+		const info = this.functionInfo.get(funcName);
+		if (!info || !info.node) return false;
+		const paraSize = info.node.parameters ? (info.node.parameters.length ?? 0) : 0;
+		/*
+		One call site, or an explicit `inline`: do it. Otherwise compare the size
+		of N copies of the body against keeping the function plus N calls.
+		*/
+		const inlineEstimate = (info.calls + paraSize) * info.size;
+		const noInlineEstimate = (info.size + paraSize + 4 + (4 + paraSize) * info.calls);
+		if (!(info.calls === 1 || info.isInline || inlineEstimate <= noInlineEstimate)) {
+			return false;
+		}
+		const maxSize = this.compiler?.config?.getAttribute('maxInlineSize') ?? 25;
+		const maxDepth = this.compiler?.config?.getAttribute('maxInlineDepth') ?? 5;
+		if (info.size > maxSize && !info.isInline) return false;
+		if (info.maxDepth > maxDepth) return false;
+		return true;
+	}
+
 	// Has manual changes on 'isAddressed'
     inlineFunctions() {
-        // 收集适合内联的函数
-        const inlineCandidates = [];
-        
-        this.functionInfo.forEach((info, funcName) => {
-			if (info.isAddressed) return;	// Can't be inlined!
-			if (!info.node || !info.node.body) return;
-			const paraSize = (info.node.parameters ? (info.node.parameters.length ?? 0) : 0);
-			const inlineEstimate = (info.calls + paraSize) * info.size;
-			const noInlineEstimate = (info.size + paraSize + 4 + (4 + paraSize) * info.calls);
-            if (info.calls === 1 || info.isInline || inlineEstimate <= noInlineEstimate) {
-				const bad = ((info.size > (this.compiler.config.getAttribute('maxInlineSize') ?? 25) && (!info.isInline)) 
-					|| (info.maxDepth > (this.compiler.config.getAttribute('maxInlineDepth') ?? 5)));
-                if (!bad) inlineCandidates.push(funcName);
-            }
-        });
-        
 		this.recuriveInfo = this.findRecursiveFunctions(this.functionCallGraph);
+		this.applyNoInlinePragmas();
+		// 收集适合内联的函数
+		const inlineCandidates = [];
 
-        // 尝试内联候选函数
-        inlineCandidates.forEach(funcName => {
-            if (this.shouldInlineFunction(funcName)) {
-                this.performFunctionInlining(funcName);
-            }
-        });
-    }
+		this.functionInfo.forEach((info, funcName) => {
+			if (!this.canInlineFunction(funcName)) return;
+			if (!this.autoInlineAllowed(funcName, info.isInline === true)) return;
+			if (!this.worthInlining(funcName)) return;
+			inlineCandidates.push(funcName);
+		});
 
-    globalDeadCodeElimination() {
-        // 全局级别的死代码消除
-        // 例如：删除空的全局声明、无用类型定义等
-        
-        if (this.ast.type === 'Program') {
-            // 清理全局声明
-            this.cleanupGlobalDeclarations();
-        }
-    }
+		// 尝试内联候选函数
+		inlineCandidates.forEach(funcName => {
+			if (this.shouldInlineFunction(funcName)) {
+				if (this.performFunctionInlining(funcName)) {
+					// The AST moved: recompute which calls sit where
+					this._loopControlCallSites = null;
+					/*
+					The body now sits in another function, under a different
+					scope path, and next to different constants. Everything
+					known about it was computed where it used to be, so ask for
+					another round: `optimize()` re-runs the whole analysis while
+					`modified` is set.
+					*/
+					this.modified = true;
+				}
+			}
+		});
+	}
 
-    // =============== 辅助方法 ===============
+	globalDeadCodeElimination() {
+		// 全局级别的死代码消除
+		// 例如：删除空的全局声明、无用类型定义等
+
+		if (this.ast.type === 'Program') {
+			// 清理全局声明
+			this.cleanupGlobalDeclarations();
+		}
+	}
+
+	// =============== 辅助方法 ===============
 
 	/**
 	 * @typedef {{
@@ -3344,14 +5641,36 @@ export class Optimizer extends ASTVisitor {
 	 *  category: string,
 	 *  name: string
 	 * }} extBuiltinConstant
-	 * 
+	 *
 	 */
 	/**
-	 * 
-	 * @param {ASTNode} node 
-	 * @param {boolean} [allowConstants=true] Whether to allow builtin constants to be regarded as constants
-	 * @returns {number | string | extBuiltinConstant | undefined} (`undefined` means it is **not** constant)
+	 * The `#pragma id` / `#pragma var` definitions of this program.
+	 * @returns {import('./mindcContent.js').ContentIdTable?}
 	 */
+	get contentTable() {
+		return this.compiler?.extraConfig?.getAttribute('contentTable') ?? null;
+	}
+
+
+	/**
+	 * The value of `@itemCount` / `@liquidCount` / `@unitCount` / `@blockCount`,
+	 * when the compiler is allowed to know it.
+	 *
+	 * @param {string} name
+	 * @returns {number?} null when it is not a count constant, or when ids were
+	 *          declared by hand and the real counts are therefore unknown
+	 */
+	contentCountOf(name) {
+		const category = {
+			'@itemCount': 'item', '@liquidCount': 'liquid',
+			'@unitCount': 'unit', '@blockCount': 'block'
+		}[name];
+		if (!category) return null;
+		const table = this.contentTable;
+		if (table && table.hasOverrides) return undefined;	// Deliberately unknown
+		return table ? table.namesOf(category).length : null;
+	}
+
     evaluateConstantExpression(node, allowConstants = true) {
         if (!node) return undefined;
         
@@ -3360,7 +5679,19 @@ export class Optimizer extends ASTVisitor {
                 return node.value;
             case 'Identifier':
 				// Try evaluating in current environment
-				if (node.name[0] === '@' && !dynamicBuiltins.includes(node.name[0]) && allowConstants) {
+				if (node.name[0] === '@' && allowConstants) {
+					/*
+					`@itemCount` and friends are fixed by the content tables, so
+					they fold like any other number -- unless the program declared
+					ids of its own, in which case how many contents exist is no
+					longer something the compiler may assume.
+					*/
+					const count = this.contentCountOf(node.name);
+					if (count !== null) return count;
+					if (this.contentTable && this.contentTable.isOpaque(node.name)) {
+						// An unknown content: its id is not knowable here
+						return undefined;
+					}
 					// Regard this as a constant value...
 					return {
 						isBuiltinConstant: true,
@@ -3406,6 +5737,19 @@ export class Optimizer extends ASTVisitor {
                     return this.evaluateUnaryOperation(node.operator, arg);
                 }
                 return undefined;
+			case 'MemberExpression': {
+				if (!node.getAttribute('computed')) return undefined;
+				const object = node.children?.[0] ?? node.object ?? null;
+				const subscript = node.children?.[1] ?? node.property ?? null;
+				if (!object || object.type !== 'Identifier' || !subscript) return undefined;
+				const symbol = this.currentScope.lookup(object.name);
+				if (!symbol || !this.isFoldableArray(symbol)) return undefined;
+				const index = this.evaluateConstantExpression(subscript);
+				if (typeof index !== 'number' || !Number.isInteger(index)) return undefined;
+				const elements = this.getConstantArray(symbol);
+				if (!elements || index < 0 || index >= elements.length) return undefined;
+				return elements[index];
+			}
 			case 'ConditionalExpression':
 				const test = this.evaluateConstantExpression(node.test);
 				if (test !== undefined) {
@@ -4169,20 +6513,17 @@ export class Optimizer extends ASTVisitor {
     }
 
     shouldInlineFunction(funcName) {
-        const info = this.functionInfo.get(funcName);
-		if (funcName === 'main') return false;
-        if (!info || !info.node.body) return false;
-		if (!info.canInline) return false;
-		if (this.hasSideEffects(info.node.body, {
-			inFunction: true,
-			atFunction: info.node
-		})) return false;
-        
-        // 检查递归调用
-        //const calledFunctions = this.functionCallGraph.get(funcName) || new Set();
-        if (this.recuriveInfo.has(funcName)) return false; // 递归函数不内联
-        
-        return true;
+		/*
+		Three separate questions, deliberately kept apart:
+		  - can it be inlined at all (structure)?
+		  - has anybody forbidden automatic inlining of it?
+		  - (worthwhileness is decided by the caller, see `worthInlining`)
+		Side effects play no part: they only decide whether an unused CALL may
+		be deleted, see `isStrictlyPureFunction`.
+		*/
+		if (!this.canInlineFunction(funcName)) return false;
+		const info = this.functionInfo.get(funcName);
+		return this.autoInlineAllowed(funcName, info?.isInline === true);
     }
 
 	/**
@@ -4191,18 +6532,24 @@ export class Optimizer extends ASTVisitor {
 	performFunctionInlining(funcName) {
 		const funcInfo = this.functionInfo.get(funcName);
 		if (!funcInfo || !funcInfo.node || !funcInfo.node.body) {
-			return;
+			return false;
 		}
 		
 		// 找到所有调用点
 		const callSites = [];
 		this.collectFunctionCallSites(this.ast, funcName, callSites);
 		
-		if (callSites.length === 0) return;
+		if (callSites.length === 0) return false;
+
+		let inlined = false;
 		
 		// 对每个调用点进行内联
 		for (const {callNode, parentNode, context} of callSites) {
-			this.inlineFunctionAtSite(funcInfo.node, callNode, parentNode, context);
+			// A call that decides how often a loop runs is never inlined
+			if (this.isLoopControlCall(callNode)) continue;
+			if (this.inlineFunctionAtSite(funcInfo.node, callNode, parentNode, context)) {
+				inlined = true;
+			}
 			
 			/**
 			 * 
@@ -4219,11 +6566,12 @@ export class Optimizer extends ASTVisitor {
 		}
 		
 		// 如果函数现在没有被调用，可以删除它
-		if (funcInfo.calls === 0) {
+		if (inlined && funcInfo.calls === 0) {
 			this.globalScope.removeSymbol(funcName);	// Manually added
 			this.removeNodeFromParent(funcInfo.node);
-			this.addWarning(`Removed unused function '${funcName}' after inlining`);
+			this.logOptimization(`Removed unused function '${funcName}' after inlining`);
 		}
+		return inlined;
 	}
 
 	/**
@@ -4340,12 +6688,65 @@ export class Optimizer extends ASTVisitor {
 	 * @param {any} context 
 	 * @returns {boolean} Whether the inlining is successful
 	 */
+	/**
+	 * The array an argument handed to an inlined parameter really means.
+	 *
+	 * Inlining does not deliver arguments into parameter slots -- it rebinds
+	 * the parameter to the argument's own storage. For an array that has no
+	 * address, "rebinding" can only mean: USE THE ARGUMENT'S OWN REGISTERS.
+	 * Anything else (making the parameter a fresh array of its own) copies it,
+	 * and a write inside the function then lands in the copy and is lost.
+	 *
+	 * @param {any} argNode The argument at this call site
+	 * @returns {import('./mindcSemantic.js').SymbolEntry?} null when the
+	 *          argument is not a plain array name, so nothing can be aliased
+	 */
+	arrayArgumentSymbolOf(argNode) {
+		if (!argNode || argNode.type !== 'Identifier') return null;
+		const symbol = argNode.symbol ?? null;
+		if (symbol && symbol.myType?.()?.kind === 'array') return symbol;
+		const scope = argNode.scope ?? this.currentScope ?? null;
+		const found = scope?.lookup?.(argNode.name) ?? null;
+		if (found && found.myType?.()?.kind === 'array') return found;
+		return null;
+	}
+
+	/**
+	 * Whether this call may be inlined given the arrays it hands over.
+	 *
+	 * @param {any} funcNode
+	 * @param {any} callNode
+	 * @returns {boolean}
+	 */
+	canInlineArrayArguments(funcNode, callNode) {
+		const params = funcNode.parameters ?? [];
+		for (let i = 0; i < params.length; i++) {
+			const arg = (callNode.arguments ?? [])[i];
+			if (!arg) continue;
+			const type = arg.dataType ?? null;
+			if (!type || type.kind !== 'array') continue;
+			if (this.arrayArgumentSymbolOf(arg)) continue;
+			/*
+			Not a plain array name -- there is nothing to alias to, so the
+			parameter would have to become an array of its own. Keep the real
+			call instead, which passes a handle and stays correct.
+			*/
+			return false;
+		}
+		return true;
+	}
+
 	inlineFunctionAtSite(funcNode, callNode, parentNode, context) {
 		// Cloned body must be a compound statement
 		// 检查是否适合内联
 		if (!this.isSuitableForInlining(funcNode, callNode, context)) {
 			return false;
 		}
+		/*
+		An array argument has to be aliasable, or inlining would hand the
+		function a COPY of it (see `arrayArgumentSymbolOf`).
+		*/
+		if (!this.canInlineArrayArguments(funcNode, callNode)) return false;
 		/*
 		const funcSymbol = funcNode.scope.lookup(funcNode.name);
 		if (!funcSymbol) {
@@ -4357,7 +6758,7 @@ export class Optimizer extends ASTVisitor {
 			return false;
 		}
 
-		const clonedBody = this.cloneAST(funcNode.body);
+		const clonedBody = this.reparentCloned(this.cloneAST(funcNode.body), null);
 		if (!clonedBody) return false;
 		
 		// 处理返回语句
@@ -4416,6 +6817,18 @@ export class Optimizer extends ASTVisitor {
 						this.duplicateVariable(funcNode.scope, param.name, ziel, symbolName);
 						const symbolTarget = ziel.lookupCurrent(symbolName);
 						symbolTarget.kind = 'variable';	// Don't be 'parameter'!
+						/*
+						An array parameter is an ALIAS, not an array of its own:
+						point it at the caller's array so that a write inside the
+						inlined body really lands there. Without this the
+						parameter gets a fresh layout and the write is lost.
+						*/
+						const aliased = this.arrayArgumentSymbolOf(callNode.arguments[index]);
+						if (aliased) {
+							symbolTarget.arrayAliasOf = aliased;
+							// It is no longer a slot that gets a handle delivered
+							symbolTarget.arrayParamRep = null;
+						}
 					}
 				}
 			});
@@ -4518,6 +6931,25 @@ export class Optimizer extends ASTVisitor {
 					this.further(stmt, scopeRelinker);
 				};
 				scopeRelinker(clonedBody);
+
+				/*
+				The clone still points at the symbols of the function it came
+				from. Every pass that works on symbols -- `collectModifiedVariablesInLoop`
+				first among them -- would then be looking at the OLD symbol while
+				the scope holds the NEW one, and comparing them (as the constant
+				propagation does) simply fails. Re-point every identifier at what
+				its (new) scope resolves the name to.
+				*/
+				const symbolRelinker = stmt => {
+					if (stmt.type === 'Identifier' && typeof stmt.name === 'string'
+						&& stmt.name && stmt.name[0] !== '@') {
+						const found = stmt.scope?.lookup?.(stmt.name) ?? null;
+						if (found) stmt.symbol = found;
+						return;
+					}
+					this.further(stmt, symbolRelinker);
+				};
+				symbolRelinker(clonedBody);
 
 				let originals;// = ASTBuilder.compoundStatement();
 				//newCompound.scope = funcNode.scope;					// Apply similar structure...
@@ -4785,7 +7217,7 @@ export class Optimizer extends ASTVisitor {
 		}
 		
 		this.modified = true;
-		this.addWarning(`Inlined function '${funcNode.name}'`);
+		this.logOptimization(`Inlined function '${funcNode.name}'`);
 		return true;
 	}
 
@@ -4821,18 +7253,48 @@ export class Optimizer extends ASTVisitor {
 	replaceParametersInAST(node, paramMap, funcNode, symbolMapper) {
 		if (!node || !paramMap) return;
 		
-		switch (node.type) {
-			case 'Identifier':
-				if (node.symbol && node.symbol.kind === 'parameter') {
-					const replacement = paramMap.get(node.name);
-					if (replacement) {
-						const clonedReplacement = this.cloneAST(replacement);
-						clonedReplacement.location = node.location;
-						clonedReplacement.symbol = symbolMapper.lookup(replacement.name);
-						this.replaceNode(node, clonedReplacement);
+		const doReplacement = node => {
+			switch (node.type) {
+				case 'Identifier':
+					if (node.symbol && node.symbol.kind === 'parameter') {
+						const replacement = paramMap.get(node.name);
+						if (replacement) {
+							const clonedReplacement = this.cloneAST(replacement);
+							clonedReplacement.location = node.location;
+							clonedReplacement.symbol = symbolMapper.lookup(replacement.name);
+							/*
+							Renamed in place rather than swapped into its parent:
+							a clone keeps the ORIGINAL's `parent`, so `replaceNode`
+							edited the function's own body -- and inlining the
+							function a second time then renamed the original's
+							parameters, leaving the newer copy referring to names
+							that belong to the earlier inlining.
+							*/
+							this.replaceNode(node, clonedReplacement);
+						}
 					}
-				}
-				break;
+					break;
+			}
+		};
+
+		doReplacement(node);
+
+		const tsrc = node.getAttribute('totalSource');
+		if (tsrc && tsrc.type === 'Identifier') {
+			/*
+			Attributes are shared with the node this was cloned from, so `tsrc`
+			may well be the ORIGINAL function's identifier. Replacing it would
+			rename the function's own body -- and inlining it a second time then
+			produced a copy referring to the parameters of the FIRST inlining.
+			Only this node's attribute is updated.
+			*/
+			const tsrcReplacement = paramMap.get(tsrc.name);
+			if (tsrcReplacement) {
+				const clonedReplacement = this.cloneAST(tsrcReplacement);
+				clonedReplacement.location = tsrc.location;
+				clonedReplacement.symbol = symbolMapper.lookup(tsrcReplacement.name);
+				node.setAttribute('totalSource', clonedReplacement);
+			}
 		}
 		
 		// 递归处理子节点
@@ -4963,7 +7425,7 @@ export class Optimizer extends ASTVisitor {
 				// 检查声明符
 				if (!decl.declarators || decl.declarators.length === 0) {
 					this.modified = true;
-					this.addWarning('Removed empty global variable declaration');
+					this.logOptimization('Removed empty global variable declaration');
 					return false;
 				}
 				
@@ -4989,7 +7451,7 @@ export class Optimizer extends ASTVisitor {
 				
 				if (usefulDeclarators.length === 0) {
 					this.modified = true;
-					this.addWarning(`Removed global variable declaration with no used variables`);
+					this.logOptimization(`Removed global variable declaration with no used variables`);
 					return false;
 				}
 				
@@ -5037,8 +7499,7 @@ export class Optimizer extends ASTVisitor {
 				if (!func.body && func.name !== 'main') {
 					// 函数声明（不是定义），可以删除
 					this.modified = true;
-					if (this.extraConfig.getAttribute('warningAll'))
-						this.addWarning(`Removed unused function declaration '${func.name}'`);
+					this.logOptimization(`Removed unused function declaration '${func.name}'`);
 					return false;
 				}
 				
@@ -5113,6 +7574,42 @@ export class Optimizer extends ASTVisitor {
 	/**
 	 * 克隆AST节点
 	 */
+	/**
+	 * Point every node of a CLONED subtree at its parent WITHIN that subtree.
+	 *
+	 * `cloneAST` copies `parent` from the original, so a clone's root still
+	 * points into the original tree. That leaks: `replaceNode` edits
+	 * `oldNode.parent`, so inlining a function a SECOND time renamed the
+	 * identifiers of the ORIGINAL body -- and the second copy then referred to
+	 * the parameters of the first inlining (names belonging to a scope that is
+	 * not an ancestor of it), which failed as "Unknown variable".
+	 *
+	 * @param {any} root
+	 * @param {any?} [parent]
+	 * @returns {any} root
+	 */
+	reparentCloned(root, parent = null) {
+		const seen = new Set();
+		const skip = new Set(['parent', 'scope', 'symbol', '_attributes', 'dataType', 'location']);
+		const fix = (node, from) => {
+			if (!node || typeof node !== 'object' || seen.has(node)) return;
+			seen.add(node);
+			node.parent = from;
+			const visit = child => {
+				if (!child || typeof child !== 'object') return;
+				if (Array.isArray(child)) { child.forEach(visit); return; }
+				if (typeof child.type !== 'string') return;
+				fix(child, node);
+			};
+			for (const key of Object.keys(node)) {
+				if (skip.has(key)) continue;
+				visit(node[key]);
+			}
+		};
+		fix(root, parent);
+		return root;
+	}
+
 	cloneAST(node) {
 		if (!node) return null;
 		// console.log("Now cloning AST",node);	// debug ...
@@ -5406,7 +7903,7 @@ export class Optimizer extends ASTVisitor {
 			if (hasUnconditionalControlFlow) {
 				// 标记为已修改
 				modified = true;
-				this.addWarning(`Removed dead code after unconditional control flow in compound statement`);
+				this.logOptimization(`Removed dead code after unconditional control flow in compound statement`);
 				continue;
 			}
 			
@@ -5471,18 +7968,18 @@ export class Optimizer extends ASTVisitor {
 					// 删除else分支
 					ifStmt.alternate = null;
 					modified = true;
-					this.addWarning(`Removed else branch from always-true if statement`);
+					this.logOptimization(`Removed else branch from always-true if statement`);
 				}
 			} else {
 				// 条件为假，只保留else分支（如果有）
 				if (ifStmt.alternate) {
 					// 用else分支替换整个if语句
 					// 注意：这里我们只标记修改，实际替换在调用者中处理
-					this.addWarning(`If statement with always-false condition can be replaced with else branch`);
+					this.logOptimization(`If statement with always-false condition can be replaced with else branch`);
 				} else {
 					// 没有else分支，整个if语句都可以删除
 					// 注意：这里我们只标记修改，实际删除在调用者中处理
-					this.addWarning(`If statement with always-false condition and no else branch can be removed`);
+					this.logOptimization(`If statement with always-false condition and no else branch can be removed`);
 				}
 			}
 		}
@@ -5499,7 +7996,7 @@ export class Optimizer extends ASTVisitor {
 				// 条件总是为真
 				if (ifStmt.alternate) {
 					// 有else分支，可以删除else分支
-					this.addWarning(`Removing else branch from always-true if statement`);
+					this.logOptimization(`Removing else branch from always-true if statement`);
 					
 					// 检查else分支是否有副作用
 					const elseHasSideEffects = ifStmt.getAttribute('alternateHasSideEffects');
@@ -5518,7 +8015,7 @@ export class Optimizer extends ASTVisitor {
 				// 条件总是为假
 				if (ifStmt.consequent) {
 					// 有then分支，可以删除then分支
-					this.addWarning(`Removing then branch from always-false if statement`);
+					this.logOptimization(`Removing then branch from always-false if statement`);
 					
 					// 检查then分支是否有副作用
 					const thenHasSideEffects = ifStmt.getAttribute('consequentHasSideEffects');
@@ -5652,7 +8149,7 @@ export class Optimizer extends ASTVisitor {
 		
 		if (neverExecuted) {
 			// 循环永远不会执行
-			this.addWarning(`Removing never-executed loop`);
+			this.logOptimization(`Removing never-executed loop`);
 			
 			// 检查初始化部分是否有副作用
 			// 对于while循环，没有独立的初始化部分，但条件可能有副作用
@@ -5710,7 +8207,7 @@ export class Optimizer extends ASTVisitor {
 		
 		if (neverExecuted) {
 			// 循环永远不会执行
-			this.addWarning(`Removing never-executed for loop`);
+			this.logOptimization(`Removing never-executed for loop`);
 			
 			// 检查初始化和条件是否有副作用
 			const initHasSideEffects = forStmt.getAttribute('initHasSideEffects');
@@ -5748,7 +8245,7 @@ export class Optimizer extends ASTVisitor {
 		if (wasOptimized && iterationCount !== undefined) {
 			if (iterationCount === 1) {
 				// 只有一次迭代，可以展开
-				this.addWarning(`Unrolling single-iteration for loop`);
+				this.logOptimization(`Unrolling single-iteration for loop`);
 				
 				// 创建复合语句代替循环
 				const compoundStmt = ASTBuilder.compoundStatement();
@@ -5925,7 +8422,7 @@ export class Optimizer extends ASTVisitor {
 					
 					if (node.statements.length !== originalLength) {
 						modified = true;
-						this.addWarning(`Removed empty statements from compound statement`);
+						this.logOptimization(`Removed empty statements from compound statement`);
 					}
 					
 					// 递归清理每个语句

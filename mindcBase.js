@@ -1,5 +1,107 @@
+import { CONTENT_ORDER } from './mindcContent.js';
 
 // 抽象语法树节点类型
+
+export function findRecursiveFunctions(callGraph) {
+	// 收集所有函数节点
+	const allFunctions = new Set();
+	
+	for (const [caller, callees] of callGraph) {
+		allFunctions.add(caller);
+		for (const callee of callees) {
+			allFunctions.add(callee);
+		}
+	}
+	
+	// 初始化数据结构
+	const visited = new Map(); // 访问状态：0=未访问，1=访问中，2=已访问 (AI's creation!)
+	const dfn = new Map(), low = new Map(); // Tarjan
+	const recursive = new Map(); // 是否为递归函数
+	const callStack = []; // DFS调用栈
+
+	let dfnId = 0;
+	
+	for (const func of allFunctions) {
+		visited.set(func, 0);
+		recursive.set(func, false);
+	}
+	
+	// DFS搜索，检测环
+	function dfs(node) {
+		// 将节点标记为访问中
+		dfnId++;
+		dfn.set(node, dfnId);
+		low.set(node, dfnId);
+		visited.set(node, 1);
+		callStack.push(node);
+		
+		// 获取当前函数调用的函数集合
+		const neighbors = callGraph.get(node) || new Set();
+		
+		for (const neighbor of neighbors) {
+			const neighborState = visited.get(neighbor);
+			
+			if (neighborState === 0) {
+				dfs(neighbor);
+				low.set(node, Math.min(low.get(node), low.get(neighbor)));
+			} else if (callStack.includes(neighbor)) {
+				low.set(node, Math.min(low.get(node), dfn.get(neighbor)));
+			}
+			// AI here is 100% siliy.
+			/*
+			if (neighborState === 0) {
+				// 邻居未访问，递归访问
+				dfs(neighbor);
+				// 如果邻居是递归的，当前节点也是递归的
+				if (recursive.get(neighbor)) {
+					recursive.set(node, true);
+				}
+			} else if (neighborState === 1) {
+				// 发现环！当前路径上的节点都在环中
+				const cycleStartIndex = callStack.indexOf(neighbor);
+				for (let i = cycleStartIndex; i < callStack.length; i++) {
+					recursive.set(callStack[i], true);
+				}
+				// 当前节点在环中
+				recursive.set(node, true);
+			} else { // neighborState === 2
+				// 邻居已访问完成
+				if (recursive.get(neighbor)) {
+					recursive.set(node, true);
+				}
+			}
+				*/
+		}
+		if (neighbors.has(node) || low.get(node) < dfn.get(node)) {
+			recursive.set(node, true);
+		}
+		
+		// 从栈中弹出节点
+		callStack.pop();
+		// 标记节点为已访问
+		visited.set(node, 2);
+	}
+	
+	// 对每个未访问的节点进行DFS
+	for (const func of allFunctions) {
+		if (visited.get(func) === 0) {
+			dfs(func);
+		}
+	}
+	
+	// 收集所有递归函数
+	const result = new Set();
+	for (const [func, isRecursive] of recursive) {
+		if (isRecursive) {
+			result.add(func);
+		}
+	}
+	
+	return result;
+}
+
+
+
 // AST节点类型枚举
 export const ASTNodeType = {
     // 程序结构
@@ -176,105 +278,11 @@ export class CompilationPhase {
 	 * 找到所有递归的函数
 	 * @param {Map<string, Set<string>>} callGraph - 函数调用关系图
 	 * @returns {Set<string>} - 递归的函数集合
-	 * @remark By deepseek (so stupid) and myself (I still need some OI techniques)
+	 * @remark By Hunyuan, deepseek (so stupid) and myself (I still need some OI techniques)
 	 */
 	findRecursiveFunctions(callGraph) {
-		// 收集所有函数节点
-		const allFunctions = new Set();
-		
-		for (const [caller, callees] of callGraph) {
-			allFunctions.add(caller);
-			for (const callee of callees) {
-				allFunctions.add(callee);
-			}
-		}
-		
-		// 初始化数据结构
-		const visited = new Map(); // 访问状态：0=未访问，1=访问中，2=已访问 (AI's creation!)
-        const dfn = new Map(), low = new Map(); // Tarjan
-		const recursive = new Map(); // 是否为递归函数
-		const callStack = []; // DFS调用栈
-
-        let dfnId = 0;
-		
-		for (const func of allFunctions) {
-			visited.set(func, 0);
-			recursive.set(func, false);
-		}
-		
-		// DFS搜索，检测环
-		function dfs(node) {
-			// 将节点标记为访问中
-            dfnId++;
-            dfn.set(node, dfnId);
-            low.set(node, dfnId);
-			visited.set(node, 1);
-			callStack.push(node);
-			
-			// 获取当前函数调用的函数集合
-			const neighbors = callGraph.get(node) || new Set();
-			
-			for (const neighbor of neighbors) {
-				const neighborState = visited.get(neighbor);
-                
-                if (neighborState === 0) {
-                    dfs(neighbor);
-                    low.set(node, Math.min(low.get(node), low.get(neighbor)));
-                } else if (callStack.includes(neighbor)) {
-                    low.set(node, Math.min(low.get(node), dfn.get(neighbor)));
-                }
-                // AI here is 100% siliy.
-				/*
-				if (neighborState === 0) {
-					// 邻居未访问，递归访问
-					dfs(neighbor);
-					// 如果邻居是递归的，当前节点也是递归的
-					if (recursive.get(neighbor)) {
-						recursive.set(node, true);
-					}
-				} else if (neighborState === 1) {
-					// 发现环！当前路径上的节点都在环中
-					const cycleStartIndex = callStack.indexOf(neighbor);
-					for (let i = cycleStartIndex; i < callStack.length; i++) {
-						recursive.set(callStack[i], true);
-					}
-					// 当前节点在环中
-					recursive.set(node, true);
-				} else { // neighborState === 2
-					// 邻居已访问完成
-					if (recursive.get(neighbor)) {
-						recursive.set(node, true);
-					}
-				}
-                    */
-			}
-            if (neighbors.has(node) || low.get(node) < dfn.get(node)) {
-                recursive.set(node, true);
-            }
-			
-			// 从栈中弹出节点
-			callStack.pop();
-			// 标记节点为已访问
-			visited.set(node, 2);
-		}
-		
-		// 对每个未访问的节点进行DFS
-		for (const func of allFunctions) {
-			if (visited.get(func) === 0) {
-				dfs(func);
-			}
-		}
-		
-		// 收集所有递归函数
-		const result = new Set();
-		for (const [func, isRecursive] of recursive) {
-			if (isRecursive) {
-				result.add(func);
-			}
-		}
-		
-		return result;
-	}
+        return findRecursiveFunctions(callGraph);
+    }
 }
 
 // 具体AST节点类
@@ -804,35 +812,15 @@ export class ConstantManager {
  * @param {string} s 
  */
 export const __convert = s => s.split(',').map(t => t.replace(/\-/g, '_').trim());
-export var objectList = __convert(
-	'@copper, @lead, @coal, @graphite, @scrap, @sand, @pyratite, @silicon, @spore-pod, @blast-compound, @titanium, @plastanium, @thorium, @phase-fabric, @surge-alloy, @beryllium, @tungsten, @oxide, @carbide'
-);
-export var liquidList = __convert(
-	'@water, @slag, @oil, @cryofluid, @neoplasm, @gallium, @ozone, @hydrogen, @cyanogen, @nitrogen'
-);
-export var unitList = __convert(
-	'@Aegires, @Alpha, @Anthicus, @Antumbra, @Arkyid, @Atrax, @Avert, @Beta, @Bryde, @Cleroi, @Collaris, @Conquer, @Corvus, @Crawler, @Cyerce, @Dagger, @Disrupt, @Eclipse, @Elude, @Emanate, @Evoke, @Flare, @Fortress, @Gamma, @Guardian, @Horizon, @Incite, @Latum, @Locus, @Mace, @Manifold, @Mega, @Merui, @Minke, @Mono, @Navanax, @Nova, @Obviate, @Oct, @Omura, @Oxynoe, @Poly, @Precept, @Pulsar, @Quad, @Quasar, @Quell, @Reign, @Renale, @Retusa, @Risso, @Scepter, @Sei, @Spiroct, @Stell, @Tecta, @Toxopid, @Vanquish, @Vela, @Zenith'
-).map(s => s.toLowerCase());
-// This list is in fact incomplete
-export var buildingList = __convert(
-	[
-		'@core-shard, @core-foundation, @core-nucleus, @core-bastion, @core-acropolis',
-		'@mechanical-drill, @pneumatic-drill, @laser-drill, @blast-drill, @water-extractor, @cultivator, @oil-extractor',
-		'@conveyor, @titanium-conveyor, @plastanium-conveyor, @armored-conveyor, @junction, @bridge-conveyor, @phase-conveyor, @sorter, @inverted-sorter, @router, @distributor, @overflow-gate, @underflow-gate, @mass-driver',
-		'@conduit, @pulse-conveyor, @plated-conveyor, @rotary-pump, @thermal-pump, @conduit, @pipeline, @plated-pipeline, @liquid-router, @liquid-tank, @liquid-junction, @bridge-conduit, @phase-conveyor',
-		'@combustion-generator, @thermal-generator, @steam-generator, @differential-generator, @rtg-generator, @solar-panel, @large-solar-panel, @thorium-reactor, @impact-reactor, @battery, @large-battery, @power-node, @power-node-large, @surge-tower, @diode',
-		'@copper-wall, @large-copper-wall, @titanium-wall, @large-titanium-wall, @durium-wall, @large-durium-wall, @thorium-wall, @large-thorium-wall, @phase-wall, @large-phase-wall, @surge-wall, @large-surge-wall, @door, @large-door, @mender, @mend-projector, @force-projector, @overdrive-projector, @overdrive-dome, @repair-point, @repair-turret',
-		'@duo, @scatter, @scorch, @hail, @arc, @wave, @lancer, @swarmer, @salvo, @fuse, @ripple, @cyclone, @foreshadow, @spectre, @meltdown, @segment, @parallax, @tsunami',
-		'@dagger-factory, @mace-factory, @fortress-factory, @scepter-factory, @reign-factory',
-		'@nova-factory, @pulsar-factory, @quasar-factory, @vela-factory, @corvus-factory',
-		'@crawler-factory, @atrax-factory, @spiroct-factory, @arkyid-factory, @toxopid-factory',
-		'@silicon-smelter, @silicon-smelter2, @silicon-smelter3, @kiln, @plastanium-compressor, @phase-weaver, @surge-smelter, @cryofluid-mixer, @pyratite-mixer, @blast-mixer, @melter, @separator, @disassembler, @spore-press, @pulverizer, @coal-centrifuge, @multi-press',
-		'@container, @vault, @core-shard, @core-foundation, @core-nucleus, @unloader',
-		'@liquid-tank, @conduit, @liquid-router',
-		'@container, @vault, @unloader',
-		'@illuminator, @payload-conveyor, @payload-router, @incinerator, @power-source, @power-void, @item-source, @item-void, @liquid-source, @liquid-void, @payload-source, @payload-void, @message, @switch, @micro-processor, @logic-processor, @hyper-processor, @memory-cell, @memory-bank, @logic-display, @large-logic-display',
-		'@oxidis'
-	].join(',')
-);
+/*
+The content lists are the v152..v159 `logicids.dat` order: the position of a
+name inside its list IS its id (what `sensor x @id` returns). They used to be
+hand written and partly wrong, which made `lookup` and every id based
+conversion disagree with the game.
+*/
+export var objectList = CONTENT_ORDER.item.map(name => `@${name}`);
+export var liquidList = CONTENT_ORDER.liquid.map(name => `@${name}`);
+export var unitList = CONTENT_ORDER.unit.map(name => `@${name}`);
+export var buildingList = CONTENT_ORDER.block.map(name => `@${name}`);
 
 export var dynamicBuiltins = ['@this', '@thisx', '@thisy', '@links', '@ipt', '@pi', '@e', '@degToRad', '@radToDeg', '@time', '@tick', '@second', '@minute', '@waveNumber', '@waveTime', '@mapw', '@maph', '@server', '@client', '@clientLocale', '@clientName', '@clientTeam', '@clientUnit', '@clientMobile', '@blockCount', '@unitCount', '@itemCount', '@liquidCount'];

@@ -34,6 +34,7 @@ import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mi
 import { Optimizer } from "./mindcOptimizer.js";
 
 import { Instruction, SingleInstruction, InstructionBuilder, MemoryBlock, MemoryBlockInfo } from "./mindcGeneratorBase.js";
+import { ContentIdTable } from "./mindcContent.js";
 
 import { CodeGenerator } from "./mindcGenerator.js";
 
@@ -57,10 +58,16 @@ class SymbolTableEntry {
 // dependencies work in browsers on eart
 export class CompilerExtensionBase {
 	/**
+	 * @callback returnTypeCallback
+	 * @param {BuiltinCallNode} currentNode
+	 * @returns {TypeInfo}
+	 */
+	/**
 	 * 
 	 * @typedef {{
 	 * 		name: string,
 	 * 		returnType: string,
+	 * 		returnTypeEval: returnTypeCallback?,
 	 * 		parameters: string[],
 	 * 		hasVarArgs: boolean | undefined,
 	 * 		special: string | null | undefined
@@ -362,20 +369,154 @@ export class Compiler {
 			parserConfig.setAttribute('extraTypes', exTypes);
 			parserConfig.setAttribute('extraFunctions', exFuncs);
 			parserConfig.setAttribute('extraHandler', new Map(extensions.flatMap(ext => [...ext.handlers])));
+			const optimizerConfig = {};
+			/** @type {ContentIdTable} `#pragma id` / `#pragma var` definitions */
+			const contentTable = new ContentIdTable();
 			tokens.pragmas.forEach(
 				/**
 				 * 
 				 * @param {string} info 
 				 */
-				info => {
+				infos => {
+					const info = infos.substring(infos.indexOf('#pragma') + '#pragma'.length).trim();
 					if (info.startsWith("comment(")) {
 						// #pragma comment(attribute,value)
 						const comment = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')'));
 						const config = comment.split(',').map(s => s.trim());
 						if (config.length < 2) return;
-						parserConfig.setAttribute(config[0], config[1]);
+						parserConfig.setAttribute(config[0], JSON.parse(config[1]));
+					} else if (info.startsWith("optimize(")) {
+						/*
+						#pragma optimize(array[, mutable_optimize[, const_optimize]])
+						#pragma optimize(pointer)          -- name pointers, off by default
+						*/
+						const comment = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')'));
+						const config = comment.split(',').map(s => s.trim());
+						switch (config[0]) {
+							case "array":
+								optimizerConfig.doArrayOptimize = true;
+								if (config.length >= 2) {
+									optimizerConfig.arrayOptimize = JSON.parse(config[1]);
+								}
+								if (config.length >= 3) {
+									optimizerConfig.constArrayOptimize = JSON.parse(config[2]);
+								}
+								break;
+							case "pointer":
+								// Pointers may store the NAME of what they point at.
+								// Off unless asked for: it needs v150 and forbids
+								// pointer arithmetic on the affected pointers.
+								optimizerConfig.doPointerOptimize = true;
+								break;
+							case "struct_pointer":
+								/*
+								A pointer to a struct may carry the NAME of every
+								member instead of an address.
+								  #pragma optimize(struct_pointer)      -- any size
+								  #pragma optimize(struct_pointer, 4)   -- up to 4
+									 registers; larger structs stay in memory
+								With no number the threshold is 4 when memory is
+								available and unbounded when it is not (then there
+								is nowhere else to put them anyway).
+								*/
+								optimizerConfig.doStructPointerOptimize = true;
+								if (config.length >= 2) {
+									const parsed = Number(String(config[1]).trim());
+									if (Number.isFinite(parsed)) optimizerConfig.structPointerThreshold = parsed;
+								}
+								break;
+						}
+					} else if (info.startsWith("overload")) {
+						/*
+						#pragma overload(auto|default|none)
+						Reserved for function overloading: how the compiler may
+						react to several functions sharing a name, and to an
+						`auto` parameter (one version of the function per
+						representation of the argument). None of it is
+						implemented yet -- recording the mode is what lets the
+						semantic analyzer reject it with a clear message
+						instead of silently ignoring it.
+						*/
+						const comment = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')'));
+						const mode = String(comment).trim();
+						if (!['auto', 'default', 'none'].includes(mode)) {
+							throw new InternalGenerationFailure(
+								`#pragma overload expects auto, default or none, but got '${mode}'`);
+						}
+						this.overloadMode = mode;
+					} else if (info.startsWith("noinline")) {
+						/*
+						#pragma noinline        -- never inline anything automatically
+						#pragma noinline(fn)    -- never inline `fn` automatically
+						The `inline` keyword outranks both. The names are collected
+						in a LIST because other things may forbid automatic
+						inlining too, without going through a pragma.
+						*/
+						const rest = info.substring("noinline".length).trim();
+						optimizerConfig.noInlineList ??= [];
+						if (rest === '') {
+							optimizerConfig.noInlineAll = true;
+						} else if (rest.startsWith('(')) {
+							const body = rest.substring(1, rest.lastIndexOf(')'));
+							body.split(',').map(t => t.trim()).filter(Boolean)
+								.forEach(name => optimizerConfig.noInlineList.push(name));
+						}
+					} else if (info.startsWith("stackunderflow(")) {
+						/*
+						#pragma stackunderflow(fn) -- call `fn` when the stack is
+						                              walked below the first block
+						#pragma stackunderflow()   -- no check (this is the default)
+						*/
+						const handler = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')')).trim();
+						optimizerConfig.stackUnderflow = handler === '' ? false : handler;
+					} else if (info.startsWith("stackcheck(")) {
+						/*
+						#pragma stackcheck(fn) -- call `fn` when the stack frame cannot grow
+						#pragma stackcheck()   -- do not check the capacity at all
+						Without the pragma: write a fixed message to __error and stop.
+						*/
+						const handler = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')')).trim();
+						optimizerConfig.stackCheck = handler === '' ? false : handler;
+					} else if (info.startsWith("id(")) {
+						/*
+						#pragma id(item, @myitem:300)   -- give `@myitem` the id 300
+						#pragma id(unit, @oldname:null) -- the name has no id
+						These win over the built-in table.
+						*/
+						const body = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')'));
+						const parts = body.split(',').map(t => t.trim());
+						if (parts.length >= 2) {
+							const spec = parts.slice(1).join(',');
+							const at = spec.indexOf('@');
+							const colon = spec.lastIndexOf(':');
+							if (at >= 0 && colon > at) {
+								const name = spec.substring(at, colon).trim();
+								const raw = spec.substring(colon + 1).trim();
+								const id = (raw === 'null' || raw === '') ? null : Number(raw);
+								contentTable.define(parts[0], name,
+									(id === null || Number.isFinite(id)) ? id : null);
+							}
+						}
+					} else if (info.startsWith("var(")) {
+						/*
+						#pragma var(int, @myVar) -- a processor variable, like @this
+						*/
+						const body = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')'));
+						const parts = body.split(',').map(t => t.trim());
+						if (parts.length >= 2) {
+							const name = parts[1];
+							if (name.startsWith('@')) contentTable.defineVariable(name, parts[0]);
+						}
 					}
-			})
+			});
+			parserConfig.setAttribute('optimizeOption', optimizerConfig);
+			parserConfig.setAttribute('contentTable', contentTable);
+			/*
+			Declaring ids by hand means the built-in `lookup` tables no longer
+			necessarily match the processor the program runs on, so arrays must not
+			use them.
+			*/
+			if (contentTable.hasOverrides) optimizerConfig.lookupUnavailable = true;
 
 			this.parser = new Parser(this.lexer, parserConfig);
 			this.extraConfig = parserConfig;
