@@ -352,6 +352,14 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	structNamePointerAllowed(type = null) {
 		if (!type || !type.isTypeInfo) return false;
+		/*
+		Only a struct or a union has MEMBERS to carry by name. Without this a
+		pointer to a plain `int` qualified too: `(type.members ?? []).every(...)`
+		is vacuously true for an empty list, so `int *ss = byname(&c)` was given
+		a struct name packet instead of a name pointer -- and writing through it
+		then did nothing at all.
+		*/
+		if (type.kind !== 'struct' && type.kind !== 'union') return false;
 		const version = (this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0);
 		if (version < 150) return false;
 		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
@@ -904,6 +912,17 @@ export class CodeGenerator extends ASTVisitor {
 		*/
 		if (target instanceof NameStructPointerRet && !(source instanceof VariableRet)) {
 			return target.set(new ImmediateRet(this.glob, String(source), symbol.myType()));
+		}
+		/*
+		A (processor, name) pair cannot be stored in an ordinary pointer: that
+		one is (block, offset), and the block half would be read as a building
+		number that was never assigned.
+		*/
+		if (source instanceof RemotePointerRet && !(target instanceof RemotePointerRet)) {
+			this.addError(`A pointer to a 'remote' variable cannot be stored in an `
+				+ `ordinary pointer: declare it 'remote int *'`,
+				symbol.location ?? null);
+			return new Instruction([]);
 		}
 		if (target instanceof NamePointerRet && !(source instanceof VariableRet)) {
 			/*
@@ -2161,6 +2180,12 @@ export class CodeGenerator extends ASTVisitor {
 				*/
 				const isNamePacket = evaluation instanceof NameStructPointerRet
 					|| evaluation.getAttribute?.('isNameStructPointer') === true;
+				/*
+				`&rs`: the binding is (processor, name). Handing over the bare
+				register name would keep only one half of it, so the value has
+				to be passed as a whole.
+				*/
+				const isRemotePointer = evaluation instanceof RemotePointerRet;
 				if (symbol.accessThroughPointer || noCodeToRename || isNamePacket
 					|| evaluation.getAttribute('disallowReplacement')) {
 					finalize.concat(evaluation);
@@ -2179,7 +2204,8 @@ export class CodeGenerator extends ASTVisitor {
 						were built from.
 						*/
 						finalize.concat(this.writeSymbol(symbol,
-							isNamePacket ? evaluation : (evaluation.instructionReturn ?? 'null')));
+							(isNamePacket || isRemotePointer) ? evaluation
+								: (evaluation.instructionReturn ?? 'null')));
 					}
 				} else {
 					finalize.concat(evaluation.replace_variable(symbol.getAssemblySymbol(), evaluation.instructionReturn));
@@ -3817,6 +3843,8 @@ export class CodeGenerator extends ASTVisitor {
 	 * `{value_entry}` / `{pointer_block_entry}` / `{pointer_ptr_entry}` templates.
 	 */
 	processLValGetter(left, returnOnlyPointer = false, traditional = false) {
+
+
 		const lval = this.getLValue(left);
 		if (returnOnlyPointer) {
 			try {

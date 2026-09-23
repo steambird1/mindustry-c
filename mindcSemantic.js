@@ -1662,7 +1662,20 @@ export class SemanticAnalyzer extends ASTVisitor {
 			call-site notes decide -- is what lets one version take names while
 			another takes addresses, which a single function cannot do.
 			*/
-			const autoRep = param.autoRep ?? param.getAttribute?.('autoRep') ?? null;
+				/*
+				The signature is kept on the FUNCTION node and read back here.
+				Putting it on the parameter object instead did not survive: the
+				parameter list of a cloned node is not the object the visit walks.
+				*/
+				let autoRep = param?.autoRep ?? null;
+				if (!autoRep) {
+					const signature = node.getAttribute?.('autoReps') ?? null;
+					if (signature) {
+						const repsAll = String(signature).split('|');
+						const at = (node.parameters ?? []).indexOf(param);
+						if (at >= 0 && at < repsAll.length) autoRep = repsAll[at];
+					}
+				}
 			if (autoRep === 'name') {
 				paramSymbol.usesNamePointer = true;
 				paramSymbol.forcedNamePointer = true;
@@ -1883,6 +1896,25 @@ export class SemanticAnalyzer extends ASTVisitor {
 			here -- the rest of the compiler only ever sees the contents.
 			*/
 			this.consumeArrayDirective(declarator, varSymbol);
+			/*
+			`int *byname r` -- the pointer holds a NAME, so `*r` is
+			`read / write @this <the name>`. Written on the declaration it is an
+			explicit request, exactly like `byname(&c)`, and so it needs the
+			target version but not `#pragma optimize(pointer)`.
+
+			Only the parameter form and the `int *byname remote` form were
+			honoured; on a variable the qualifier was silently dropped and the
+			pointer fell back to a block/offset pair -- which is a memory
+			access, and therefore wrong for a pointer meant to carry a name.
+			*/
+			const pointeeKind = finalType.kind === 'pointer'
+				? (finalType.pointerTo?.kind ?? null) : null;
+			if (finalType.kind === 'pointer' && !varSymbol.isRemote
+				&& !['struct', 'union'].includes(pointeeKind)
+				&& this.hasByNameQualifier(declarator)) {
+				varSymbol.usesNamePointer = true;
+				varSymbol.forcedNamePointer = true;
+			}
 			/*
 			`int *remote p` -- a pointer that ITSELF lives in another processor.
 			Reaching it would mean reading two registers out of the other
@@ -3675,9 +3707,18 @@ export class SemanticAnalyzer extends ASTVisitor {
      * @returns {boolean}
      */
     namePointersEnabled() {
-        const config = this.compiler?.optimizerConfig ?? null;
-        if (config?.getAttribute?.('doPointerOptimize') === true) return true;
+        /*
+        The pragma lands in `extraConfig.optimizeOption` -- the same place the
+        generator reads it (`namePointerAllowed`). The two `optimizerConfig`
+        objects probed here do not exist, so this always answered false: an
+        `auto` parameter could never be given the 'name' representation, and
+        `#pragma optimize(pointer)` looked like it had no effect here at all.
+        */
+        const config = this.compiler?.extraConfig?.getAttribute?.('optimizeOption') ?? null;
         if (config?.doPointerOptimize === true) return true;
+        const fallback = this.compiler?.optimizerConfig ?? null;
+        if (fallback?.getAttribute?.('doPointerOptimize') === true) return true;
+        if (fallback?.doPointerOptimize === true) return true;
         return (this.compiler?.config?.getAttribute?.('doPointerOptimize') === true);
     }
 
@@ -4095,6 +4136,17 @@ export class SemanticAnalyzer extends ASTVisitor {
         const param = (template.parameters ?? [])[index];
         if (!param) return 'unknown';
         const type = this.getTypeInfo(this.getTypeNameFromTypeNode(param));
+        /*
+        Look at the PARAMETER before looking at the argument: whether there is
+        anything to decide follows from the parameter alone.
+
+        A SCALAR has exactly one representation, so `void f(auto int x)` is
+        simply `void f(int x)` -- nothing is specialised and no argument has to
+        be inspected. Refusing anything but a bare name here is what rejected
+        `f(3)`, `f((int)q)` and every other ordinary expression.
+        */
+        if (!type) return 'unknown';
+        if (type.kind !== 'array' && type.kind !== 'pointer') return 'scalar';
         let inner = arg;
         if (inner && inner.type === 'UnaryExpression' && inner.operator === '&') inner = inner.argument;
         const symbol = (inner && inner.type === 'Identifier')
@@ -4124,17 +4176,6 @@ export class SemanticAnalyzer extends ASTVisitor {
         }
         if (type && type.kind === 'pointer') {
             /*
-            An array with no address of its own has to travel as a handle; one
-            in memory travels as a pointer.
-            */
-            if (symbol.isRemote === true) return 'handle';
-            const requested = symbol.requestedArrayImplementation ?? null;
-            if (requested === 'traditional') return 'memory';
-            if (requested === null && !(this.compiler?.arrayOptimize === true)) return 'memory';
-            return 'handle';
-        }
-        if (type && type.kind === 'pointer') {
-            /*
             `&x` can be the NAME of x, which lets x stay in a register -- but
             only when x really is one plain register and name pointers are on.
             */
@@ -4143,8 +4184,17 @@ export class SemanticAnalyzer extends ASTVisitor {
                     const targetType = symbol.myType?.() ?? null;
                     const oneRegister = !!targetType && targetType.size === 1
                         && !['array', 'struct', 'union'].includes(targetType.kind);
+                    /*
+                    Whether `&x` can be a NAME has to be judged from what `x`
+                    IS, not from flags that taking its address has already set:
+                    `&x` marks the symbol `accessThroughPointer`, so asking for
+                    `!accessThroughPointer` here asked whether the address had
+                    been taken -- which it has, by definition. The answer was
+                    therefore always 'memory', and the 'name' version of an
+                    `auto` function was never emitted.
+                    */
                     const movable = !symbol.isVolatile && !symbol.isExtern && !symbol.isStatic
-                        && !symbol.accessThroughPointer && !symbol.needMemoryAllocation;
+                        && !symbol.needMemoryAllocation;
                     if (oneRegister && movable && this.namePointersEnabled()) return 'name';
                     return 'memory';
                 }
@@ -4298,7 +4348,12 @@ export class SemanticAnalyzer extends ASTVisitor {
                 for (let a = 0; a < autoIndices.length; a++) {
                     const paramIndex = autoIndices[a];
                     const paramName = template.parameters[paramIndex]?.name;
-                    if (reps[a] !== 'memory' && paramName
+                    /*
+                    `scalar` is exempt: `x + 1` on a plain int is arithmetic,
+                    not a pointer being stepped, so it says nothing about the
+                    representation.
+                    */
+                    if (reps[a] !== 'memory' && reps[a] !== 'scalar' && paramName
                         && this.autoBodyNeedsAddress(template, paramName)) {
                         this.addError(`Parameter '${paramName}' of '${originalName}' is 'auto', and this `
                             + `call hands it something that has no address (${reps[a]}) -- but the body `
@@ -4349,6 +4404,32 @@ export class SemanticAnalyzer extends ASTVisitor {
             const savedScope = this.currentScope;
             this.currentScope = this.globalScope;
             for (const instance of instances) this.visit(instance);
+            /*
+            Each version has to be told how its `auto` parameter arrives.
+
+            The choice was made from the call sites of the TEMPLATE, but a
+            version gets a fresh parameter symbol when it is visited -- and
+            `finalizeArrayParameters` decides from the notes gathered on that
+            symbol, of which a fresh one has none. It therefore fell back to
+            `traditional`, i.e. a pointer: right for a memory array, wrong for
+            one held in registers or in another processor. (Inlining hid this,
+            because an inlined parameter borrows the caller's array instead.)
+            */
+            for (const instance of instances) {
+                const signature = instance.getAttribute?.('autoReps') ?? null;
+                if (!signature) continue;
+                const reps = String(signature).split('|');
+                autoIndices.forEach((paramIndex, a) => {
+                    const rep = reps[a];
+                    if (!rep || rep === 'scalar') return;
+                    const paramNode = (instance.parameters ?? [])[paramIndex];
+                    const paramName = paramNode?.name ?? template.parameters?.[paramIndex]?.name;
+                    if (!paramName) return;
+                    const symbol = instance.scope?.lookupCurrent?.(paramName) ?? null;
+                    if (!symbol || symbol.myType?.()?.kind !== 'array') return;
+                    symbol.arrayParamRep = (rep === 'memory') ? 'traditional' : 'handle';
+                });
+            }
             this.currentScope = savedScope;
             for (const call of mine) {
                 if (call?.callee?.type !== 'Identifier') continue;

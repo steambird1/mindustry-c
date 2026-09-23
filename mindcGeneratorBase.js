@@ -1420,6 +1420,7 @@ export class MemoryManager {
 	0 - Previous block
 	1 - Next block
 	2 - Block size
+	3 - Base address (seems like that all AI tools have left that out. That's not good! -- Seabird)
 	*/
 	/**
 	 * 

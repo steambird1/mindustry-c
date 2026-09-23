@@ -1312,6 +1312,21 @@ export class Parser {
                 return null;
             }
             
+            /*
+            `static` / `extern` / `register` / `auto` start a statement that
+            `parseStatement` does not recognise as a type, so it lands here
+            instead of in `parseVariableDeclaration`. That path merges the
+            pointer levels the TYPE owns into the first declarator -- without
+            the same here, `extern int *byname r` inside a function lost both
+            the `*` and the qualifier written after it.
+            */
+			if (type.pointerDepth > 0) {
+				firstDeclarator.pointerDepth += type.pointerDepth;
+				firstDeclarator.pointerQualifiers =
+					firstDeclarator.pointerQualifiers.concat(type.pointerQualifiers);
+				type.pointerDepth = 0;
+				type.pointerQualifiers = [];
+			}
             declarators.push(firstDeclarator);
 			const varDecl = ASTBuilder.variableDeclaration(type, []);
 			

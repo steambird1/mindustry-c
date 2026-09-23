@@ -2377,8 +2377,15 @@ export class RemoteSlotRet extends VariableRet {
 
 	/** `&rs` -- the binding itself, so that it can be copied around. */
 	address() {
-		return new RemotePointerRet(this.glob, this.deviceReg, this.nameReg,
+		const ret = new RemotePointerRet(this.glob, this.deviceReg, this.nameReg,
 			pointerTypeOf(this.glob, this.type), this.instructions);
+		/*
+		It is TWO registers (processor + name). `replace_variable` would
+		rename the one it is told about and leave the other behind, so it has
+		to be handed over as a value instead.
+		*/
+		ret.setAttribute('disallowReplacement', true);
+		return ret;
 	}
 
 	get() {
@@ -3720,6 +3727,24 @@ export function symbolRef(glob, symbol) {
 	A pointer to a struct may carry the NAME of every member: one register per
 	member instead of a block/offset pair.
 	*/
+	/*
+	`remote int *p` -- the POINTEE is remote, so the pointer is the pair
+	(processor, name) rather than (block, offset). Reading it as the latter is
+	what made `remote int *p2 = &rs;` emit `p2_block`, a register that was never
+	assigned.
+	*/
+	if (!symbol.isRemote && type && type.kind === 'pointer'
+		&& (type.pointerTo?.qualifiers ?? []).includes('remote')
+		&& !symbol.accessThroughPointer && !symbol.needMemoryAllocation) {
+		const ret = new RemotePointerRet(glob, remoteDeviceRegOf(assembly),
+			remoteNameRegOf(assembly), type, []);
+		ret.setAttribute('relevantSymbol', symbol);
+		ret.setAttribute('relevantSymbolRead', symbol);
+		ret.setAttribute('isSymbolic', true);
+		ret.setAttribute('disallowReplacement', true);
+		return ret;
+	}
+
 	if (type && type.kind === 'pointer' && glob.generator?.structNamePointerAllowed?.(type.pointerTo)
 		&& (symbol.usesNamePointer === true || symbol.forcedNamePointer === true
 			|| symbol.addressedByName === true)) {

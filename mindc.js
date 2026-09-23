@@ -1,11 +1,6 @@
 /*
 MinCCompiler on JS
-By Seabird Starch Gunnhildr and Deepseek, 2025 - 2026.
-
-WARNING and DISCLAIMER:
-
-This code is only tested by some very small and simple samples
-so far.
+By Seabird Starch Gunnhildr, Hunyuan and Deepseek, 2025 - 2026.
 */
 
 import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
@@ -134,6 +129,8 @@ const exampleExtension = new CompilerExtensionBase(
 /**
  * Pseudo list type (so that you can store device/content_t!)
  * The pseudo list uses binary search.
+ * 
+ * @deprecated You should use newly-implemented lists
  */
 export const pseudoList = new CompilerExtensionBase(
 	new Map(
